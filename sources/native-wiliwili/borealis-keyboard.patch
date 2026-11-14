@@ -1,0 +1,654 @@
+diff --git a/library/include/borealis/core/application.hpp b/library/include/borealis/core/application.hpp
+index cfff62bf..5c4781a4 100644
+--- a/library/include/borealis/core/application.hpp
++++ b/library/include/borealis/core/application.hpp
+@@ -177,6 +177,11 @@ class Application
+ 
+     static void onKeyboardPressed(BrlsKeyCombination key, bool repeating);
+ 
++    // Optional app-level keyboard behavior; fallback runs only after native actions.
++    inline static std::function<bool(BrlsKeyCombination, bool, bool)> keyboardShortcutHandler;
++    inline static std::function<void(NVGcontext*)> keyboardOverlayRenderer;
++    inline static std::function<bool(ControllerButton, bool)> controllerShortcutHandler;
++
+     /**
+      * "Crashes" the app (displays a fullscreen CrashFrame)
+      */
+@@ -203,6 +208,9 @@ class Application
+     static std::string* getCommonFooter();
+ 
+     inline static float windowScale;
++    // Desktop applications can keep controls readable as the viewport narrows.
++    inline static float minimumWindowScale = 0;
++    inline static float maximumWindowScale = 0;
+ 
+     /**
+      * Sets whether BUTTON_START will globally be used to close the application.
+diff --git a/library/include/borealis/core/input.hpp b/library/include/borealis/core/input.hpp
+index 14580244..029980ed 100644
+--- a/library/include/borealis/core/input.hpp
++++ b/library/include/borealis/core/input.hpp
+@@ -320,6 +320,10 @@ class InputManager
+ 
+     virtual bool getKeyboardKeyState(BrlsKeyboardScancode state) = 0;
+ 
++    // Event-based backends retain the modifiers belonging to the key press,
++    // even when press and release are both processed before the next frame.
++    virtual short getKeyboardKeyModifiers(BrlsKeyboardScancode key, short fallback) { return fallback; }
++
+     /**
+      * Called once every frame to fill the given RawTouchState struct with the raw touch data.
+      */
+diff --git a/library/include/borealis/platforms/sdl/sdl_input.hpp b/library/include/borealis/platforms/sdl/sdl_input.hpp
+index fbc255eb..99e5af68 100644
+--- a/library/include/borealis/platforms/sdl/sdl_input.hpp
++++ b/library/include/borealis/platforms/sdl/sdl_input.hpp
+@@ -22,6 +22,7 @@ class SDLInputManager : public InputManager
+     void updateControllerState(ControllerState* state, int controller) override;
+ 
+     bool getKeyboardKeyState(BrlsKeyboardScancode state) override;
++    short getKeyboardKeyModifiers(BrlsKeyboardScancode key, short fallback) override;
+ 
+     void updateTouchStates(std::vector<RawTouchState>* states) override;
+ 
+diff --git a/library/include/borealis/views/edit_text_dialog.hpp b/library/include/borealis/views/edit_text_dialog.hpp
+index 5fb4f4fe..dbe55bd8 100644
+--- a/library/include/borealis/views/edit_text_dialog.hpp
++++ b/library/include/borealis/views/edit_text_dialog.hpp
+@@ -11,13 +11,22 @@ class EditTextDialog : public Box
+     EditTextDialog();
+     ~EditTextDialog() override;
+     void open();
++    void setDockTarget(const std::string& id);
+     void setText(const std::string& value);
++    std::string getText() const { return content; }
++    void setSelected(bool value) { selected = value; updateUI(); }
++    void setComposing(bool value) {
++        if (composing || value) submitAfter = getCPUTimeUsec() + 180000;
++        composing = value;
++    }
++    bool acceptsSubmit() const { return !composing && getCPUTimeUsec() >= submitAfter; }
+     void setHeaderText(const std::string& value);
+     void setHintText(const std::string& value);
+     void setCountText(const std::string& value);
+     void setCursor(int cursor);
+     bool isTranslucent() override;
+     void onLayout() override;
++    void draw(NVGcontext* vg, float x, float y, float width, float height, Style style, FrameContext* ctx) override;
+     Event<Point>* getLayoutEvent();
+     Event<>* getBackspaceEvent();
+     Event<>* getCancelEvent();
+@@ -25,16 +34,19 @@ class EditTextDialog : public Box
+     Event<std::string>* getClipboardEvent();
+     void updateUI();
+   private:
++    std::string dockTarget;
+     std::string content;
+     std::string hint;
+     Event<Point> layoutEvent;
+     Event<> backspaceEvent, cancelEvent, summitEvent;
+     Event<std::string> clipboardEvent;
+     bool init = false;
++    bool selected = false, composing = false;
++    Time submitAfter = 0;
+ 
+     BRLS_BIND(brls::Label, header, "brls/dialog/header");
+     BRLS_BIND(brls::Label, label, "brls/dialog/label");
+     BRLS_BIND(brls::Label, count, "brls/dialog/count");
+     BRLS_BIND(brls::Box, container, "brls/container");
+ };
+-}
+\ No newline at end of file
++}
+diff --git a/library/include/borealis/views/label.hpp b/library/include/borealis/views/label.hpp
+index 62459bae..50d09f59 100644
+--- a/library/include/borealis/views/label.hpp
++++ b/library/include/borealis/views/label.hpp
+@@ -96,6 +96,9 @@ class Label : public View
+     void setVerticalAlign(VerticalAlign align);
+ 
+     void setFontSize(float value);
++    // Scale typography independently from layout and icon sizes on desktop.
++    inline static float FONT_SCALE = 1.0f;
++    float getRenderedFontSize() const;
+     void setFontQuality(float value);
+     void setLineHeight(float value);
+     void setTextColor(NVGcolor color);
+diff --git a/library/lib/core/application.cpp b/library/lib/core/application.cpp
+index a45103da..0d8a1437 100644
+--- a/library/lib/core/application.cpp
++++ b/library/lib/core/application.cpp
+@@ -32,6 +32,7 @@
+ #include <borealis/core/util.hpp>
+ #include <borealis/views/bottom_bar.hpp>
+ #include <borealis/views/button.hpp>
++#include <borealis/views/edit_text_dialog.hpp>
+ #include <borealis/views/cells/cell_bool.hpp>
+ #include <borealis/views/cells/cell_input.hpp>
+ #include <borealis/views/cells/cell_radio.hpp>
+@@ -409,10 +410,16 @@ void Application::processInput()
+     const bool altPressed   = inputManager->getKeyboardKeyState(BRLS_KBD_KEY_LEFT_ALT) || inputManager->getKeyboardKeyState(BRLS_KBD_KEY_RIGHT_ALT);
+     const bool shiftPressed = inputManager->getKeyboardKeyState(BRLS_KBD_KEY_LEFT_SHIFT) || inputManager->getKeyboardKeyState(BRLS_KBD_KEY_RIGHT_SHIFT);
+     const bool metaPressed  = inputManager->getKeyboardKeyState(BRLS_KBD_KEY_LEFT_SUPER) || inputManager->getKeyboardKeyState(BRLS_KBD_KEY_RIGHT_SUPER);
++    const short fallbackModifiers = (ctrlPressed ? BRLS_KBD_MODIFIER_CTRL : 0) |
++        (altPressed ? BRLS_KBD_MODIFIER_ALT : 0) | (shiftPressed ? BRLS_KBD_MODIFIER_SHIFT : 0) |
++        (metaPressed ? BRLS_KBD_MODIFIER_META : 0);
++    std::unordered_map<int, bool> pressedKeys;
+     for (size_t i = 0; i < watchedKeys.size(); i++)
+     {
+         auto& watchedKey    = watchedKeys[i];
+         auto& oldWatchedKey = oldWatchedKeys[i];
++        const auto combination = watchedKey.key;
++        bool fireKey = false;
+ 
+         const BrlsKeyboardScancode scancode = watchedKey.getScancode();
+         if (scancode == BRLS_KBD_KEY_UNKNOWN)
+@@ -420,11 +427,11 @@ void Application::processInput()
+             continue;
+         }
+ 
+-        watchedKey.pressed = inputManager->getKeyboardKeyState(scancode);
+-        if (static_cast<bool>(watchedKey.getModifiers() & BRLS_KBD_MODIFIER_SHIFT) != shiftPressed ||
+-            static_cast<bool>(watchedKey.getModifiers() & BRLS_KBD_MODIFIER_CTRL) != ctrlPressed ||
+-            static_cast<bool>(watchedKey.getModifiers() & BRLS_KBD_MODIFIER_ALT) != altPressed ||
+-            static_cast<bool>(watchedKey.getModifiers() & BRLS_KBD_MODIFIER_META) != metaPressed)
++        // Read sticky state once per scancode. F10 must not consume Ctrl+F10's
++        // pending press before the matching combination is checked.
++        if (!pressedKeys.count(scancode)) pressedKeys[scancode] = inputManager->getKeyboardKeyState(scancode);
++        watchedKey.pressed = pressedKeys[scancode];
++        if (watchedKey.getModifiers() != inputManager->getKeyboardKeyModifiers(scancode, fallbackModifiers))
+         {
+             // If the key is pressed but the modifiers are not, unpressed it
+             watchedKey.pressed = false;
+@@ -441,7 +448,7 @@ void Application::processInput()
+                 watchedKey.repeatingStop = cpuTime + BUTTOM_REPEAT_TRIGGER;
+ 
+             if (!oldWatchedKey.pressed || repeating)
+-                onKeyboardPressed(watchedKey.key, repeating);
++                fireKey = true;
+         }
+         else
+         {
+@@ -449,6 +456,9 @@ void Application::processInput()
+         }
+ 
+         oldWatchedKeys[i] = watchedKeys[i];
++        // Actions may create dialogs and grow the watched-key vectors. Release
++        // all references before invoking app code to avoid invalidation.
++        if (fireKey) onKeyboardPressed(combination, repeating);
+     }
+ }
+ 
+@@ -584,6 +594,7 @@ void Application::navigate(FocusDirection direction, bool repeating)
+ 
+ void Application::onControllerButtonPressed(enum ControllerButton button, bool repeating)
+ {
++    if (controllerShortcutHandler && controllerShortcutHandler(button, repeating)) return;
+ 
+     // Actions
+     if (Application::handleAction(ACTION_GAMEPAD, button, repeating))
+@@ -616,7 +627,9 @@ void Application::onControllerButtonPressed(enum ControllerButton button, bool r
+ 
+ void Application::onKeyboardPressed(BrlsKeyCombination key, bool repeating)
+ {
+-    Application::handleAction(ACTION_KEYBOARD, key, repeating);
++    if (keyboardShortcutHandler && keyboardShortcutHandler(key, repeating, false)) return;
++    if (Application::handleAction(ACTION_KEYBOARD, key, repeating)) return;
++    if (keyboardShortcutHandler) keyboardShortcutHandler(key, repeating, true);
+ }
+ 
+ bool Application::setInputType(InputType type)
+@@ -698,7 +711,11 @@ bool Application::handleAction(const ActionType type, const int button, const bo
+ {
+     // Dismiss if input type was changed
+     if (type == ACTION_GAMEPAD && button == BUTTON_A && setInputType(InputType::GAMEPAD))
+-        return false;
++    {
++        // Text input accepts the first Enter after mouse movement as well.
++        if (activitiesStack.empty() || !dynamic_cast<EditTextDialog*>(activitiesStack.back()->getContentView()))
++            return false;
++    }
+ 
+     if (Application::activitiesStack.empty())
+         return false;
+@@ -791,6 +808,7 @@ void Application::frame()
+     }
+ 
+     // Notifications
++    if (keyboardOverlayRenderer) keyboardOverlayRenderer(frameContext.vg);
+     Application::notificationManager->frame(&frameContext);
+ 
+     if (isDrawCursor())
+@@ -1171,11 +1189,25 @@ void Application::setWindowSize(int width, int height)
+ 
+     // Rescale UI
+     Application::windowScale   = (float)width / (float)ORIGINAL_WINDOW_WIDTH;
+-    Application::contentWidth  = (float)ORIGINAL_WINDOW_WIDTH;
++    if (minimumWindowScale > 0)
++        Application::windowScale = std::max(Application::windowScale, std::min(minimumWindowScale, width / 960.f));
++    if (maximumWindowScale > 0)
++        Application::windowScale = std::min(Application::windowScale, maximumWindowScale);
++    Application::contentWidth  = std::ceil((float)width / Application::windowScale);
+     Application::contentHeight = std::ceil((float)height / Application::windowScale);
+ 
+-    for (Activity* activity : Application::activitiesStack)
++    // Font metrics depend on the desktop scale even when a label's logical
++    // bounds stay unchanged. Invalidate measurements before laying out again.
++    std::function<void(View*)> invalidateText = [&](View* view) {
++        if (!view) return;
++        if (YGNodeHasMeasureFunc(view->getYGNode())) YGNodeMarkDirty(view->getYGNode());
++        if (auto* box = dynamic_cast<Box*>(view))
++            for (auto* child : box->getChildren()) invalidateText(child);
++    };
++    for (Activity* activity : Application::activitiesStack) {
++        invalidateText(activity->getContentView());
+         activity->onWindowSizeChanged();
++    }
+ 
+     brls::Application::setActiveEvent(true);
+ }
+diff --git a/library/lib/core/view.cpp b/library/lib/core/view.cpp
+index 59ec77bb..ecb1c69b 100644
+--- a/library/lib/core/view.cpp
++++ b/library/lib/core/view.cpp
+@@ -767,7 +767,10 @@ ActionIdentifier View::registerAction(const std::string& hintText, ButtonType bu
+     ActionIdentifier nextIdentifier = (this->actions.size() == 0) ? 1 : this->actions.back()->getIdentifier() + 1;
+     auto newAction                  = std::make_shared<ActionType>(button, nextIdentifier, hintText, true, hidden, allowRepeating, sound, actionListener);
+ 
+-    auto it = getAction(button);
++    // Keyboard codes and ActionIdentifier are both int. Explicitly select the
++    // button lookup: the non-template overload would match an unrelated action
++    // by registration ID (e.g. registering '0' could replace the 'v' shortcut).
++    auto it = getAction<ButtonType>(button);
+     if (it != this->actions.end())
+     {
+         *it = newAction;
+diff --git a/library/lib/platforms/sdl/sdl_ime.cpp b/library/lib/platforms/sdl/sdl_ime.cpp
+index 437156d0..f63663e1 100644
+--- a/library/lib/platforms/sdl/sdl_ime.cpp
++++ b/library/lib/platforms/sdl/sdl_ime.cpp
+@@ -35,7 +35,11 @@ namespace brls
+ {
+     SDLImeManager::SDLImeManager(Event<SDL_Event*> *event):
+     event(event),
+-    cursor(-1){}
++    cursor(-1){
++        // SDL2 enables text input at video startup. Keep navigation keys out of
++        // the IME until an editor opens, especially with the X11/Fcitx backend.
++        SDL_StopTextInput();
++    }
+ 
+     static int utf8_len(std::string &s) {
+         int result = 0;
+@@ -88,6 +92,8 @@ namespace brls
+         std::string initialText) {
+         EditTextDialog* dialog = new EditTextDialog();
+         this->inputBuffer = initialText;
++        this->editingBuffer.clear(); this->isEditing = false;
++        auto selected = std::make_shared<bool>(false);
+ #ifdef __PSV__
+         vita_ime_init_text = reinterpret_cast<uint8_t *>(const_cast<char *>(this->inputBuffer.c_str()));
+         vita_ime_max_text = maxStringLength;
+@@ -113,7 +119,8 @@ namespace brls
+             }
+             dialog->setCursor(cursor);
+         };
+-        auto updateTextAndCursor = [this, updateText, updateTextCursor, maxStringLength](std::string text) {
++        auto updateTextAndCursor = [this, dialog, selected, updateText, updateTextCursor, maxStringLength](std::string text) {
++            if (*selected) { inputBuffer.clear(); cursor = -1; *selected = false; dialog->setSelected(false); }
+             int prev_n = utf8_len(this->inputBuffer);
+             if (prev_n >= maxStringLength) {
+                 return;
+@@ -139,14 +146,15 @@ namespace brls
+         cursor = -1;
+         updateText();
+         if(!initialText.empty()) updateTextCursor();
+-#if defined(BOREALIS_USE_D3D11)
+-        float scale = Application::windowScale;
+- #else
+-        float scale = Application::windowScale / Application::getPlatform()->getVideoContext()->getScaleFactor();
+-#endif
+         // 更新输入法条位置
+-        dialog->getLayoutEvent()->subscribe([scale](Point p) {
++        dialog->getLayoutEvent()->subscribe([](Point p) {
+ #ifndef PS4
++#if defined(BOREALIS_USE_D3D11)
++            float scale = Application::windowScale;
++#else
++            float scale = Application::windowScale / Application::getPlatform()->getVideoContext()->getScaleFactor();
++#endif
++            // Re-read the current scale after resize/fullscreen transitions.
+             const SDL_Rect rect = {(int)(p.x* scale), (int)(p.y * scale), 100, 20};
+             SDL_SetTextInputRect(&rect);
+ #endif
+@@ -158,10 +166,11 @@ namespace brls
+                 updateTextAndCursor(str);
+             });
+ 
+-        auto eventID1 = event->subscribe([this, updateTextAndCursor, updateText, updateTextCursor](SDL_Event *e) {
++        auto eventID1 = event->subscribe([this, dialog, updateTextAndCursor, updateText, updateTextCursor](SDL_Event *e) {
+             switch (e->type) {
+             case SDL_TEXTINPUT:
+                 this->isEditing = false;
++                this->editingBuffer.clear(); dialog->setComposing(false);
+                 updateTextAndCursor(e->text.text);
+                 break;
+             case SDL_TEXTEDITING:
+@@ -171,6 +180,7 @@ namespace brls
+                     this->isEditing = true;
+                 }
+                 this->editingBuffer = e->edit.text;
++                dialog->setComposing(this->isEditing);
+                 updateTextCursor();
+                 updateText();
+                 break;
+@@ -205,7 +215,9 @@ namespace brls
+         );
+ 
+         // delete text
+-        dialog->getBackspaceEvent()->subscribe([this, updateText, updateTextCursor](...) {
++        dialog->getBackspaceEvent()->subscribe([this, dialog, selected, updateText, updateTextCursor](...) {
++            if (isEditing) return true;
++            if (*selected) { inputBuffer.clear(); cursor = -1; *selected = false; dialog->setSelected(false); updateText(); updateTextCursor(); return true; }
+             if(inputBuffer.empty()) return true;
+             if (this->cursor == (int)CursorPosition::START) return true;
+             if (this->cursor > (int)CursorPosition::START) {
+@@ -223,6 +235,16 @@ namespace brls
+         });
+ 
+         // cancel
++        dialog->registerAction({BRLS_KBD_KEY_A, BRLS_KBD_MODIFIER_CTRL}, [this, dialog, selected](...) {
++            if (!isEditing) { *selected = true; dialog->setSelected(true); }
++            return true;
++        });
++        dialog->registerAction({BRLS_KBD_KEY_HOME}, [this, selected, dialog, updateTextCursor](...) {
++            if (!isEditing) { *selected = false; dialog->setSelected(false); cursor = 0; updateTextCursor(); } return true;
++        });
++        dialog->registerAction({BRLS_KBD_KEY_END}, [this, selected, dialog, updateTextCursor](...) {
++            if (!isEditing) { *selected = false; dialog->setSelected(false); cursor = -1; updateTextCursor(); } return true;
++        });
+         dialog->getCancelEvent()->subscribe([this, eventID1]() {
+             SDL_StopTextInput();
+             event->unsubscribe(eventID1);
+@@ -281,4 +303,4 @@ namespace brls
+         },headerText, subText, maxStringLength, initialText);
+         return true;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/library/lib/platforms/sdl/sdl_input.cpp b/library/lib/platforms/sdl/sdl_input.cpp
+index 52b31e18..9d73b6c5 100644
+--- a/library/lib/platforms/sdl/sdl_input.cpp
++++ b/library/lib/platforms/sdl/sdl_input.cpp
+@@ -317,6 +317,7 @@ static const size_t SDL_BUTTONS_MAPPING[SDL_GAMEPAD_BUTTON_MAX] = {
+ };
+ 
+ static std::unordered_map<SDL_Scancode, int> keyboardKeys {};
++static std::unordered_map<SDL_Scancode, short> keyboardKeyModifiers {};
+ 
+ static const size_t SDL_AXIS_MAPPING[SDL_GAMEPAD_AXIS_MAX] = {
+     LEFT_X,
+@@ -394,6 +395,14 @@ static int sdlEventWatcher(void* data, SDL_Event* event)
+     else if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP)
+     {
+         keyboardKeys[event->key.keysym.scancode] = event->type == SDL_KEYDOWN ? SDL_PRESSED : SDL_STICKY;
++        if (event->type == SDL_KEYDOWN) {
++            auto mod = event->key.keysym.mod;
++            keyboardKeyModifiers[event->key.keysym.scancode] =
++                (mod & KMOD_SHIFT ? BRLS_KBD_MODIFIER_SHIFT : 0) |
++                (mod & KMOD_CTRL ? BRLS_KBD_MODIFIER_CTRL : 0) |
++                (mod & KMOD_ALT ? BRLS_KBD_MODIFIER_ALT : 0) |
++                (mod & KMOD_GUI ? BRLS_KBD_MODIFIER_META : 0);
++        }
+     }
+     Application::setActiveEvent(true);
+     return 0;
+@@ -539,6 +548,12 @@ bool SDLInputManager::getKeyboardKeyState(BrlsKeyboardScancode key)
+     return getKeyboardKeys(brlsToSdlKeyboardScancode(key));
+ }
+ 
++short SDLInputManager::getKeyboardKeyModifiers(BrlsKeyboardScancode key, short fallback)
++{
++    auto found = keyboardKeyModifiers.find(brlsToSdlKeyboardScancode(key));
++    return found == keyboardKeyModifiers.end() ? fallback : found->second;
++}
++
+ void SDLInputManager::updateTouchStates(std::vector<RawTouchState>* states)
+ {
+     int devices = SDL_GetNumTouchDevices();
+@@ -612,6 +627,10 @@ void SDLInputManager::updateMouseMotion(SDL_MouseMotionEvent event)
+ {
+     if (pointerLocked && SDL_ShowCursor(SDL_QUERY) == SDL_DISABLE)
+     {
++        if (event.xrel == 0 && event.yrel == 0)
++            return;
++        pointerOffsetBuffer.x += float(event.xrel);
++        pointerOffsetBuffer.y += float(event.yrel);
+         getMouseCusorOffsetChanged()->fire(Point(float(event.xrel), float(event.yrel)));
+ 
+         int width, height;
+@@ -656,6 +675,7 @@ void SDLInputManager::updateControllerSensorsUpdate(SDL_ControllerSensorEvent ev
+ void SDLInputManager::updateKeyboardState(SDL_KeyboardEvent event)
+ {
+     auto* self = (SDLInputManager*)Application::getPlatform()->getInputManager();
++    if (std::getenv("WILI_AI_DIAGNOSTICS")) Logger::debug("AI keyboard: scancode={} mods={} pressed={}", (int)event.keysym.scancode, (int)event.keysym.mod, event.type == SDL_KEYDOWN);
+     KeyState state {};
+     state.key     = sdlToBrlsKeyboardScancode(event.keysym.scancode);
+     state.pressed = event.type == SDL_KEYDOWN;
+diff --git a/library/lib/views/edit_text_dialog.cpp b/library/lib/views/edit_text_dialog.cpp
+index 62a30943..2e3ef052 100644
+--- a/library/lib/views/edit_text_dialog.cpp
++++ b/library/lib/views/edit_text_dialog.cpp
+@@ -17,65 +17,25 @@ namespace brls
+ {
+ 
+     const std::string editTextDialogXML = R"xml(
+-    <brls:Box
+-        id="brls/container"
+-        width="auto"
+-        height="auto"
+-        axis="column"
+-        justifyContent="flexStart"
+-        alignItems="center"
+-        focusable="true"
+-        hideHighlight="true"
+-        backgroundColor="@theme/brls/backdrop">
+-
+-        <brls:Label
+-            id="brls/dialog/header"
+-            fontSize="24")xml"
+-#ifdef __PSV__
+-            R"xml(marginTop="30")xml"
+-#else
+-            R"xml(marginTop="50")xml"
+-#endif
+-      R"xml(marginBottom="30"
+-            textColor="#FFFFFF"/>
+-
+-        <brls:Box
+-            id="brls/dialog/applet"
+-            width="720"
+-            cornerRadius="4"
+-            alignItems="flexEnd"
+-            axis="column"
+-            backgroundColor="@theme/brls/background">
+-
+-            <brls:Label
+-                id="brls/dialog/label"
+-                grow="1"
+-                width="680"
+-                cursor="-1"
+-                minHeight="30"
+-                margin="20"
+-                autoAnimate="false"
+-                verticalAlign="top"/>
+-
+-            <brls:Label
+-                id="brls/dialog/count"
+-                width="680"
+-                horizontalAlign="right"
+-                fontSize="18"
+-                textColor="@theme/brls/text_disabled"
+-                marginRight="30"
+-                marginBottom="10"/>
+-
+-            <brls:Hints
+-                allowAButtonTouch="true"
+-                forceShown="true"
+-                addBaseAction="false"
+-                marginBottom="20"
+-                marginRight="10"
+-                width="auto"
+-                height="auto"/>
++    <brls:Box id="brls/container" width="auto" height="auto" axis="column"
++        justifyContent="center" alignItems="center" focusable="true"
++        hideHighlight="true" backgroundColor="@theme/brls/backdrop">
++        <brls:Box id="brls/dialog/applet" width="760" cornerRadius="16"
++            padding="24" axis="column" backgroundColor="@theme/desktop/surface">
++            <brls:Label id="brls/dialog/header" fontSize="24" textColor="@theme/brls/text"/>
++            <brls:Box width="100%" axis="column" marginTop="18" cornerRadius="10"
++                padding="16" borderThickness="1" borderColor="@theme/desktop/line"
++                backgroundColor="@theme/desktop/soft">
++                <brls:Label id="brls/dialog/label" width="100%" cursor="-1"
++                    minHeight="30" fontSize="20" autoAnimate="false" verticalAlign="top"/>
++            </brls:Box>
++            <brls:Box width="100%" axis="row" marginTop="16" alignItems="center">
++                <brls:Label grow="1" fontSize="16" textColor="@theme/font/grey"
++                    text="Enter 提交   ·   Esc 取消   ·   Ctrl+V 粘贴"/>
++                <brls:Label id="brls/dialog/count" horizontalAlign="right"
++                    fontSize="14" textColor="@theme/font/grey"/>
++            </brls:Box>
+         </brls:Box>
+-
+     </brls:Box>
+     )xml";
+ 
+@@ -87,6 +47,7 @@ namespace brls
+         this->registerAction(
+             "hints/ok"_i18n, BUTTON_A, [this](...)
+             {
++                if (!acceptsSubmit()) return true;
+                 Application::popActivity(EDIT_TEXT_DIALOG_POP_ANIMATION, [this](){
+                         this->summitEvent.fire();
+                     });
+@@ -94,6 +55,7 @@ namespace brls
+         this->registerAction(
+             "hints/ok"_i18n, BUTTON_START, [this](...)
+             {
++                if (!acceptsSubmit()) return true;
+                 Application::popActivity(EDIT_TEXT_DIALOG_POP_ANIMATION, [this](){
+                         this->summitEvent.fire();
+                     });
+@@ -198,6 +160,37 @@ namespace brls
+         return EDIT_TEXT_DIALOG_BACKGROUND_TRANSLUCENT;
+     }
+ 
++    void EditTextDialog::setDockTarget(const std::string& id)
++    {
++        dockTarget = id;
++        container->setBackgroundColor(nvgRGBA(0, 0, 0, 0));
++        auto* card = getView("brls/dialog/applet");
++        card->setPositionType(PositionType::ABSOLUTE);
++        card->setBorderThickness(1);
++        card->setBorderColor(Application::getTheme().getColor("desktop/line"));
++        label->setMaxHeight(160);
++        invalidate();
++    }
++
++    void EditTextDialog::draw(NVGcontext* vg, float x, float y, float width, float height, Style style, FrameContext* ctx)
++    {
++        if (!dockTarget.empty()) {
++            for (auto* activity : Application::getActivitiesStack()) {
++                if (activity == getParentActivity()) continue;
++                auto* target = activity->getView(dockTarget);
++                if (!target) continue;
++                auto* card = getView("brls/dialog/applet");
++                auto rect = target->getFrame();
++                if (card->getWidth() != rect.getWidth() - 32) card->setWidth(rect.getWidth() - 32);
++                if (card->getX() != rect.getMinX() + 16) card->setPositionLeft(rect.getMinX() + 16);
++                float top = rect.getMaxY() - card->getHeight() - 16;
++                if (card->getY() != top) card->setPositionTop(top);
++                break;
++            }
++        }
++        Box::draw(vg, x, y, width, height, style, ctx);
++    }
++
+     void EditTextDialog::onLayout()
+     {
+         if (!init)
+@@ -244,6 +237,8 @@ namespace brls
+             label->setTextColor(Application::getTheme().getColor("brls/text"));
+             label->setText(content);
+         }
++        label->setBackgroundColor(selected ? Application::getTheme().getColor("brls/accent") : nvgRGBA(0,0,0,0));
++        if (selected) label->setTextColor(nvgRGB(255,255,255));
+     }
+ 
+     void EditTextDialog::setCursor(int cursor) {
+diff --git a/library/lib/views/label.cpp b/library/lib/views/label.cpp
+index 0e0474c1..2f6d83b0 100644
+--- a/library/lib/views/label.cpp
++++ b/library/lib/views/label.cpp
+@@ -16,6 +16,7 @@
+ */
+ 
+ #include <yoga/YGNode.h>
++#include <cmath>
+ 
+ #include <borealis/core/application.hpp>
+ #include <borealis/core/font.hpp>
+@@ -106,7 +107,7 @@ static YGSize labelMeasureFunc(YGNodeRef node, float width, YGMeasureMode widthM
+     }
+ 
+     // Setup nvg state for the measurements
+-    nvgFontSize(vg, label->getFontSize());
++    nvgFontSize(vg, label->getRenderedFontSize());
+     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+     nvgFontFaceId(vg, label->getFont());
+     nvgTextLineHeight(vg, label->getLineHeight());
+@@ -450,7 +451,7 @@ void Label::draw(NVGcontext* vg, float x, float y, float width, float height, St
+     enum NVGalign vertAlign  = this->getNVGVerticalAlign();
+     int cursor_position = -1;
+ 
+-    nvgFontSize(vg, this->fontSize);
++    nvgFontSize(vg, this->getRenderedFontSize());
+     nvgTextAlign(vg, horizAlign | vertAlign);
+     nvgFontFaceId(vg, this->font);
+     nvgFontQuality(vg, this->fontQuality);
+@@ -469,7 +470,7 @@ void Label::draw(NVGcontext* vg, float x, float y, float width, float height, St
+     if (this->animating)
+     {
+         nvgSave(vg);
+-        float scissorHeight = fontSize * lineHeight;
++        float scissorHeight = getRenderedFontSize() * lineHeight;
+         nvgIntersectScissor(vg, x, y, width, scissorHeight < height ? height : scissorHeight);
+ 
+         float baseX   = x - this->scrollingAnimation;
+@@ -596,7 +597,7 @@ void Label::onLayout()
+         // Compute the position of the ellipsis (in chars), should the string be truncated
+         // Cannot do it in the measure function because the margins are not applied yet there
+         auto vg = Application::getNVGContext();
+-        nvgFontSize(vg, this->fontSize);
++        nvgFontSize(vg, this->getRenderedFontSize());
+         nvgTextAlign(vg, this->getNVGHorizontalAlign() | this->getNVGVerticalAlign());
+         nvgFontFaceId(vg, this->font);
+         nvgTextLineHeight(vg, this->lineHeight);
+@@ -638,6 +639,16 @@ float Label::getFontSize()
+     return this->fontSize;
+ }
+ 
++float Label::getRenderedFontSize() const
++{
++    const float scale = std::max(.01f, Application::windowScale);
++    // Keep the established tiled-window density; give wide desktop windows
++    // a modest reading-size increase instead of freezing every glyph at 12px.
++    const float readingScale = std::clamp(Application::windowWidth / 1600.f, 1.f, 1.25f);
++    const float pixels = fontSize * FONT_SCALE * readingScale * std::min(1.f, scale / .75f);
++    return std::max(1.f, std::round(pixels)) / scale;
++}
++
+ float Label::getFontQuality()
+ {
+     return this->fontQuality;

@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnidesk.local/schemas/capability-rpc.schema.json",
+  "title": "OmniDesk CapabilityRegistry & EntityBus Standard Payloads",
+  "description": "Canonical JSON payload contracts for OmniDesk cross-plugin RPC (CapabilityRegistry) and events (EntityBus).",
+  "$defs": {
+    "CapabilityResultEnvelope": {
+      "type": "object",
+      "required": ["ok", "data", "error", "provider_plugin_id"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "data": { "type": "object" },
+        "error": { "type": "string" },
+        "provider_plugin_id": { "type": "string" }
+      }
+    },
+    "LlmRouterRequest": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "current_route",
+            "gateway_status",
+            "list_harnesses",
+            "list_models",
+            "list_groups",
+            "list_quotas",
+            "set_route"
+          ]
+        },
+        "group_id": {
+          "type": "string",
+          "default": "omnidesk-active",
+          "description": "Dedicated Magpie routing group managed by OmniDesk (never modifies terminal harness bindings)."
+        },
+        "harness_provider": {
+          "type": "string",
+          "description": "Selected underlying harness/provider namespace (e.g. 'codex', 'antigravity', 'zcode', 'zhipu', 'group')."
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Canonical Magpie model or group id (e.g. 'codex/gpt-6-luna', 'antigravity/gemini-4-carbon', 'group/smart-split')."
+        },
+        "effort": {
+          "type": "string",
+          "enum": ["", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        },
+        "account": {
+          "type": "string",
+          "description": "Optional Magpie account pin appended as #<account>."
+        },
+        "fast": {
+          "type": "boolean",
+          "default": false
+        },
+        "routing": {
+          "type": "string",
+          "enum": ["manual", "order", "smart", "usage", "pace", "rotate", "drain"],
+          "default": "order"
+        },
+        "stays": {
+          "type": "string",
+          "enum": ["auto", "turn", "session", "off", "strict"],
+          "default": "turn"
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        }
+      }
+    },
+    "LlmRouterCurrentRouteData": {
+      "type": "object",
+      "required": ["summary", "gateway_url", "group_id", "primary_member"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Compact status string consumed directly by AiCompanionDock (e.g. 'group/omnidesk-active -> antigravity/gemini-4-carbon:high')."
+        },
+        "gateway_url": { "type": "string" },
+        "gateway_running": { "type": "boolean" },
+        "group_id": { "type": "string" },
+        "harness_provider": { "type": "string" },
+        "primary_member": { "type": "string" },
+        "routing": { "type": "string" },
+        "stays": { "type": "string" },
+        "fallbacks": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "AiAgentRequest": {
+      "type": "object",
+      "required": ["prompt"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["chat", "summarize", "translate", "etymology", "clause_parse"],
+          "default": "chat"
+        },
+        "domain": {
+          "type": "string",
+          "enum": ["core", "media", "text", "book"],
+          "default": "core"
+        },
+        "context": { "type": "string" },
+        "system_prompt": { "type": "string" },
+        "prompt": { "type": "string" },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "content"],
+            "properties": {
+              "role": { "type": "string", "enum": ["system", "user", "assistant"] },
+              "content": { "type": "string" }
+            }
+          }
+        },
+        "route_override": {
+          "type": "string",
+          "description": "Optional Magpie group or provider/model override for this single call."
+        },
+        "json_schema": {
+          "type": "object",
+          "description": "Optional structured JSON output schema."
+        },
+        "temperature": { "type": "number" },
+        "timeout_ms": { "type": "integer", "default": 60000 }
+      }
+    },
+    "AiAgentResponseData": {
+      "type": "object",
+      "required": ["reply"],
+      "properties": {
+        "reply": { "type": "string" },
+        "structured": { "type": ["object", "array", "null"] },
+        "served_model": { "type": "string" },
+        "route_group": { "type": "string" },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "prompt_tokens": { "type": "integer" },
+            "completion_tokens": { "type": "integer" },
+            "total_tokens": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "NasConnectionRequest": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["status", "probe", "list_mounts", "safe_write_subtitle"]
+        },
+        "target_path": { "type": "string" },
+        "content": { "type": "string" },
+        "allow_overwrite_own": { "type": "boolean", "default": true }
+      }
+    },
+    "MediaClipJumpRequest": {
+      "type": "object",
+      "required": ["query"],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Word, idiom, or dialogue phrase to search across indexed NAS subtitle corpus."
+        },
+        "series_filter": { "type": "string" },
+        "limit": { "type": "integer", "default": 10 },
+        "auto_open_player": { "type": "boolean", "default": false }
+      }
+    },
+    "EntityMediaOpenEvent": {
+      "type": "object",
+      "required": ["item_id", "play_url"],
+      "properties": {
+        "item_id": { "type": "string" },
+        "source_id": { "type": "string" },
+        "title": { "type": "string" },
+        "kind": { "type": "string", "enum": ["video", "music", "live", "nas"] },
+        "play_url": { "type": "string" },
+        "start_sec": { "type": "number", "default": 0 },
+        "end_sec": { "type": "number" },
+        "subtitle_path": { "type": "string" }
+      }
+    },
+    "SpeechAsrCue": {
+      "type": "object",
+      "required": ["index", "start_ms", "end_ms", "text"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "start_ms": { "type": "integer", "minimum": 0 },
+        "end_ms": { "type": "integer", "minimum": 0 },
+        "start_sec": { "type": "number", "minimum": 0 },
+        "end_sec": { "type": "number", "minimum": 0 },
+        "text": { "type": "string" }
+      }
+    },
+    "SpeechAsrRequest": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "status",
+            "probe",
+            "list_streams",
+            "transcribe_audio",
+            "transcribe_media",
+            "cancel",
+            "clear_cache"
+          ]
+        },
+        "probe_runtime": { "type": "boolean", "default": false },
+        "audio_path": { "type": "string" },
+        "pcm_s16le_base64": { "type": "string" },
+        "sample_rate": { "type": "integer", "minimum": 8000, "maximum": 192000, "default": 16000 },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 8, "default": 1 },
+        "normalize": { "type": "boolean", "default": false },
+        "media_path": { "type": "string" },
+        "output_srt_path": { "type": "string" },
+        "audio_stream": { "type": "integer", "default": 0 },
+        "chunk_seconds": { "type": "integer", "minimum": 15, "maximum": 1800, "default": 120 },
+        "vad_maxseg_ms": { "type": "integer", "minimum": 500, "maximum": 60000, "default": 10000 },
+        "use_vad": { "type": "boolean", "default": true },
+        "keep_tags": { "type": "boolean", "default": false },
+        "backend": { "type": "string", "enum": ["vulkan", "cpu", "auto"], "default": "vulkan" },
+        "auto_fallback_cpu": { "type": "boolean", "default": true },
+        "reset_cache": { "type": "boolean", "default": false },
+        "offset_ms": { "type": "integer", "default": 0 },
+        "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 3600000, "default": 180000 },
+        "job_id": { "type": "string" }
+      }
+    },
+    "EntityAsrProgressEvent": {
+      "type": "object",
+      "required": ["job_id", "media_path", "completed_chunks", "total_chunks", "progress"],
+      "properties": {
+        "job_id": { "type": "string" },
+        "media_path": { "type": "string" },
+        "completed_chunks": { "type": "integer", "minimum": 0 },
+        "total_chunks": { "type": "integer", "minimum": 1 },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "plugin-sample-echo",
+  "name": "Sample Out-of-Tree Test Plugin",
+  "version": "0.1.0",
+  "abi_version": 1,
+  "kind": "hybrid",
+  "domain": "media",
+  "author": "OmniDesk CI",
+  "description": "Integration test plugin validating out-of-tree C++17 .so compilation, ABI v1 handshake, CapabilityRegistry, EntityBus, and DomainRegistry.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-sample-echo.git",
+    "branch": "main"
+  },
+  "build": {
+    "system": "cmake",
+    "entry_target": "plugin_sample_echo",
+    "output_lib": "libplugin_sample_echo.so",
+    "cmake_args": [],
+    "verify_cmd": "ctest --output-on-failure"
+  },
+  "provides": ["sample.echo.v1", "media.source.v1"],
+  "consumes": [],
+  "permissions": ["config:read", "config:write"],
+  "config_schema": [
+    {
+      "key": "greeting",
+      "label": "Greeting Prefix",
+      "type": "string",
+      "default": "Hello",
+      "description": "Prefix echoed back by sample.echo.v1"
+    },
+    {
+      "key": "mode",
+      "label": "Mode",
+      "type": "select",
+      "default": "fast",
+      "options": ["fast", "strict"],
+      "description": "Sample select option"
+    },
+    {
+      "key": "verbose",
+      "label": "Verbose Logging",
+      "type": "bool",
+      "default": false,
+      "description": "Emit extra info logs"
+    },
+    {
+      "key": "token",
+      "label": "API Token",
+      "type": "secret",
+      "default": "",
+      "description": "Secret stored in vault"
+    }
+  ]
+}

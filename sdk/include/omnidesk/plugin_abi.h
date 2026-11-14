@@ -1,0 +1,67 @@
+#pragma once
+
+#include <cstdint>
+#include "omnidesk/export.h"
+
+#ifdef __cplusplus
+namespace omnidesk {
+class IPlugin;
+}
+extern "C" {
+#endif
+
+/**
+ * Bump only when breaking the binary layout or mandatory entrypoints
+ * between the OmniDesk host (libomnidesk_sdk.so) and standalone .so plugins.
+ */
+#define OMNIDESK_PLUGIN_ABI_VERSION 1u
+#define OMNIDESK_SDK_VERSION_STRING "0.1.0"
+
+/**
+ * Pure C POD handshake struct inspected immediately after dlopen()
+ * before instantiating any C++ plugin class.
+ */
+struct OmniDeskPluginInfo {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    const char* id;
+    const char* name;
+    const char* version;
+    const char* kind;
+    const char* domain;
+    const char* sdk_version;
+};
+
+typedef const struct OmniDeskPluginInfo* (*OmniDeskAbiInfoFn)(void);
+typedef void* (*OmniDeskPluginCreateFn)(void);
+typedef void (*OmniDeskPluginDestroyFn)(void*);
+
+#ifdef __cplusplus
+} // extern "C"
+
+/**
+ * Declare the canonical C ABI entrypoints inside a standalone plugin .so.
+ * Usage:
+ *   OMNIDESK_DECLARE_PLUGIN(MyPlugin, "plugin-my-name", "My Plugin", "0.1.0", "provider", "core")
+ */
+#define OMNIDESK_DECLARE_PLUGIN(PluginClass, PluginId, PluginName, PluginVersion, PluginKind, PluginDomain) \
+    extern "C" OMNIDESK_PLUGIN_EXPORT const OmniDeskPluginInfo* omnidesk_plugin_abi_info(void) { \
+        static const OmniDeskPluginInfo kInfo = { \
+            OMNIDESK_PLUGIN_ABI_VERSION, \
+            static_cast<uint32_t>(sizeof(OmniDeskPluginInfo)), \
+            PluginId, \
+            PluginName, \
+            PluginVersion, \
+            PluginKind, \
+            PluginDomain, \
+            OMNIDESK_SDK_VERSION_STRING, \
+        }; \
+        return &kInfo; \
+    } \
+    extern "C" OMNIDESK_PLUGIN_EXPORT void* omnidesk_plugin_create(void) { \
+        return static_cast<void*>(static_cast<::omnidesk::IPlugin*>(new PluginClass())); \
+    } \
+    extern "C" OMNIDESK_PLUGIN_EXPORT void omnidesk_plugin_destroy(void* instance) { \
+        delete static_cast<::omnidesk::IPlugin*>(instance); \
+    }
+#endif

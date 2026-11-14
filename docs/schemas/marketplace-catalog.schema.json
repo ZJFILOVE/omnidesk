@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnidesk.local/schemas/marketplace-catalog.schema.json",
+  "title": "OmniDesk Marketplace Catalog Index (catalog.json)",
+  "description": "Schema v1 for local and remote plugin marketplace catalog registries consumed by omnidesk::pm::MarketplaceCatalog.",
+  "type": "object",
+  "required": ["schema_version", "plugins"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "catalog_name": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "version", "kind", "domain", "repository"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+          },
+          "name": { "type": "string", "minLength": 1 },
+          "version": { "type": "string", "minLength": 1 },
+          "kind": {
+            "type": "string",
+            "enum": ["provider", "workspace", "hybrid", "extension"]
+          },
+          "domain": {
+            "type": "string",
+            "enum": ["core", "media", "text", "book"]
+          },
+          "author": { "type": "string" },
+          "description": { "type": "string" },
+          "homepage": { "type": "string" },
+          "repository": {
+            "type": "object",
+            "required": ["url"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "type": "string", "enum": ["git"], "default": "git" },
+              "url": { "type": "string", "minLength": 1 },
+              "branch": { "type": "string", "default": "main" }
+            }
+          },
+          "provides": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "consumes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "official": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    }
+  }
+}

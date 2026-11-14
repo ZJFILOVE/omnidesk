@@ -1,0 +1,8 @@
+# All account sessions and raw signed responses belong outside the repository.
+app-session.json
+app-qr.json
+app-login-qr.png
+*.bin
+*.apk
+*.m4s
+.env

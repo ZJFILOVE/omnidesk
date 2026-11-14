@@ -1,0 +1,43 @@
+name: fnos-media-stack
+
+x-media-environment: &media-environment
+  PUID: "1000"
+  PGID: "1001"
+  TZ: Asia/Shanghai
+  UMASK: "002"
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  prowlarr:
+    <<: *common
+    image: lscr.io/linuxserver/prowlarr:latest
+    environment: *media-environment
+    volumes:
+      - ./appdata/prowlarr:/config
+    ports:
+      - "9696:9696"
+  radarr:
+    <<: *common
+    image: lscr.io/linuxserver/radarr:latest
+    environment: *media-environment
+    volumes:
+      - ./appdata/radarr:/config
+      - /vol1/@appshare/transmission:/var/apps/transmission/shares/transmission
+    ports:
+      - "7878:7878"
+  sonarr:
+    <<: *common
+    image: lscr.io/linuxserver/sonarr:latest
+    environment: *media-environment
+    volumes:
+      - ./appdata/sonarr:/config
+      - /vol1/@appshare/transmission:/var/apps/transmission/shares/transmission
+    ports:
+      - "8989:8989"

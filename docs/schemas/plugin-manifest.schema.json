@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnidesk.local/schemas/plugin-manifest.schema.json",
+  "title": "OmniDesk Plugin Manifest (plugin.json)",
+  "description": "Schema v1 for standalone OmniDesk C++17 .so plugin repositories, validated by omnidesk::pm::parseManifestJson and validateManifest.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "version",
+    "abi_version",
+    "kind",
+    "domain"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Manifest schema version. Must be 1."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Globally unique plugin identifier (e.g. 'plugin-magpie-agent', 'plugin-fnos-nas'). Must not contain '/', '\\\\', or '..'."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable display name shown in the Plugin Store and settings."
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$",
+      "description": "Semantic version string (e.g. '0.1.0')."
+    },
+    "abi_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Must match OMNIDESK_PLUGIN_ABI_VERSION (1)."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["provider", "workspace", "hybrid", "extension"],
+      "description": "Plugin architectural role."
+    },
+    "domain": {
+      "type": "string",
+      "enum": ["core", "media", "text", "book"],
+      "description": "Primary workbench domain affiliation."
+    },
+    "author": {
+      "type": "string",
+      "default": ""
+    },
+    "description": {
+      "type": "string",
+      "default": ""
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri"
+    },
+    "repository": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["git"],
+          "default": "git"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Standalone GitHub/Git repository URL for this plugin."
+        },
+        "branch": {
+          "type": "string",
+          "default": "main"
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "type": "string",
+          "const": "cmake",
+          "default": "cmake"
+        },
+        "entry_target": {
+          "type": "string",
+          "description": "CMake shared library target name."
+        },
+        "output_lib": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*\\.\\.).+\\.so$",
+          "description": "Relative path inside CMake build directory to the compiled .so file."
+        },
+        "cmake_args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "verify_cmd": {
+          "type": "string",
+          "description": "Smoke verification command executed in staging build before atomic activation (e.g. 'ctest --output-on-failure')."
+        }
+      }
+    },
+    "provides": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+\\.v[0-9]+$"
+      },
+      "default": [],
+      "description": "Versioned capability IDs registered by this plugin (e.g. 'llm.router.v1')."
+    },
+    "consumes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+\\.v[0-9]+$"
+      },
+      "default": [],
+      "description": "Optional versioned capability IDs consumed by this plugin (must gracefully degrade if absent)."
+    },
+    "permissions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Declarative capability/permission badges audited in the Plugin Store UI."
+    },
+    "config_schema": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": ["string", "secret", "bool", "int", "select"]
+          },
+          "default": {
+            "type": ["string", "boolean", "number"]
+          },
+          "description": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean",
+            "default": false
+          },
+          "options": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Required and non-empty when type == 'select'."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "type": { "const": "select" } }
+            },
+            "then": {
+              "required": ["options"],
+              "properties": {
+                "options": { "minItems": 1 }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

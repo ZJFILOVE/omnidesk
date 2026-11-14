@@ -1,0 +1,5 @@
+# Direct worker dependency versions used by the verified local environment.
+# These constraints are not a lockfile for transitive or system packages.
+fastapi==0.141.1
+uvicorn==0.52.4
+websockets==17.1

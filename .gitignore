@@ -1,0 +1,16 @@
+build/
+build-*/
+cmake-build-*/
+.cache/
+.venv/
+node_modules/
+__pycache__/
+sources/qwen-translator/firefox-extension/dist/
+*.pyc
+*.o
+*.a
+*.so
+*.so.*
+*.tar.zst
+*.user
+*.tmp*

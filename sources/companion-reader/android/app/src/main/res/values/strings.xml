@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">伴读 · 书与语境</string>
+    <string name="title_activity_main">伴读 · 书与语境</string>
+    <string name="package_name">com.toefl.vocab.app</string>
+    <string name="custom_url_scheme">com.toefl.vocab.app</string>
+</resources>

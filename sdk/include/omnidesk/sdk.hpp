@@ -1,0 +1,16 @@
+#pragma once
+
+#include "omnidesk/async.hpp"
+#include "omnidesk/capabilities.hpp"
+#include "omnidesk/config_store.hpp"
+#include "omnidesk/domain_registry.hpp"
+#include "omnidesk/entity_bus.hpp"
+#include "omnidesk/export.h"
+#include "omnidesk/image_cache.hpp"
+#include "omnidesk/job_center.hpp"
+#include "omnidesk/mpv_core.hpp"
+#include "omnidesk/plugin.hpp"
+#include "omnidesk/plugin_abi.h"
+#include "omnidesk/types.hpp"
+#include "omnidesk/ui_theme.hpp"
+#include "omnidesk/worker_supervisor.hpp"

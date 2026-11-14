@@ -1,0 +1,11 @@
+yt-dlp 2026.08.19, official zipimport executable.
+Source: https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19
+Asset: https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp
+SHA-256: 1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6
+Verified against the same release's SHA2-256SUMS.
+License: Unlicense, with bundled components under ISC/MIT. See the accompanying licenses.
+
+The Android wrapper 0.18.1 bundles yt-dlp 2025.11.12. The app atomically
+installs this verified release before starting downloads, preserving newer
+installed releases. To update it, fetch the official zipimport executable,
+verify its release checksum, and update BundledDownloader.VERSION/SHA256.

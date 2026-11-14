@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "plugin-starter",
+  "name": "OmniDesk Starter Plugin",
+  "version": "0.1.0",
+  "abi_version": 1,
+  "kind": "provider",
+  "domain": "core",
+  "author": "OmniDesk Contributors",
+  "description": "Minimal C++17 .so plugin starter template demonstrating CapabilityRegistry, EntityBus, and config_schema.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-starter",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-starter.git",
+    "branch": "main"
+  },
+  "build": {
+    "system": "cmake",
+    "entry_target": "plugin_starter",
+    "output_lib": "libplugin_starter.so",
+    "cmake_args": [],
+    "verify_cmd": "ctest --output-on-failure"
+  },
+  "provides": ["starter.echo.v1"],
+  "consumes": [],
+  "permissions": ["config:read", "config:write"],
+  "config_schema": [
+    {
+      "key": "endpoint",
+      "label": "Service Endpoint",
+      "type": "string",
+      "default": "http://127.0.0.1:8080",
+      "description": "Target local or remote HTTP endpoint",
+      "required": false
+    },
+    {
+      "key": "api_token",
+      "label": "API Token",
+      "type": "secret",
+      "default": "",
+      "description": "Stored in 0600 SecretVault (never logged)",
+      "required": false
+    }
+  ]
+}
