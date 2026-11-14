@@ -18,6 +18,11 @@ struct ReleaseArtifactSpec {
     bool empty() const { return archive_url.empty(); }
 };
 
+enum class PluginIsolation {
+    InProcess = 0,
+    Subprocess = 1,
+};
+
 struct PluginManifest {
     int schema_version = 1;
     std::string id;
@@ -49,8 +54,28 @@ struct PluginManifest {
     std::vector<ConfigField> config_schema;
     std::vector<std::string> permissions;
 
+    // Fault isolation & worker transport
+    PluginIsolation isolation = PluginIsolation::InProcess;
+    std::string worker_transport = "pipe";
+
     nlohmann::json raw = nlohmann::json::object();
 };
+
+inline std::string toString(PluginIsolation iso) {
+    return iso == PluginIsolation::Subprocess ? "subprocess" : "in_process";
+}
+
+inline bool parsePluginIsolation(const std::string& text, PluginIsolation& out) {
+    if (text.empty() || text == "in_process") {
+        out = PluginIsolation::InProcess;
+        return true;
+    }
+    if (text == "subprocess") {
+        out = PluginIsolation::Subprocess;
+        return true;
+    }
+    return false;
+}
 
 OMNIDESK_API bool parseManifestJson(const nlohmann::json& j, PluginManifest& out, std::string& error);
 OMNIDESK_API bool parseManifestFile(const std::string& path, PluginManifest& out, std::string& error);

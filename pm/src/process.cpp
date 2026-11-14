@@ -79,6 +79,7 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
     }
 
     if (pid == 0) {
+        setpgid(0, 0);
         // Child process
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
@@ -121,6 +122,7 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
     }
 
     // Parent process
+    setpgid(pid, pid);
     close(pipefd[1]);
 
     auto start = std::chrono::steady_clock::now();
@@ -129,7 +131,7 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
     bool waited = false;
 
     char buf[4096];
-    while (pipe_open) {
+    while (pipe_open || !waited) {
         int remaining_ms = -1;
         if (timeout_ms > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -137,7 +139,7 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
                                .count();
             if (elapsed >= timeout_ms) {
                 res.timed_out = true;
-                kill(pid, SIGKILL);
+                kill(-pid, SIGKILL);
                 break;
             }
             remaining_ms = static_cast<int>(timeout_ms - elapsed);
@@ -149,7 +151,7 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
         }
 
         struct pollfd pfd {};
-        pfd.fd = pipefd[0];
+        pfd.fd = pipe_open ? pipefd[0] : -1;
         pfd.events = POLLIN | POLLHUP;
         int pr = poll(&pfd, 1, remaining_ms);
         if (pr < 0) {
@@ -159,11 +161,11 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
             break;
         }
         if (pr > 0) {
-            for (;;) {
+            for (size_t batch = 0; batch < 256; ++batch) {
                 ssize_t n = read(pipefd[0], buf, sizeof(buf));
                 if (n > 0) {
                     std::string chunk(buf, static_cast<size_t>(n));
-                    res.output += chunk;
+                    if (res.output.size() < 8 * 1024 * 1024) res.output += chunk;
                     if (on_output) {
                         on_output(chunk);
                     }
@@ -184,18 +186,15 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
         }
 
         // Non-blocking check if child already exited & pipe closed on next iteration
-        if (!pipe_open) {
-            break;
-        }
         pid_t w = waitpid(pid, &status, WNOHANG);
         if (w == pid) {
             waited = true;
             // Drain any remaining bytes from pipe
-            for (;;) {
+            for (size_t batch = 0; batch < 256; ++batch) {
                 ssize_t n = read(pipefd[0], buf, sizeof(buf));
                 if (n > 0) {
                     std::string chunk(buf, static_cast<size_t>(n));
-                    res.output += chunk;
+                    if (res.output.size() < 8 * 1024 * 1024) res.output += chunk;
                     if (on_output) {
                         on_output(chunk);
                     }
@@ -208,6 +207,7 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
     }
 
     close(pipefd[0]);
+    kill(-pid, SIGKILL);
 
     if (!waited) {
         while (waitpid(pid, &status, 0) < 0) {

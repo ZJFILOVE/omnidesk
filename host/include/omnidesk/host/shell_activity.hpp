@@ -62,6 +62,8 @@ private:
     void updateResponsiveDock();
     void refreshAiPill();
     void refreshJobBar();
+    void showWarningBanner(const std::string& message, const std::string& topic = "");
+    void dismissWarningBanner();
     void handleJobOpenEvent(const std::string& topic, const nlohmann::json& payload);
     brls::Box* makeRailButton(const std::string& label,
                               const std::string& svg_rel,
@@ -85,9 +87,13 @@ private:
     brls::Box* main_split_ = nullptr;
     brls::Box* stage_container_ = nullptr;
     brls::Box* views_host_ = nullptr;
+    brls::Box* fault_banner_box_ = nullptr;
+    brls::Label* fault_banner_label_ = nullptr;
     brls::Box* job_bar_box_ = nullptr;
     brls::Label* ai_route_pill_ = nullptr;
     brls::Label* theme_btn_label_ = nullptr;
+    std::vector<uint64_t> fault_sub_tokens_;
+    std::string active_warning_topic_;
 
     PluginStoreView* store_view_ = nullptr;
     MediaWorkbench* media_view_ = nullptr;

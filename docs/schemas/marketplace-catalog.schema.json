@@ -51,6 +51,17 @@
               "branch": { "type": "string", "default": "main" }
             }
           },
+          "release": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "archive_url": { "type": "string" },
+              "tar_zst_url": { "type": "string" },
+              "sha256_url": { "type": "string" },
+              "sha256": { "type": "string" },
+              "tag": { "type": "string" }
+            }
+          },
           "provides": {
             "type": "array",
             "items": { "type": "string" },

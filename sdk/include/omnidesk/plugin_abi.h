@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
 #include "omnidesk/export.h"
 
 #ifdef __cplusplus
@@ -30,14 +30,19 @@ struct OmniDeskPluginInfo {
     const char* kind;
     const char* domain;
     const char* sdk_version;
+    const char* sdk_abi_signature;
 };
 
 typedef const struct OmniDeskPluginInfo* (*OmniDeskAbiInfoFn)(void);
 typedef void* (*OmniDeskPluginCreateFn)(void);
 typedef void (*OmniDeskPluginDestroyFn)(void*);
 
+OMNIDESK_API const char* omnidesk_sdk_abi_signature(void);
+
 #ifdef __cplusplus
 } // extern "C"
+
+#include "omnidesk/abi_fingerprint.hpp"
 
 /**
  * Declare the canonical C ABI entrypoints inside a standalone plugin .so.
@@ -46,7 +51,8 @@ typedef void (*OmniDeskPluginDestroyFn)(void*);
  */
 #define OMNIDESK_DECLARE_PLUGIN(PluginClass, PluginId, PluginName, PluginVersion, PluginKind, PluginDomain) \
     extern "C" OMNIDESK_PLUGIN_EXPORT const OmniDeskPluginInfo* omnidesk_plugin_abi_info(void) { \
-        static const OmniDeskPluginInfo kInfo = { \
+        static constexpr auto kAbiSig = ::omnidesk::detail::computeHeaderSdkAbiSignature(); \
+        static constexpr OmniDeskPluginInfo kInfo = { \
             OMNIDESK_PLUGIN_ABI_VERSION, \
             static_cast<uint32_t>(sizeof(OmniDeskPluginInfo)), \
             PluginId, \
@@ -55,6 +61,7 @@ typedef void (*OmniDeskPluginDestroyFn)(void*);
             PluginKind, \
             PluginDomain, \
             OMNIDESK_SDK_VERSION_STRING, \
+            kAbiSig.c_str(), \
         }; \
         return &kInfo; \
     } \

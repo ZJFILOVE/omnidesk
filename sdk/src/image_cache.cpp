@@ -25,6 +25,11 @@ namespace omnidesk {
 
 namespace {
 
+void ensureCurlGlobalInit() {
+    static std::once_flag once;
+    std::call_once(once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
 bool isWebpMagic(const uint8_t* data, size_t size) {
     return data && size >= 12 &&
            std::memcmp(data, "RIFF", 4) == 0 &&
@@ -199,11 +204,15 @@ DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
         res.error = "empty image buffer";
         return res;
     }
+    if (size > 64ull * 1024ull * 1024ull) {
+        res.error = "image buffer exceeds 64 MiB limit";
+        return res;
+    }
 
     if (isWebpMagic(data, size)) {
         int w = 0, h = 0;
         uint8_t* rgba = WebPDecodeRGBA(data, size, &w, &h);
-        if (!rgba || w <= 0 || h <= 0) {
+        if (!rgba || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
             if (rgba) WebPFree(rgba);
             res.error = "WebPDecodeRGBA failed";
             return res;
@@ -219,7 +228,7 @@ DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
 
     int w = 0, h = 0, channels = 0;
     unsigned char* rgba = stbi_load_from_memory(data, static_cast<int>(size), &w, &h, &channels, 4);
-    if (!rgba || w <= 0 || h <= 0) {
+    if (!rgba || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
         if (rgba) stbi_image_free(rgba);
         res.error = "stbi_load_from_memory failed";
         return res;
@@ -404,6 +413,7 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
         long http_code = 0;
         std::string curl_err;
 
+        ensureCurlGlobalInit();
         CURL* curl = curl_easy_init();
         if (!curl) {
             DecodedImage res;

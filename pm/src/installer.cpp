@@ -1,20 +1,24 @@
 #include "omnidesk/pm/installer.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <ctime>
 #include <curl/curl.h>
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <openssl/evp.h>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "omnidesk/plugin.hpp"
 #include "omnidesk/plugin_abi.h"
 #include "omnidesk/pm/catalog.hpp"
 #include "omnidesk/pm/process.hpp"
@@ -23,6 +27,13 @@ namespace fs = std::filesystem;
 
 namespace omnidesk::pm {
 namespace {
+
+std::atomic<uint64_t> g_unique_seq{1};
+
+void ensureCurlInitOnce() {
+    static std::once_flag once;
+    std::call_once(once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
 
 struct ScopedDirCleanup {
     fs::path dir;
@@ -48,7 +59,8 @@ std::string uniqueTag() {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now().time_since_epoch())
                   .count();
-    return std::to_string(getpid()) + "-" + std::to_string(ms);
+    return std::to_string(getpid()) + "-" + std::to_string(ms) + "-" +
+           std::to_string(g_unique_seq.fetch_add(1, std::memory_order_relaxed));
 }
 
 std::string toLowerCopy(std::string s) {
@@ -67,7 +79,7 @@ bool writeJsonAtomic(const std::string& path, const nlohmann::json& j) {
             return false;
         }
     }
-    const std::string tmp = path + ".tmp." + std::to_string(getpid());
+    const std::string tmp = path + ".tmp." + uniqueTag();
     {
         std::ofstream ofs(tmp, std::ios::trunc);
         if (!ofs.is_open()) {
@@ -172,6 +184,7 @@ bool fetchTextResource(const std::string& url, std::string& body, std::string& e
         return true;
     }
 
+    ensureCurlInitOnce();
     CURL* curl = curl_easy_init();
     if (!curl) {
         error = "curl_easy_init() failed";
@@ -224,6 +237,7 @@ bool downloadBinaryResource(const std::string& url,
         return true;
     }
 
+    ensureCurlInitOnce();
     CURL* curl = curl_easy_init();
     if (!curl) {
         error = "curl_easy_init() failed";
@@ -466,6 +480,8 @@ nlohmann::json recordToJson(const InstalledPluginRecord& r) {
         {"dev_local", r.dev_local},
         {"install_source", r.install_source},
         {"release_tag", r.release_tag},
+        {"sdk_version", r.sdk_version},
+        {"sdk_abi_signature", r.sdk_abi_signature},
         {"backup_versions", r.backup_versions},
     };
 }
@@ -489,6 +505,8 @@ bool recordFromJson(const nlohmann::json& j, InstalledPluginRecord& out) {
     out.dev_local = j.value("dev_local", false);
     out.install_source = j.value("install_source", out.dev_local ? "local-dev" : "source-build");
     out.release_tag = j.value("release_tag", "");
+    out.sdk_version = j.value("sdk_version", "");
+    out.sdk_abi_signature = j.value("sdk_abi_signature", "");
     out.backup_versions.clear();
     if (j.contains("backup_versions") && j["backup_versions"].is_array()) {
         for (const auto& v : j["backup_versions"]) {
@@ -607,11 +625,38 @@ bool PluginInstaller::checkSoAbiInProcess(const std::string& so_path,
         cleanup();
         return false;
     }
-    if (info->struct_size < sizeof(OmniDeskPluginInfo)) {
-        error_out = "OmniDeskPluginInfo struct_size too small";
+    constexpr size_t kLegacyBaseInfoSize = offsetof(OmniDeskPluginInfo, sdk_abi_signature);
+    if (info->struct_size < kLegacyBaseInfoSize) {
+        error_out = "OmniDeskPluginInfo struct_size too small (" +
+                    std::to_string(info->struct_size) + " < " +
+                    std::to_string(kLegacyBaseInfoSize) + ")";
         cleanup();
         return false;
     }
+
+    const bool has_sig_field = info->struct_size >= sizeof(OmniDeskPluginInfo);
+    const char* raw_sig = has_sig_field ? info->sdk_abi_signature : nullptr;
+    const std::string plugin_sig = raw_sig ? raw_sig : "";
+    const std::string host_sdk = omnidesk::sdkVersion();
+    const std::string host_sig = omnidesk::sdkAbiSignature();
+
+    if (info_out) {
+        *info_out = nlohmann::json{
+            {"abi_version", info->abi_version},
+            {"struct_size", info->struct_size},
+            {"id", info->id ? info->id : ""},
+            {"name", info->name ? info->name : ""},
+            {"version", info->version ? info->version : ""},
+            {"kind", info->kind ? info->kind : ""},
+            {"domain", info->domain ? info->domain : ""},
+            {"sdk_version", info->sdk_version ? info->sdk_version : ""},
+            {"sdk_abi_signature", plugin_sig},
+            {"host_sdk_version", host_sdk},
+            {"host_abi_signature", host_sig},
+            {"compatible", false},
+        };
+    }
+
     if (!info->id || !*info->id) {
         error_out = "OmniDeskPluginInfo::id is empty";
         cleanup();
@@ -623,26 +668,47 @@ bool PluginInstaller::checkSoAbiInProcess(const std::string& so_path,
         cleanup();
         return false;
     }
-
-    // Smoke-test constructor & destructor without calling onLoad()
-    void* instance = create_fn();
-    if (!instance) {
-        error_out = "omnidesk_plugin_create() returned nullptr";
+    if (!has_sig_field) {
+        error_out = "Plugin binary built against older OmniDeskPluginInfo layout (struct_size=" +
+                    std::to_string(info->struct_size) + ", host=" +
+                    std::to_string(sizeof(OmniDeskPluginInfo)) +
+                    "); rebuild required";
         cleanup();
         return false;
     }
-    destroy_fn(instance);
+    if (plugin_sig.empty()) {
+        error_out = "Plugin binary missing sdk_abi_signature; rebuild required";
+        cleanup();
+        return false;
+    }
+    if (plugin_sig != host_sig) {
+        error_out = "SDK ABI signature mismatch (rebuild plugin against host SDK " + host_sdk +
+                    "): plugin='" + plugin_sig + "' host='" + host_sig + "'";
+        cleanup();
+        return false;
+    }
+
+    // Smoke-test constructor & destructor only after ABI & struct-layout match
+    try {
+        void* instance = create_fn();
+        if (!instance) {
+            error_out = "omnidesk_plugin_create() returned nullptr";
+            cleanup();
+            return false;
+        }
+        destroy_fn(instance);
+    } catch (const std::exception& e) {
+        error_out = std::string("omnidesk_plugin_create/destroy threw std::exception: ") + e.what();
+        cleanup();
+        return false;
+    } catch (...) {
+        error_out = "omnidesk_plugin_create/destroy threw unknown C++ exception";
+        cleanup();
+        return false;
+    }
 
     if (info_out) {
-        *info_out = nlohmann::json{
-            {"abi_version", info->abi_version},
-            {"id", info->id ? info->id : ""},
-            {"name", info->name ? info->name : ""},
-            {"version", info->version ? info->version : ""},
-            {"kind", info->kind ? info->kind : ""},
-            {"domain", info->domain ? info->domain : ""},
-            {"sdk_version", info->sdk_version ? info->sdk_version : ""},
-        };
+        (*info_out)["compatible"] = true;
     }
 
     cleanup();
@@ -653,35 +719,57 @@ bool PluginInstaller::checkSoAbiInProcess(const std::string& so_path,
 bool PluginInstaller::verifyViaSubprocess(const std::string& so_path,
                                           const std::string& expected_id,
                                           std::string& log,
-                                          std::string& error) const {
+                                          std::string& error,
+                                          nlohmann::json* info_out) const {
+    if (info_out) *info_out = nlohmann::json::object();
     std::string checker = abi_checker_exe_;
     if (checker.empty() || !fs::exists(checker)) {
+        std::error_code path_error;
+        const auto self = fs::read_symlink("/proc/self/exe", path_error);
+        const auto sibling = self.parent_path() / "omnidesk-pm";
+        checker = !path_error && fs::exists(sibling) ? sibling.string() : "";
+    }
+    if (checker.empty()) {
         checker = findExecutableInPath("omnidesk-pm");
     }
 
     if (!checker.empty() && fs::exists(checker)) {
-        std::vector<std::string> argv = {checker, "abi-check", so_path};
+        std::vector<std::string> argv = {checker, "abi-check", so_path, "--json"};
         if (!expected_id.empty()) {
             argv.push_back("--expect-id");
             argv.push_back(expected_id);
         }
         auto res = runProcess(argv, "", {}, 30000);
         log += "[abi-check subprocess]\n" + res.output + "\n";
+        nlohmann::json info = nlohmann::json::object();
+        std::istringstream output(res.output);
+        std::string line;
+        while (std::getline(output, line)) {
+            auto candidate = nlohmann::json::parse(line, nullptr, false);
+            if (candidate.is_object() && candidate.contains("compatible") &&
+                candidate["compatible"].is_boolean()) {
+                info = std::move(candidate);
+            }
+        }
+        if (info_out) *info_out = info;
         if (res.exit_code != 0) {
             error = "ABI check subprocess failed: " +
-                    (res.output.empty() ? res.error : trimNewlines(res.output));
+                    (info.contains("error") && info["error"].is_string()
+                         ? info["error"].get<std::string>()
+                         : res.error + (res.output.empty() ? "" : "\n" + trimNewlines(res.output)));
             return false;
         }
+        if (!info.value("compatible", false) ||
+            info.value("sdk_abi_signature", "") != omnidesk::sdkAbiSignature()) {
+            error = "ABI checker did not return a matching SDK signature";
+            return false;
+        }
+        error.clear();
         return true;
     }
 
-    nlohmann::json info;
-    if (!checkSoAbiInProcess(so_path, expected_id, error, &info)) {
-        log += "[abi-check in-process] FAILED: " + error + "\n";
-        return false;
-    }
-    log += "[abi-check in-process] OK: " + info.dump() + "\n";
-    return true;
+    error = "omnidesk-pm ABI checker executable not found; isolated verification is required";
+    return false;
 }
 
 std::optional<ReleaseArtifactSpec> PluginInstaller::findPrebuiltRelease(
@@ -964,7 +1052,8 @@ InstallResult PluginInstaller::installFromPrebuilt(const ReleaseArtifactSpec& re
 InstallResult PluginInstaller::installFromGit(const std::string& git_source,
                                               const std::string& branch,
                                               ProgressCallback cb,
-                                              const std::optional<ReleaseArtifactSpec>& release_hint) {
+                                              const std::optional<ReleaseArtifactSpec>& release_hint,
+                                              bool allow_prebuilt) {
     InstallResult out;
     const std::string normalized = MarketplaceCatalog::normalizeGitSource(git_source);
     if (normalized.empty()) {
@@ -982,10 +1071,11 @@ InstallResult PluginInstaller::installFromGit(const std::string& git_source,
     const std::string git_bin = findExecutableInPath("git");
     std::string fallback_reason;
 
-    bool allow_prebuilt = true;
-    if (const char* env_pre = std::getenv("OMNIDESK_PREBUILT_FIRST")) {
-        if (std::string(env_pre) == "0" || std::string(env_pre) == "false") {
-            allow_prebuilt = false;
+    if (allow_prebuilt) {
+        if (const char* env_pre = std::getenv("OMNIDESK_PREBUILT_FIRST")) {
+            if (std::string(env_pre) == "0" || std::string(env_pre) == "false") {
+                allow_prebuilt = false;
+            }
         }
     }
 
@@ -1275,7 +1365,7 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
         return out;
     }
 
-    // 2. Snapshot previous active version into backups/<id>/<stamp> if present
+    // 2. Assemble stage_final on the SAME filesystem as pluginsDir() BEFORE touching final_dir
     std::error_code ec;
     const fs::path final_dir = fs::path(pluginsDir()) / manifest.id;
     std::vector<std::string> backups;
@@ -1285,21 +1375,6 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
         preserve_enabled = existing->enabled;
     }
 
-    if (fs::exists(final_dir)) {
-        const std::string backup_tag = uniqueTag();
-        const fs::path backup_dst = fs::path(backupsDir()) / manifest.id / backup_tag;
-        if (!moveDirSafe(final_dir, backup_dst, ec)) {
-            out.error = "Failed to snapshot existing plugin to backup: " + ec.message();
-            return out;
-        }
-        backups.push_back(backup_tag);
-        while (backups.size() > 5) {
-            fs::remove_all(fs::path(backupsDir()) / manifest.id / backups.front(), ec);
-            backups.erase(backups.begin());
-        }
-    }
-
-    // 3. Assemble stage_final on the SAME filesystem as pluginsDir() so final rename never hits EXDEV
     const fs::path stage_final = fs::path(pluginsDir()) / (".activating-" + manifest.id + "-" + uniqueTag());
     fs::create_directories(stage_final / "lib", ec);
     if (ec) {
@@ -1329,6 +1404,19 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
                  fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
     }
 
+    // 3. Snapshot previous active version into backups/<id>/<stamp> if present
+    fs::path backup_dst;
+    if (fs::exists(final_dir)) {
+        const std::string backup_tag = uniqueTag();
+        backup_dst = fs::path(backupsDir()) / manifest.id / backup_tag;
+        if (!moveDirSafe(final_dir, backup_dst, ec)) {
+            fs::remove_all(stage_final, ec);
+            out.error = "Failed to snapshot existing plugin to backup: " + ec.message();
+            return out;
+        }
+        backups.push_back(backup_tag);
+    }
+
     InstalledPluginRecord rec;
     rec.manifest = manifest;
     rec.install_dir = final_dir.string();
@@ -1342,7 +1430,12 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
     rec.dev_local = dev_local;
     rec.install_source = install_source;
     rec.release_tag = release_tag;
+    rec.sdk_version = omnidesk::sdkVersion();
+    rec.sdk_abi_signature = omnidesk::sdkAbiSignature();
     rec.backup_versions = backups;
+    while (rec.backup_versions.size() > 5) {
+        rec.backup_versions.erase(rec.backup_versions.begin());
+    }
 
     writeJsonAtomic((stage_final / "record.json").string(), recordToJson(rec));
 
@@ -1350,8 +1443,16 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
     fs::rename(stage_final, final_dir, ec);
     if (ec) {
         fs::remove_all(stage_final, ec);
+        if (!backup_dst.empty() && fs::exists(backup_dst)) {
+            std::error_code revert_ec;
+            moveDirSafe(backup_dst, final_dir, revert_ec);
+        }
         out.error = "Failed activating plugin directory: " + ec.message();
         return out;
+    }
+    while (backups.size() > 5) {
+        fs::remove_all(fs::path(backupsDir()) / manifest.id / backups.front(), ec);
+        backups.erase(backups.begin());
     }
 
     // 4. Persist state.json and upstreams.lock.json
@@ -1374,6 +1475,8 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
         {"so_sha256", rec.so_sha256},
         {"install_source", rec.install_source},
         {"release_tag", rec.release_tag},
+        {"sdk_version", rec.sdk_version},
+        {"sdk_abi_signature", rec.sdk_abi_signature},
         {"locked_at", rec.installed_at},
     };
     saveLockFile(lock);
@@ -1519,6 +1622,142 @@ InstallResult PluginInstaller::updatePlugin(const std::string& plugin_id, Progre
     return installFromGit(rec->source_url, rec->branch, cb);
 }
 
+std::vector<AbiStatusEntry> PluginInstaller::checkInstalledAbiStatus(bool verify_binaries) const {
+    std::vector<AbiStatusEntry> out;
+    const std::string host_sdk = omnidesk::sdkVersion();
+    const std::string host_sig = omnidesk::sdkAbiSignature();
+
+    auto isArchiveUrl = [](const std::string& u) {
+        return u.size() >= 8 && u.rfind(".tar.zst") == u.size() - 8;
+    };
+
+    for (const auto& rec : listInstalled()) {
+        AbiStatusEntry entry;
+        entry.plugin_id = rec.manifest.id;
+        entry.version = rec.manifest.version;
+        entry.so_path = rec.so_path;
+        entry.host_sdk_version = host_sdk;
+        entry.host_abi_signature = host_sig;
+        entry.enabled = rec.enabled;
+        if (rec.dev_local) {
+            std::error_code ec;
+            entry.can_rebuild = !rec.source_url.empty() && fs::is_directory(rec.source_url, ec);
+        } else {
+            const std::string git_src =
+                (!rec.source_url.empty() && !isArchiveUrl(rec.source_url))
+                    ? rec.source_url
+                    : rec.manifest.repo_url;
+            entry.can_rebuild = !git_src.empty() && !isArchiveUrl(git_src);
+        }
+
+        std::string abi_err;
+        std::string abi_log;
+        nlohmann::json info = nlohmann::json::object();
+        if (rec.so_path.empty() || !fs::exists(rec.so_path)) {
+            entry.compatible = false;
+            entry.needs_rebuild = true;
+            entry.reason = "Missing plugin shared library: " + rec.so_path;
+            entry.plugin_sdk_version = rec.sdk_version;
+            entry.plugin_abi_signature = rec.sdk_abi_signature;
+        } else if (!verify_binaries) {
+            entry.plugin_sdk_version = rec.sdk_version;
+            entry.plugin_abi_signature = rec.sdk_abi_signature;
+            entry.compatible = !rec.sdk_abi_signature.empty() && rec.sdk_abi_signature == host_sig;
+            entry.needs_rebuild = !entry.compatible;
+            if (!entry.compatible) entry.reason = "Recorded SDK ABI signature mismatch; rebuild required";
+        } else if (verifyViaSubprocess(rec.so_path, rec.manifest.id, abi_log, abi_err, &info)) {
+            entry.compatible = true;
+            entry.needs_rebuild = false;
+            entry.plugin_sdk_version = info.value("sdk_version", rec.sdk_version);
+            entry.plugin_abi_signature = info.value("sdk_abi_signature", rec.sdk_abi_signature);
+        } else {
+            entry.compatible = false;
+            entry.needs_rebuild = true;
+            entry.reason = abi_err;
+            entry.plugin_sdk_version = info.value("sdk_version", rec.sdk_version);
+            entry.plugin_abi_signature = info.value("sdk_abi_signature", rec.sdk_abi_signature);
+        }
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+bool PluginInstaller::hasStaleInstalledPlugins(bool verify_binaries) const {
+    for (const auto& st : checkInstalledAbiStatus(verify_binaries)) {
+        if (st.needs_rebuild) {
+            return true;
+        }
+    }
+    return false;
+}
+
+InstallResult PluginInstaller::rebuildPlugin(const std::string& plugin_id, ProgressCallback cb) {
+    InstallResult res;
+    res.plugin_id = plugin_id;
+    auto rec = getInstalled(plugin_id);
+    if (!rec.has_value()) {
+        res.error = "Plugin not installed: " + plugin_id;
+        return res;
+    }
+
+    auto emit = [&](const std::string& stage, const std::string& detail) {
+        if (cb) {
+            cb(stage, detail);
+        }
+    };
+
+    if (rec->dev_local) {
+        std::error_code ec;
+        if (rec->source_url.empty() || !fs::is_directory(rec->source_url, ec)) {
+            res.error = "Local source directory missing for plugin '" + plugin_id +
+                        "': " + rec->source_url;
+            return res;
+        }
+        emit("rebuild", "Rebuilding local plugin '" + plugin_id + "' from " + rec->source_url);
+        return installFromLocal(rec->source_url, cb);
+    }
+
+    auto isArchiveUrl = [](const std::string& u) {
+        return u.size() >= 8 && u.rfind(".tar.zst") == u.size() - 8;
+    };
+    std::string git_src = rec->source_url;
+    if (git_src.empty() || isArchiveUrl(git_src)) {
+        git_src = rec->manifest.repo_url;
+    }
+    if (git_src.empty() || isArchiveUrl(git_src)) {
+        res.error = "Plugin '" + plugin_id +
+                    "' has no source repository URL recorded; cannot rebuild from source";
+        return res;
+    }
+
+    emit("rebuild", "Rebuilding plugin '" + plugin_id + "' from source " + git_src +
+                        " against SDK " + omnidesk::sdkVersion() + " (" +
+                        omnidesk::sdkAbiSignature() + ")");
+    return installFromGit(git_src, rec->branch, cb, std::nullopt, false);
+}
+
+BatchRebuildResult PluginInstaller::rebuildPlugins(bool only_stale, ProgressCallback cb) {
+    BatchRebuildResult batch;
+    const auto statuses = checkInstalledAbiStatus();
+    for (const auto& st : statuses) {
+        if (only_stale && st.compatible) {
+            ++batch.skipped_count;
+            continue;
+        }
+        InstallResult r = rebuildPlugin(st.plugin_id, cb);
+        if (r.ok) {
+            ++batch.rebuilt_count;
+        } else {
+            ++batch.failed_count;
+            batch.ok = false;
+            if (!batch.error.empty()) batch.error += "; ";
+            batch.error += st.plugin_id + ": " + r.error;
+        }
+        batch.results.push_back(std::move(r));
+    }
+    return batch;
+}
+
 InstallResult PluginInstaller::rollbackPlugin(const std::string& plugin_id) {
     InstallResult out;
     out.plugin_id = plugin_id;
@@ -1589,6 +1828,10 @@ InstallResult PluginInstaller::rollbackPlugin(const std::string& plugin_id) {
         {"branch", restored.branch},
         {"commit_sha", restored.commit_sha},
         {"so_sha256", restored.so_sha256},
+        {"install_source", restored.install_source},
+        {"release_tag", restored.release_tag},
+        {"sdk_version", restored.sdk_version},
+        {"sdk_abi_signature", restored.sdk_abi_signature},
         {"locked_at", nowIsoUtc()},
     };
     saveLockFile(lock);

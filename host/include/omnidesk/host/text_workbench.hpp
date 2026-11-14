@@ -1,10 +1,14 @@
 #pragma once
 
+#include <atomic>
 #include <borealis.hpp>
 #include <functional>
+#include <memory>
+#include <nlohmann/json.hpp>
 #include <set>
 #include <string>
 #include <vector>
+#include "omnidesk/async.hpp"
 #include "omnidesk/types.hpp"
 
 namespace omnidesk::host {
@@ -18,9 +22,11 @@ class TextWorkbench : public brls::Box {
 public:
     TextWorkbench(std::function<void(const std::string&)> on_entity_focus,
                   std::function<void()> on_open_marketplace);
+    ~TextWorkbench() override;
 
     void refresh();
     void promptSearch();
+    void openExternalArticle(const nlohmann::json& payload);
 
 private:
     enum class BilingualMode {
@@ -34,6 +40,11 @@ private:
     void rebuildReader();
     void renderCommentNode(brls::Box* parent, const CommentNode& node, int depth);
     void openArticle(const TextFeedItem& item);
+    void showArticle(TextArticle article);
+    void translateActiveArticle();
+    void openActiveInChrome();
+    void handoffJournalToBabelDoc();
+    void finishRefresh();
 
     std::function<void(const std::string&)> on_entity_focus_;
     std::function<void()> on_open_marketplace_;
@@ -44,8 +55,14 @@ private:
 
     std::vector<TextFeedItem> feed_items_;
     TextArticle active_article_;
+    std::string active_article_source_id_;
     bool has_article_ = false;
+    bool translating_ = false;
     std::set<std::string> collapsed_comments_;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
+    std::shared_ptr<CancelToken> feed_request_ = CancelToken::create();
+    std::shared_ptr<CancelToken> article_request_ = CancelToken::create();
+    std::shared_ptr<CancelToken> action_request_ = CancelToken::create();
 
     brls::Box* category_bar_ = nullptr;
     brls::Label* status_label_ = nullptr;

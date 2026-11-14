@@ -86,6 +86,17 @@
         }
       }
     },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "archive_url": { "type": "string" },
+        "tar_zst_url": { "type": "string" },
+        "sha256_url": { "type": "string" },
+        "sha256": { "type": "string" },
+        "tag": { "type": "string" }
+      }
+    },
     "build": {
       "type": "object",
       "additionalProperties": false,
@@ -138,6 +149,18 @@
       "items": { "type": "string" },
       "default": [],
       "description": "Declarative capability/permission badges audited in the Plugin Store UI."
+    },
+    "isolation": {
+      "type": "string",
+      "enum": ["in_process", "subprocess"],
+      "default": "in_process",
+      "description": "Fault isolation boundary: 'in_process' (direct dlopen + exception barrier) or 'subprocess' (isolated omnidesk-plugin-worker process over JSON RPC)."
+    },
+    "worker_transport": {
+      "type": "string",
+      "enum": ["pipe", "unix_socket"],
+      "default": "pipe",
+      "description": "IPC transport used when isolation == 'subprocess' ('pipe' NDJSON stdio or 'unix_socket' AF_UNIX stream)."
     },
     "config_schema": {
       "type": "array",

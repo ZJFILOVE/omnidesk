@@ -66,12 +66,37 @@ add_library(omnidesk_sdk SHARED
     sdk/src/job_center.cpp
     sdk/src/mpv_core.cpp
     sdk/src/plugin_context.cpp
+    sdk/src/sdl_compat.cpp
+    sdk/src/types_json.cpp
     sdk/src/ui_theme.cpp
+    sdk/src/worker_domain_bridge.cpp
     sdk/src/worker_supervisor.cpp
 )
 add_library(OmniDesk::SDK ALIAS omnidesk_sdk)
 
+file(GLOB_RECURSE OMNIDESK_ABI_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/sdk/include/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sdk/include/*.h"
+    "${BRLS_ROOT}/library/include/*.hpp"
+    "${BRLS_ROOT}/library/include/*.h"
+)
+list(SORT OMNIDESK_ABI_HEADERS)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${OMNIDESK_ABI_HEADERS})
+set(OMNIDESK_ABI_HEADER_HASHES "")
+foreach(_header IN LISTS OMNIDESK_ABI_HEADERS)
+    file(SHA256 "${_header}" _header_hash)
+    file(RELATIVE_PATH _header_name "${CMAKE_CURRENT_SOURCE_DIR}" "${_header}")
+    string(APPEND OMNIDESK_ABI_HEADER_HASHES "${_header_name}:${_header_hash}\n")
+endforeach()
+string(SHA256 OMNIDESK_SDK_HEADER_SIGNATURE "${OMNIDESK_ABI_HEADER_HASHES}")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/sdk/cmake/abi_build_signature.h.in"
+    "${CMAKE_BINARY_DIR}/sdk-generated/omnidesk/abi_build_signature.h"
+    @ONLY
+)
+
 set(OMNIDESK_SDK_INCLUDE_DIRS
+    "${CMAKE_BINARY_DIR}/sdk-generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/sdk/include"
     "${BRLS_ROOT}/library/include"
     "${BRLS_ROOT}/library/include/borealis/extern"
@@ -103,6 +128,8 @@ set_target_properties(omnidesk_sdk PROPERTIES
     BUILD_RPATH "$ORIGIN"
     INSTALL_RPATH "$ORIGIN"
 )
+
+target_link_options(omnidesk_sdk PRIVATE "-Wl,--wrap=SDL_Init")
 
 target_link_libraries(omnidesk_sdk
     PRIVATE
@@ -168,6 +195,19 @@ target_link_libraries(omnidesk_pm
         CURL::libcurl
         ${CMAKE_DL_LIBS}
 )
+target_compile_definitions(omnidesk_pm PRIVATE
+    OMNIDESK_DEFAULT_WORKER_EXE="$<TARGET_FILE:omnidesk-plugin-worker>"
+)
+
+add_executable(omnidesk-plugin-worker
+    pm/src/plugin_worker_main.cpp
+)
+target_link_libraries(omnidesk-plugin-worker PRIVATE omnidesk_sdk ${CMAKE_DL_LIBS})
+set_target_properties(omnidesk-plugin-worker PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib"
+    ENABLE_EXPORTS ON
+)
 
 add_executable(omnidesk-pm
     pm/src/cli_main.cpp
@@ -181,6 +221,7 @@ set_target_properties(omnidesk-pm PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib"
     ENABLE_EXPORTS ON
 )
+add_dependencies(omnidesk-pm omnidesk-plugin-worker)
 
 # ------------------------------------------------------------------------------
 # 3. OmniDesk Host Desktop Workbench (omnidesk GUI)
@@ -229,12 +270,13 @@ add_custom_target(omnidesk_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${BRLS_ROOT}/resources/material" "${CMAKE_BINARY_DIR}/resources/material"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${BRLS_ROOT}/resources/xml" "${CMAKE_BINARY_DIR}/resources/xml"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${WILIWILI_RES_ROOT}/font" "${CMAKE_BINARY_DIR}/resources/font"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${BRLS_ROOT}/resources/font/switch_icons.ttf" "${CMAKE_BINARY_DIR}/resources/font/switch_icons.ttf"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${WILIWILI_RES_ROOT}/i18n" "${CMAKE_BINARY_DIR}/resources/i18n"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${WILIWILI_RES_ROOT}/material" "${CMAKE_BINARY_DIR}/resources/material"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/host/resources" "${CMAKE_BINARY_DIR}/resources"
     COMMENT "Staging Borealis + OmniDesk runtime resources"
 )
-add_dependencies(omnidesk omnidesk_resources)
+add_dependencies(omnidesk omnidesk_resources omnidesk-plugin-worker)
 add_dependencies(omnidesk-pm omnidesk_resources)
 
 # ------------------------------------------------------------------------------
@@ -246,14 +288,22 @@ if(OMNIDESK_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sdk_b
     target_link_libraries(test_sdk_bus PRIVATE omnidesk_sdk)
     add_test(NAME test_sdk_bus COMMAND test_sdk_bus)
 
+    add_executable(test_c_abi_header tests/test_c_abi_header.c)
+    target_include_directories(test_c_abi_header PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sdk/include")
+    add_test(NAME test_c_abi_header COMMAND test_c_abi_header)
+
     add_executable(test_pm_core tests/test_pm_core.cpp)
     target_link_libraries(test_pm_core PRIVATE omnidesk_pm omnidesk_sdk)
     target_compile_definitions(test_pm_core PRIVATE
         OMNIDESK_TEST_SDK_CMAKE_DIR="${CMAKE_BINARY_DIR}/sdk-cmake"
         OMNIDESK_TEST_PM_EXE="$<TARGET_FILE:omnidesk-pm>"
+        OMNIDESK_TEST_WORKER_EXE="$<TARGET_FILE:omnidesk-plugin-worker>"
+        OMNIDESK_TEST_HOST_EXE="$<TARGET_FILE:omnidesk>"
         OMNIDESK_TEST_CATALOG="${CMAKE_CURRENT_SOURCE_DIR}/host/resources/marketplace/catalog.json"
         OMNIDESK_TEST_SAMPLE_PLUGIN="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_plugin_sample"
     )
-    add_dependencies(test_pm_core omnidesk-pm)
+    add_dependencies(test_pm_core omnidesk-pm omnidesk-plugin-worker omnidesk)
     add_test(NAME test_pm_core COMMAND test_pm_core)
+    set_tests_properties(test_sdk_bus PROPERTIES TIMEOUT 90)
+    set_tests_properties(test_pm_core PROPERTIES TIMEOUT 240)
 endif()

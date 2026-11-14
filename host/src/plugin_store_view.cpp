@@ -78,6 +78,15 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     radar_btn->setMarginRight(8);
     actions->addView(radar_btn);
 
+    rebuild_stale_btn_ = ui::makeButton("一键重编过期", [this]() {
+        if (!busy_) {
+            startBatchRebuild(true);
+        }
+    }, false, 38.0f);
+    rebuild_stale_btn_->setMarginRight(8);
+    rebuild_stale_btn_->setVisibility(brls::Visibility::GONE);
+    actions->addView(rebuild_stale_btn_);
+
     auto* gh_btn = ui::makeButton("+ GitHub 安装", [this]() { openInstallModal(false); }, true, 38.0f);
     gh_btn->setMarginRight(8);
     actions->addView(gh_btn);
@@ -134,8 +143,8 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     console_hdr->setMarginBottom(6);
     console_hdr->addView(ui::makeLabel("构建与验证日志 (CMake / ABI / Load)", 13.5f, "font/grey"));
     auto* clr_btn = ui::makeButton("清空", [this]() {
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        log_buffer_.clear();
+        std::lock_guard<std::mutex> lock(log_state_->mutex);
+        log_state_->buffer.clear();
         if (console_label_) {
             console_label_->setText("就绪。点击插件「安装」或「更新」查看完整构建流水线输出。");
         }
@@ -175,20 +184,22 @@ PluginStoreView::~PluginStoreView() {
 }
 
 void PluginStoreView::appendLog(const std::string& line) {
+    auto log_state = log_state_;
+    if (!log_state) return;
     {
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        if (log_buffer_.size() > 6000) {
-            log_buffer_.erase(0, log_buffer_.size() - 4000);
+        std::lock_guard<std::mutex> lock(log_state->mutex);
+        if (log_state->buffer.size() > 6000) {
+            log_state->buffer.erase(0, log_state->buffer.size() - 4000);
         }
-        log_buffer_ += line;
+        log_state->buffer += line;
         if (!line.empty() && line.back() != '\n') {
-            log_buffer_ += '\n';
+            log_state->buffer += '\n';
         }
     }
-    brls::sync([this, alive = alive_]() {
+    brls::sync([this, alive = alive_, log_state]() {
         if (!alive->load(std::memory_order_acquire) || !console_label_) return;
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        console_label_->setText(log_buffer_);
+        std::lock_guard<std::mutex> lock(log_state->mutex);
+        console_label_->setText(log_state->buffer);
     });
 }
 
@@ -205,9 +216,28 @@ void PluginStoreView::refresh() {
         }
     }
 
+    abi_status_cache_.clear();
+    size_t stale_count = 0;
+    for (const auto& entry : kernel.installer().checkInstalledAbiStatus(false)) {
+        if (entry.needs_rebuild) {
+            ++stale_count;
+        }
+        abi_status_cache_[entry.plugin_id] = entry;
+    }
+    if (rebuild_stale_btn_) {
+        rebuild_stale_btn_->setText(
+            busy_ ? "正在重编..."
+                  : ("一键重编过期 (" + std::to_string(stale_count) + ")"));
+        rebuild_stale_btn_->setVisibility(
+            stale_count > 0 ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+
     std::string summary = "目录 " + std::to_string(cat_items.size()) + " 个 · 已安装 " +
                           std::to_string(installed.size()) + " 个 · 运行中 " +
                           std::to_string(loaded_count) + " 个";
+    if (stale_count > 0) {
+        summary += " · ABI过期 " + std::to_string(stale_count) + " 个";
+    }
     if (!search_query_.empty()) {
         summary += " · 筛选: \"" + search_query_ + "\"";
     }
@@ -389,7 +419,26 @@ void PluginStoreView::renderCatalogOrInstalledList() {
                 st_fg = "status/info_fg";
             }
         }
-        top->addView(ui::makePill(st_text, st_bg, st_fg));
+        auto* badges = new brls::Box(brls::Axis::ROW);
+        badges->setAlignItems(brls::AlignItems::CENTER);
+        if (e.is_installed) {
+            auto abi_it = abi_status_cache_.find(e.id);
+            if (abi_it != abi_status_cache_.end() && abi_it->second.needs_rebuild) {
+                auto* abi_pill = ui::makePill("ABI过期·需重编", "status/warn_bg", "status/warn_fg");
+                abi_pill->setMarginRight(6);
+                badges->addView(abi_pill);
+            }
+            if (auto w = HostKernel::instance().workers().status("plugin:" + e.id)) {
+                auto* iso_pill = ui::makePill(
+                    w->quarantined ? "工作器熔断" : "隔离进程",
+                    w->quarantined ? "status/err_bg" : "desktop/soft",
+                    w->quarantined ? "status/err_fg" : "status/info_fg");
+                iso_pill->setMarginRight(6);
+                badges->addView(iso_pill);
+            }
+        }
+        badges->addView(ui::makePill(st_text, st_bg, st_fg));
+        top->addView(badges);
         card->addView(top);
 
         auto* desc = ui::makeLabel(e.description, 14.5f, "font/grey", 1.45f);
@@ -424,6 +473,118 @@ void PluginStoreView::renderCatalogOrInstalledList() {
 
 void PluginStoreView::renderDiagnosticsView() {
     auto& kernel = HostKernel::instance();
+
+    // 1. SDK ABI Drift & Batch Rebuild Card
+    auto* abi_card = ui::makeCard("desktop/surface", 16.0f, 10.0f);
+    abi_card->setMarginBottom(12);
+    abi_card->addView(ui::makeLabel("SDK ABI 签名一致性与热重编诊断", 18.0f, "brls/text"));
+    auto* host_sig_lbl = ui::makeLabel(
+        "宿主 SDK v" + omnidesk::sdkVersion() + " · 布局指纹: " +
+            omnidesk::sdkAbiSignature(),
+        13.5f, "font/grey");
+    host_sig_lbl->setMarginTop(4);
+    abi_card->addView(host_sig_lbl);
+
+    const auto abi_entries = kernel.installer().checkInstalledAbiStatus(false);
+    size_t stale_count = 0;
+    if (abi_entries.empty()) {
+        auto* none = ui::makeLabel("当前尚未安装本地 .so 插件。", 14.5f, "font/grey");
+        none->setMarginTop(8);
+        abi_card->addView(none);
+    } else {
+        for (const auto& ae : abi_entries) {
+            if (ae.needs_rebuild) {
+                ++stale_count;
+            }
+            auto* row = new brls::Box(brls::Axis::ROW);
+            row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+            row->setAlignItems(brls::AlignItems::CENTER);
+            row->setMarginTop(8);
+
+            auto* left = new brls::Box(brls::Axis::COLUMN);
+            left->setGrow(1.0f);
+            left->addView(ui::makeLabel(ae.plugin_id + " (v" + ae.version + ")", 14.5f, "brls/text"));
+            const std::string sub =
+                ae.compatible ? ("签名: " + ae.plugin_abi_signature) : ae.reason;
+            left->addView(ui::makeLabel(sub, 12.5f, ae.compatible ? "font/grey" : "status/warn_fg"));
+            row->addView(left);
+
+            row->addView(ui::makePill(
+                ae.needs_rebuild ? "ABI过期·需重编" : (ae.compatible ? "兼容" : "不兼容"),
+                ae.needs_rebuild ? "status/warn_bg"
+                                 : (ae.compatible ? "status/ok_bg" : "status/err_bg"),
+                ae.needs_rebuild ? "status/warn_fg"
+                                 : (ae.compatible ? "status/ok_fg" : "status/err_fg")));
+            abi_card->addView(row);
+        }
+    }
+
+    auto* abi_actions = new brls::Box(brls::Axis::ROW);
+    abi_actions->setMarginTop(12);
+    auto* rebuild_stale = ui::makeButton(
+        busy_ ? "正在重编..."
+              : ("一键重编全部过期插件 (" + std::to_string(stale_count) + ")"),
+        [this]() {
+            if (!busy_) startBatchRebuild(true);
+        },
+        stale_count > 0, 36.0f);
+    rebuild_stale->setMarginRight(8);
+    abi_actions->addView(rebuild_stale);
+    abi_actions->addView(ui::makeButton(
+        "全量按当前SDK重编",
+        [this]() {
+            if (!busy_) startBatchRebuild(false);
+        },
+        false, 36.0f));
+    abi_card->addView(abi_actions);
+    list_container_->addView(abi_card);
+
+    // 2. WorkerSupervisor Isolation & Crash Guard Card
+    auto* worker_card = ui::makeCard("desktop/surface", 16.0f, 10.0f);
+    worker_card->setMarginBottom(12);
+    worker_card->addView(ui::makeLabel("WorkerSupervisor 进程隔离与崩溃保护", 18.0f, "brls/text"));
+    const auto workers = kernel.workers().listWorkers();
+    if (workers.empty()) {
+        auto* hint = ui::makeLabel(
+            "当前无独立子进程托管工作器（在 plugin.json 设置 \"isolation\": \"subprocess\" 即可启用进程崩溃隔离）。",
+            14.0f, "font/grey");
+        hint->setMarginTop(8);
+        worker_card->addView(hint);
+    } else {
+        for (const auto& w : workers) {
+            auto* row = new brls::Box(brls::Axis::ROW);
+            row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+            row->setAlignItems(brls::AlignItems::CENTER);
+            row->setMarginTop(8);
+
+            auto* left = new brls::Box(brls::Axis::COLUMN);
+            left->setGrow(1.0f);
+            const std::string tr =
+                (w.transport == WorkerTransport::UnixSocket) ? "unix_socket" : "pipe";
+            left->addView(ui::makeLabel(w.worker_id + " [" + tr + "]", 14.5f, "brls/text"));
+            std::string stat_txt = "PID=" + std::to_string(w.pid) +
+                                   " · requests=" + std::to_string(w.requests_served) +
+                                   " · crashes=" + std::to_string(w.crash_count) +
+                                   " · restarts=" + std::to_string(w.restart_count);
+            if (!w.last_error.empty()) {
+                stat_txt += " · " + w.last_error;
+            }
+            left->addView(ui::makeLabel(stat_txt, 12.5f, "font/grey"));
+            row->addView(left);
+
+            const std::string pill_txt =
+                w.quarantined ? "已熔断" : (w.running ? "运行中" : "已停止");
+            const std::string pill_bg =
+                w.quarantined ? "status/err_bg" : (w.running ? "status/ok_bg" : "status/warn_bg");
+            const std::string pill_fg =
+                w.quarantined ? "status/err_fg" : (w.running ? "status/ok_fg" : "status/warn_fg");
+            row->addView(ui::makePill(pill_txt, pill_bg, pill_fg));
+            worker_card->addView(row);
+        }
+    }
+    list_container_->addView(worker_card);
+
+    // 3. CapabilityRegistry Card
     auto* cap_card = ui::makeCard("desktop/surface", 16.0f, 10.0f);
     cap_card->setMarginBottom(12);
     cap_card->addView(ui::makeLabel("CapabilityRegistry 已注册能力", 18.0f, "brls/text"));
@@ -458,11 +619,12 @@ void PluginStoreView::renderDiagnosticsView() {
 
     detail_container_->clearViews();
     auto* help = ui::makeCard("desktop/surface", 16.0f, 10.0f);
-    help->addView(ui::makeLabel("插件解耦架构说明", 18.0f, "brls/text"));
+    help->addView(ui::makeLabel("插件解耦与防崩溃架构说明", 18.0f, "brls/text"));
     help->addView(ui::makeLabel(
-        "• 每个插件拥有独立目录与 GitHub 仓库，依赖 OmniDesk::SDK (libomnidesk_sdk.so)。\n"
-        "• 安装流程: git clone -> staging CMake 编译 -> ctest 验证 -> 子进程 dlopen ABI 握手 -> SHA-256 锁定 -> 备份快照并激活。\n"
-        "• 配置与密钥保存在 0600 权限的 plugins/<id>.json 与 SecretVault，卸载前可安全保留或回滚。",
+        "• C ABI + 结构体布局指纹校验：dlopen 后先在 omnidesk_plugin_create() 之前校验 struct_size 与 sdk_abi_signature，老旧 .so 被安全拒绝。\n"
+        "• 子进程崩溃隔离：设置 \"isolation\": \"subprocess\"（支持 pipe / unix_socket）后，.so 仅在 omnidesk-plugin-worker 子进程中加载并通过 JSON RPC 通信。\n"
+        "• 异常隔离与自动拉起：能力调用、域接口、EntityBus 与崩溃进程均有隔离屏障与自动重启/熔断，异常仅在主舞台顶部提示一行黄字而不影响宿主运行。\n"
+        "• 一键热重编：当宿主 SDK 升级时，可直接在诊断页或插件详情按当前 SDK 从源码重编并恢复。",
         14.5f, "font/grey", 1.55f));
     detail_container_->addView(help);
 }
@@ -538,8 +700,45 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                                " · SHA-256: " + rec->so_sha256.substr(0, 16) + "... · Commit: " +
                                (rec->commit_sha.size() > 10 ? rec->commit_sha.substr(0, 10) : rec->commit_sha);
         auto* l_lbl = ui::makeLabel(lock_txt, 13.0f, "font/grey");
-        l_lbl->setMarginBottom(10);
+        l_lbl->setMarginBottom(4);
         card->addView(l_lbl);
+
+        const std::string iso_txt =
+            (rec->manifest.isolation == pm::PluginIsolation::Subprocess)
+                ? ("subprocess (" + rec->manifest.worker_transport + ")")
+                : "in_process";
+        std::string runtime_txt = "隔离模式: " + iso_txt;
+        auto abi_it = abi_status_cache_.find(plugin_id);
+        if (abi_it != abi_status_cache_.end()) {
+            runtime_txt += abi_it->second.compatible ? " · ABI: 兼容 (" : " · ABI: 过期/不兼容 (";
+            runtime_txt += (abi_it->second.plugin_abi_signature.empty()
+                                ? "legacy-no-sig"
+                                : abi_it->second.plugin_abi_signature) +
+                           ")";
+        }
+        auto* iso_lbl = ui::makeLabel(runtime_txt, 13.0f, "font/grey");
+        iso_lbl->setMarginBottom(4);
+        card->addView(iso_lbl);
+
+        if (auto w = kernel.workers().status("plugin:" + plugin_id)) {
+            std::string w_txt = "工作进程 PID=" + std::to_string(w->pid) +
+                                (w->running ? " [运行中]" : " [未运行]") +
+                                " · requests=" + std::to_string(w->requests_served) +
+                                " · crashes=" + std::to_string(w->crash_count) +
+                                " · restarts=" + std::to_string(w->restart_count);
+            if (!w->last_signal_name.empty()) {
+                w_txt += " · last_sig=" + w->last_signal_name;
+            }
+            if (w->quarantined) {
+                w_txt += " · [已熔断隔离]";
+            }
+            auto* w_lbl = ui::makeLabel(
+                w_txt, 13.0f, w->quarantined ? "status/err_fg" : "status/info_fg");
+            w_lbl->setMarginBottom(8);
+            card->addView(w_lbl);
+        } else {
+            iso_lbl->setMarginBottom(10);
+        }
 
         auto rit = radar_results_.find(plugin_id);
         if (rit != radar_results_.end()) {
@@ -580,6 +779,23 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                                           13.5f, "status/ok_fg"));
                 card->addView(rc);
             }
+        }
+    }
+
+    bool abi_needs_rebuild = false;
+    if (rec.has_value()) {
+        auto abi_it = abi_status_cache_.find(plugin_id);
+        if (abi_it != abi_status_cache_.end() && abi_it->second.needs_rebuild) {
+            abi_needs_rebuild = true;
+            auto* abi_card = ui::makeCard("status/warn_bg", 10.0f, 8.0f);
+            abi_card->setMarginBottom(12);
+            std::string abi_msg = "SDK ABI 已过期 · 需重编: " + abi_it->second.reason +
+                                  "\n宿主签名: " + abi_it->second.host_abi_signature;
+            if (!abi_it->second.plugin_abi_signature.empty()) {
+                abi_msg += "\n插件签名: " + abi_it->second.plugin_abi_signature;
+            }
+            abi_card->addView(ui::makeLabel(abi_msg, 13.5f, "status/warn_fg", 1.35f));
+            card->addView(abi_card);
         }
     }
 
@@ -625,7 +841,7 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                     refresh();
                 });
             },
-            !is_loaded, 38.0f);
+            !is_loaded && !abi_needs_rebuild, 38.0f);
         toggle_btn->setMarginRight(8);
         act->addView(toggle_btn);
 
@@ -643,6 +859,15 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
             radar_has_update, 38.0f);
         upd_btn->setMarginRight(8);
         act->addView(upd_btn);
+
+        auto* rebuild_btn = ui::makeButton(
+            busy_ ? "重编中..." : "按当前SDK重编",
+            [this, plugin_id]() {
+                if (!busy_) startRebuildPlugin(plugin_id);
+            },
+            abi_needs_rebuild && !radar_has_update, 38.0f);
+        rebuild_btn->setMarginRight(8);
+        act->addView(rebuild_btn);
 
         if (!rec->backup_versions.empty()) {
             auto* rb_btn = ui::makeButton("回滚", [this, plugin_id]() {
@@ -1009,6 +1234,84 @@ void PluginStoreView::startUpdateRadar() {
                 brls::Application::notify("更新雷达完成: " + std::to_string(results.size()) + " 个已扫，发现 " +
                                           std::to_string(updates) + " 个上游更新");
             }
+            refresh();
+        });
+    }).detach();
+}
+
+void PluginStoreView::startRebuildPlugin(const std::string& plugin_id) {
+    busy_ = true;
+    appendLog("=== 开始按当前宿主 SDK 重编: " + plugin_id + " ===");
+    refresh();
+    std::thread([this, alive = alive_, plugin_id]() {
+        auto& k = HostKernel::instance();
+        auto res = k.installer().rebuildPlugin(
+            plugin_id, [this, alive](const std::string& stage, const std::string& detail) {
+                if (alive->load(std::memory_order_acquire)) {
+                    appendLog("[" + stage + "] " + detail);
+                }
+            });
+        brls::sync([this, alive, plugin_id, res]() {
+            if (!alive->load(std::memory_order_acquire)) {
+                return;
+            }
+            busy_ = false;
+            auto& k = HostKernel::instance();
+            if (res.ok) {
+                if (k.installer().isEnabled(plugin_id)) {
+                    std::string err;
+                    k.plugins().reloadPlugin(plugin_id, err);
+                    if (!err.empty()) {
+                        appendLog("[reload-error] " + err);
+                    }
+                }
+                appendLog("[rebuilt] " + plugin_id + " -> SDK v" +
+                          omnidesk::sdkVersion());
+                brls::Application::notify("插件已按当前 SDK 重编完成: " + plugin_id);
+            } else {
+                appendLog("[ERROR] " + res.error);
+                brls::Application::notify("重编失败: " + res.error);
+            }
+            refresh();
+        });
+    }).detach();
+}
+
+void PluginStoreView::startBatchRebuild(bool only_stale) {
+    busy_ = true;
+    appendLog(only_stale ? "=== 一键重编所有 SDK ABI 过期插件 ==="
+                         : "=== 全量按当前宿主 SDK 重编已安装插件 ===");
+    refresh();
+    std::thread([this, alive = alive_, only_stale]() {
+        auto& k = HostKernel::instance();
+        auto batch = k.installer().rebuildPlugins(
+            only_stale, [this, alive](const std::string& stage, const std::string& detail) {
+                if (alive->load(std::memory_order_acquire)) {
+                    appendLog("[" + stage + "] " + detail);
+                }
+            });
+        brls::sync([this, alive, batch]() {
+            if (!alive->load(std::memory_order_acquire)) {
+                return;
+            }
+            busy_ = false;
+            auto& k = HostKernel::instance();
+            for (const auto& r : batch.results) {
+                if (r.ok && k.installer().isEnabled(r.plugin_id)) {
+                    std::string err;
+                    k.plugins().reloadPlugin(r.plugin_id, err);
+                    if (!err.empty()) {
+                        appendLog("[reload-error] " + r.plugin_id + ": " + err);
+                    }
+                } else if (!r.ok) {
+                    appendLog("[ERROR] " + r.plugin_id + ": " + r.error);
+                }
+            }
+            std::string summary = "批量重编完成: 成功 " + std::to_string(batch.rebuilt_count) +
+                                  " · 跳过 " + std::to_string(batch.skipped_count) +
+                                  " · 失败 " + std::to_string(batch.failed_count);
+            appendLog("[batch-rebuild] " + summary);
+            brls::Application::notify(summary);
             refresh();
         });
     }).detach();

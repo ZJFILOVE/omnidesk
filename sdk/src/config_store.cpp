@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -12,6 +13,8 @@ namespace fs = std::filesystem;
 namespace omnidesk {
 namespace {
 
+std::atomic<uint64_t> g_atomic_write_seq{1};
+
 bool writeSecureAtomic(const std::string& target_path, const std::string& content) {
     std::error_code ec;
     fs::path p(target_path);
@@ -19,7 +22,8 @@ bool writeSecureAtomic(const std::string& target_path, const std::string& conten
     if (ec) return false;
     ::chmod(p.parent_path().c_str(), 0700);
 
-    std::string tmp_path = target_path + ".tmp." + std::to_string(::getpid());
+    std::string tmp_path = target_path + ".tmp." + std::to_string(::getpid()) + "." +
+                           std::to_string(g_atomic_write_seq.fetch_add(1, std::memory_order_relaxed));
     int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return false;
 

@@ -12,5 +12,7 @@
 #include "omnidesk/plugin.hpp"
 #include "omnidesk/plugin_abi.h"
 #include "omnidesk/types.hpp"
+#include "omnidesk/types_json.hpp"
 #include "omnidesk/ui_theme.hpp"
+#include "omnidesk/worker_domain_bridge.hpp"
 #include "omnidesk/worker_supervisor.hpp"

@@ -15,6 +15,7 @@
 #include <borealis/core/thread.hpp>
 #include <borealis/core/touch/tap_gesture.hpp>
 #include <borealis/views/button.hpp>
+#include <borealis/views/dialog.hpp>
 #include <borealis/views/label.hpp>
 
 #include <algorithm>
@@ -103,6 +104,117 @@ void* sdlGetProcAddress(void* /*ctx*/, const char* name) {
 }
 
 }  // namespace
+
+// ---- DanmakuOverlay ----
+
+void DanmakuOverlay::setCues(std::vector<DanmakuCue> cues) {
+    std::sort(cues.begin(), cues.end(), [](const DanmakuCue& a, const DanmakuCue& b) {
+        return a.time_sec < b.time_sec;
+    });
+    cues_ = std::move(cues);
+}
+
+void DanmakuOverlay::clear() {
+    cues_.clear();
+}
+
+bool DanmakuOverlay::empty() const {
+    return cues_.empty();
+}
+
+size_t DanmakuOverlay::cueCount() const {
+    return cues_.size();
+}
+
+void DanmakuOverlay::draw(NVGcontext* vg,
+                          float x,
+                          float y,
+                          float width,
+                          float height,
+                          double playback_sec,
+                          float alpha) const {
+    if (!vg || !visible_ || cues_.empty() || width <= 80.0f || height <= 60.0f) return;
+    if (playback_sec < 0.0) return;
+
+    constexpr double kScrollDuration = 7.2;
+    constexpr double kStaticDuration = 4.0;
+    const double min_t = std::max(0.0, playback_sec - kScrollDuration);
+    auto it = std::lower_bound(cues_.begin(), cues_.end(), min_t,
+                               [](const DanmakuCue& c, double t) { return c.time_sec < t; });
+    if (it == cues_.end()) return;
+
+    const float font_px = std::clamp(height * 0.044f, 14.0f, 23.0f);
+    const float row_h = font_px * 1.32f;
+    const int max_rows = std::max(3, std::min(12, static_cast<int>((height * 0.72f) / row_h)));
+    std::vector<float> scroll_track_right(static_cast<size_t>(max_rows), x);
+    int top_row = 0;
+    int bottom_row = 0;
+
+    nvgSave(vg);
+    nvgScissor(vg, x, y, width, height);
+    int font = brls::Application::getDefaultFont();
+    if (font >= 0) nvgFontFaceId(vg, font);
+    nvgFontSize(vg, font_px);
+
+    const unsigned char a_val = static_cast<unsigned char>(std::clamp(opacity_ * alpha, 0.0f, 1.0f) * 255.0f);
+    const unsigned char shadow_a = static_cast<unsigned char>(std::clamp(opacity_ * alpha * 0.85f, 0.0f, 1.0f) * 255.0f);
+
+    int drawn = 0;
+    constexpr int kMaxPerFrame = 64;
+    for (; it != cues_.end() && it->time_sec <= playback_sec && drawn < kMaxPerFrame; ++it) {
+        const auto& c = *it;
+        if (c.text.empty()) continue;
+        const double age = playback_sec - c.time_sec;
+        if (age < 0.0) continue;
+
+        const uint32_t col = c.color == 0 ? 0xFFFFFFu : c.color;
+        const unsigned char r = static_cast<unsigned char>((col >> 16) & 0xFFu);
+        const unsigned char g = static_cast<unsigned char>((col >> 8) & 0xFFu);
+        const unsigned char b = static_cast<unsigned char>(col & 0xFFu);
+
+        float bounds[4] = {0, 0, 0, 0};
+        const float tw = nvgTextBounds(vg, 0, 0, c.text.c_str(), nullptr, bounds);
+        float dx = x;
+        float dy = y;
+
+        if (c.mode == 5) {
+            if (age > kStaticDuration) continue;
+            const int row = top_row++ % std::max(1, max_rows / 2);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+            dx = x + width * 0.5f;
+            dy = y + 10.0f + static_cast<float>(row) * row_h;
+        } else if (c.mode == 4) {
+            if (age > kStaticDuration) continue;
+            const int row = bottom_row++ % std::max(1, max_rows / 2);
+            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+            dx = x + width * 0.5f;
+            dy = y + height - 48.0f - static_cast<float>(row + 1) * row_h;
+        } else {
+            if (age > kScrollDuration) continue;
+            const float progress = static_cast<float>(age / kScrollDuration);
+            dx = x + width - progress * (width + tw);
+            int chosen = -1;
+            for (int row = 0; row < max_rows; ++row) {
+                if (scroll_track_right[static_cast<size_t>(row)] <= dx - 14.0f ||
+                    scroll_track_right[static_cast<size_t>(row)] == x) {
+                    chosen = row;
+                    break;
+                }
+            }
+            if (chosen < 0) continue;
+            scroll_track_right[static_cast<size_t>(chosen)] = dx + tw;
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            dy = y + 10.0f + static_cast<float>(chosen) * row_h;
+        }
+
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, shadow_a));
+        nvgText(vg, dx + 1.2f, dy + 1.2f, c.text.c_str(), nullptr);
+        nvgFillColor(vg, nvgRGBA(r, g, b, a_val));
+        nvgText(vg, dx, dy, c.text.c_str(), nullptr);
+        ++drawn;
+    }
+    nvgRestore(vg);
+}
 
 // ---- SubtitleOverlay ----
 
@@ -427,6 +539,23 @@ struct MPVCore::Impl {
                             state.hwdec_current = s ? s : "";
                             break;
                         }
+                        case 11: state.fps = *static_cast<double*>(prop->data); break;
+                        case 12: state.video_bitrate = *static_cast<double*>(prop->data); break;
+                        case 13: state.decoder_drop_frames = *static_cast<int64_t*>(prop->data); break;
+                        case 14: state.output_drop_frames = *static_cast<int64_t*>(prop->data); break;
+                        case 15: {
+                            char* s = *static_cast<char**>(prop->data);
+                            state.video_codec = s ? s : "";
+                            break;
+                        }
+                        case 16: {
+                            char* s = *static_cast<char**>(prop->data);
+                            state.audio_codec = s ? s : "";
+                            break;
+                        }
+                        case 17: state.audio_samplerate = static_cast<int>(*static_cast<int64_t*>(prop->data)); break;
+                        case 18: state.audio_channels = static_cast<int>(*static_cast<int64_t*>(prop->data)); break;
+                        case 19: state.cache_duration_sec = *static_cast<double*>(prop->data); break;
                         default: break;
                     }
                     break;
@@ -527,6 +656,15 @@ bool MPVCore::ensureInitialized() {
         mpv_observe_property(handle, 8, "video-params/w", MPV_FORMAT_INT64);
         mpv_observe_property(handle, 9, "video-params/h", MPV_FORMAT_INT64);
         mpv_observe_property(handle, 10, "hwdec-current", MPV_FORMAT_STRING);
+        mpv_observe_property(handle, 11, "estimated-vf-fps", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(handle, 12, "video-bitrate", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(handle, 13, "decoder-frame-drop-count", MPV_FORMAT_INT64);
+        mpv_observe_property(handle, 14, "frame-drop-count", MPV_FORMAT_INT64);
+        mpv_observe_property(handle, 15, "video-codec", MPV_FORMAT_STRING);
+        mpv_observe_property(handle, 16, "audio-codec", MPV_FORMAT_STRING);
+        mpv_observe_property(handle, 17, "audio-params/samplerate", MPV_FORMAT_INT64);
+        mpv_observe_property(handle, 18, "audio-params/channel-count", MPV_FORMAT_INT64);
+        mpv_observe_property(handle, 19, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
 
         int advanced_control = 1;
         mpv_opengl_init_params gl_init{sdlGetProcAddress, nullptr};
@@ -873,7 +1011,8 @@ void MPVCore::drawVideo(NVGcontext* vg, float x, float y, float width, float hei
 
 class MpvStageView::VideoCanvas : public brls::View {
 public:
-    VideoCanvas(MPVCore* core, SubtitleOverlay* sub) : core_(core), sub_(sub) {
+    VideoCanvas(MPVCore* core, SubtitleOverlay* sub, DanmakuOverlay* dm)
+        : core_(core), sub_(sub), dm_(dm) {
         setFocusable(true);
     }
 
@@ -898,12 +1037,16 @@ public:
                     "OpenGL libmpv 硬解舞台就绪 · 点击任意媒体条目开始播放", nullptr);
             nvgRestore(vg);
         }
+        if (dm_) {
+            dm_->draw(vg, x, y, width, height, st.position_sec, alpha);
+        }
         sub_->draw(vg, x, y, width, height, st.position_sec, alpha);
     }
 
 private:
     MPVCore* core_ = nullptr;
     SubtitleOverlay* sub_ = nullptr;
+    DanmakuOverlay* dm_ = nullptr;
 };
 
 class MpvStageView::ChapterProgressBar : public brls::View {
@@ -984,7 +1127,7 @@ MpvStageView::MpvStageView(MPVCore* core)
     setGrow(1.0f);
     setPadding(0);
 
-    canvas_ = new VideoCanvas(core_, &subtitles_);
+    canvas_ = new VideoCanvas(core_, &subtitles_, &danmaku_);
     canvas_->setGrow(1.0f);
     canvas_->setHeightPercentage(100);
     canvas_->setMinHeight(240);
@@ -1057,6 +1200,14 @@ MpvStageView::MpvStageView(MPVCore* core)
     sub_btn_ = sub_btn;
     right_btns->addView(sub_btn);
 
+    auto* dm_btn = ui::makeButton("弹幕: 开", [this]() {
+        danmaku_.setVisible(!danmaku_.isVisible());
+        refreshHudState(core_->state());
+    }, false, 30.f);
+    dm_btn->setMarginRight(6);
+    dm_btn_ = dm_btn;
+    right_btns->addView(dm_btn);
+
     auto* spd_btn = ui::makeButton("1.0x", [this]() {
         const double cur = core_->state().speed;
         double next = 1.0;
@@ -1066,8 +1217,19 @@ MpvStageView::MpvStageView(MPVCore* core)
         else next = 1.0;
         core_->setSpeed(next);
     }, false, 30.f);
+    spd_btn->setMarginRight(6);
     speed_btn_ = spd_btn;
     right_btns->addView(spd_btn);
+
+    auto* stats_btn = ui::makeButton("媒体信息", [this]() { showMediaStatsDialog(); }, false, 30.f);
+    stats_btn->setMarginRight(6);
+    right_btns->addView(stats_btn);
+
+    auto* fs_btn = ui::makeButton("全屏", [this]() {
+        if (on_fullscreen_) on_fullscreen_();
+    }, false, 30.f);
+    fs_btn_ = fs_btn;
+    right_btns->addView(fs_btn);
 
     controls->addView(right_btns);
     addView(controls);
@@ -1106,9 +1268,76 @@ void MpvStageView::setSubtitles(std::vector<LyricLine> subtitles) {
     subtitles_.setLines(std::move(subtitles));
 }
 
+void MpvStageView::setDanmaku(std::vector<DanmakuCue> cues) {
+    danmaku_.setCues(std::move(cues));
+}
+
 void MpvStageView::setChapters(std::vector<ChapterSegment> chapters) {
     core_->setChapters(std::move(chapters));
     refreshHudState(core_->state());
+}
+
+void MpvStageView::setTitle(const std::string& title) {
+    if (auto* lbl = dynamic_cast<brls::Label*>(status_label_)) {
+        lbl->setText(title.empty() ? "libmpv FBO" : title);
+    }
+}
+
+void MpvStageView::setStageMinHeight(float height) {
+    if (canvas_) {
+        canvas_->setMinHeight(height);
+    }
+}
+
+void MpvStageView::setFullscreenCallback(std::function<void()> on_fullscreen) {
+    on_fullscreen_ = std::move(on_fullscreen);
+}
+
+void MpvStageView::setFullscreenLabel(bool fullscreen_active) {
+    if (auto* btn = dynamic_cast<brls::Button*>(fs_btn_)) {
+        btn->setText(fullscreen_active ? "退出全屏" : "全屏");
+    }
+}
+
+void MpvStageView::showMediaStatsDialog() {
+    const auto st = core_->state();
+    std::ostringstream oss;
+    oss << "视频分辨率: " << (st.video_width > 0 ? (std::to_string(st.video_width) + "x" + std::to_string(st.video_height)) : "暂无数据") << "\n";
+    oss << "视频编码: " << (st.video_codec.empty() ? "暂无数据" : st.video_codec) << "\n";
+    oss << "硬解模式: " << (st.hwdec_current.empty() ? "软件解码 / 未激活" : st.hwdec_current) << "\n";
+    if (st.fps > 0.0) {
+        char fbuf[48];
+        std::snprintf(fbuf, sizeof(fbuf), "%.2f fps (倍速所需 %.1f fps)", st.fps, st.fps * st.speed);
+        oss << "渲染帧率: " << fbuf << "\n";
+    } else {
+        oss << "渲染帧率: 暂无数据\n";
+    }
+    if (st.video_bitrate > 0.0) {
+        char bbuf[32];
+        std::snprintf(bbuf, sizeof(bbuf), "%.2f Mbps", st.video_bitrate / 1000000.0);
+        oss << "实时码率: " << bbuf << "\n";
+    }
+    oss << "解码丢帧: " << st.decoder_drop_frames << " | 输出丢帧: " << st.output_drop_frames << "\n";
+    oss << "音频编码: " << (st.audio_codec.empty() ? "暂无数据" : st.audio_codec);
+    if (st.audio_samplerate > 0) {
+        oss << " (" << st.audio_samplerate << " Hz, " << st.audio_channels << " ch)";
+    }
+    oss << "\n";
+    char cbuf[32];
+    std::snprintf(cbuf, sizeof(cbuf), "%.1f 秒", st.cache_duration_sec);
+    oss << "网络缓存: " << cbuf << " | 弹幕数: " << danmaku_.cueCount()
+        << " | 字幕数: " << subtitles_.lineCount();
+
+    auto* box = new brls::Box(brls::Axis::COLUMN);
+    box->setPadding(20);
+    box->setWidth(480);
+    auto* hdr = ui::makeLabel("实时媒体信息统计 (Ctrl+F3)", 20.0f, "brls/text");
+    hdr->setMarginBottom(10);
+    box->addView(hdr);
+    box->addView(ui::makeLabel(oss.str(), 14.5f, "font/grey", 1.55f));
+    auto* dlg = new brls::Dialog(box);
+    dlg->addButton("关闭", [] {});
+    dlg->open();
 }
 
 bool MpvStageView::skipSponsorIfActive() {
@@ -1128,6 +1357,9 @@ void MpvStageView::refreshHudState(const MpvPlaybackState& st) {
     }
     if (auto* btn = dynamic_cast<brls::Button*>(sub_btn_)) {
         btn->setText(subtitles_.isVisible() ? "双语字幕: 开" : "双语字幕: 关");
+    }
+    if (auto* btn = dynamic_cast<brls::Button*>(dm_btn_)) {
+        btn->setText(danmaku_.isVisible() ? "弹幕: 开" : "弹幕: 关");
     }
     if (auto* btn = dynamic_cast<brls::Button*>(speed_btn_)) {
         char buf[16];

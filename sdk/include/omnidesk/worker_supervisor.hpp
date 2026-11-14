@@ -133,7 +133,7 @@ private:
     struct WorkerRuntime {
         WorkerSpec spec;
         std::mutex state_mutex;
-        std::mutex io_mutex;
+        std::timed_mutex io_mutex;
         int pid = -1;
         int stdin_fd = -1;
         int stdout_fd = -1;
@@ -159,12 +159,16 @@ private:
         bool pending_auto_restart = false;
         int in_flight = 0;
         bool stopping_child = false;
+        bool retired = false;
+        uint64_t stop_generation = 0;
         std::condition_variable lifecycle_cv;
     };
 
     std::shared_ptr<WorkerRuntime> findRuntime(const std::string& worker_id) const;
     void notifyFault(const WorkerFaultEvent& evt) const;
     void closeIoFdsLocked(WorkerRuntime& rt);
+    void recordFailureLocked(WorkerRuntime& rt, int pid, const std::string& error,
+                             WorkerFaultEvent& event);
     bool spawnLocked(WorkerRuntime& rt,
                      std::unique_lock<std::mutex>& lk,
                      std::string* error,
@@ -181,11 +185,17 @@ private:
                                bool& timed_out,
                                bool& cancelled,
                                bool& eof);
+    bool writeLineInterruptible(WorkerRuntime& rt,
+                                const std::string& line,
+                                const std::shared_ptr<CancelToken>& cancel,
+                                int64_t deadline_ms,
+                                bool& timed_out,
+                                bool& cancelled);
     void watchdogLoop();
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<WorkerRuntime>> workers_;
-    std::mutex fault_cb_mutex_;
+    mutable std::mutex fault_cb_mutex_;
     FaultCallback fault_cb_;
     std::condition_variable watchdog_cv_;
     std::thread watchdog_thread_;

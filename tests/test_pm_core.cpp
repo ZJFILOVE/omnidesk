@@ -4,15 +4,19 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <unistd.h>
 #include "omnidesk/pm/catalog.hpp"
 #include "omnidesk/pm/installer.hpp"
 #include "omnidesk/pm/manager.hpp"
 #include "omnidesk/pm/manifest.hpp"
+#include "omnidesk/pm/process.hpp"
 #include "omnidesk/pm/scaffold.hpp"
 #include "omnidesk/sdk.hpp"
 
@@ -56,6 +60,15 @@ int main() {
     fs::create_directories(tmp_root, ec);
 
     ::setenv("OMNIDESK_DISABLE_GITHUB_API", "1", 1);
+
+    {
+        const auto started = std::chrono::steady_clock::now();
+        auto blocked = omnidesk::pm::runProcess(
+            {"python3", "-c", "import os,time; os.close(1); os.close(2); time.sleep(30)"},
+            "", {}, 150);
+        TEST_CHECK(blocked.timed_out);
+        TEST_CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
+    }
 
     // 1. Manifest validation checks
     {
@@ -302,6 +315,716 @@ int main() {
     TEST_CHECK(installer.removePlugin("plugin-sample-echo", rm_err));
     TEST_CHECK(installer.removePlugin("plugin-scaffold-smoke", rm_err));
     TEST_CHECK(!installer.getInstalled("plugin-sample-echo").has_value());
+
+    // 7. C++ ABI drift detection (legacy 56-byte & signature mismatch rejected BEFORE create()) + batch rebuild recovery
+    {
+        const fs::path stale_src = tmp_root / "stale-plugin-src";
+        omnidesk::pm::ScaffoldOptions sopts_stale;
+        sopts_stale.target_dir = stale_src.string();
+        sopts_stale.plugin_id = "plugin-stale-test";
+        sopts_stale.name = "Stale ABI Test Plugin";
+        sopts_stale.provides = {"stale.ping.v1"};
+        sopts_stale.init_git = false;
+        auto s_res = omnidesk::pm::scaffoldPluginRepo(sopts_stale);
+        TEST_CHECK(s_res.ok);
+
+        auto inst_stale = installer.installFromLocal(stale_src.string());
+        TEST_CHECK(inst_stale.ok);
+        auto rec_stale = installer.getInstalled("plugin-stale-test");
+        TEST_CHECK(rec_stale.has_value());
+        TEST_CHECK(!installer.hasStaleInstalledPlugins());
+
+        const fs::path shadow_include = stale_src / "sdk-shadow" / "omnidesk";
+        fs::create_directories(shadow_include, ec);
+        {
+            std::ofstream header(shadow_include / "abi_build_signature.h");
+            header << "#pragma once\n#define OMNIDESK_SDK_HEADER_SIGNATURE \"previous-sdk-headers\"\n";
+        }
+        const fs::path stale_cmake = stale_src / "CMakeLists.txt";
+        std::ifstream cmake_input(stale_cmake);
+        const std::string original_cmake((std::istreambuf_iterator<char>(cmake_input)), {});
+        cmake_input.close();
+        {
+            std::ofstream cmake_output(stale_cmake, std::ios::app);
+            cmake_output << "\ntarget_include_directories(plugin_stale_test BEFORE PRIVATE "
+                            "\"${CMAKE_CURRENT_SOURCE_DIR}/sdk-shadow\")\n";
+        }
+        auto stale_headers = installer.installFromLocal(stale_src.string());
+        TEST_CHECK(!stale_headers.ok && stale_headers.error.find("signature") != std::string::npos);
+        {
+            std::ofstream cmake_output(stale_cmake);
+            cmake_output << original_cmake;
+        }
+        TEST_CHECK(!installer.hasStaleInstalledPlugins());
+
+        // Compile 2 poisoned .so variants:
+        // (1) Legacy 56-byte OmniDeskPluginInfo (no sdk_abi_signature field)
+        // (2) Full-size struct with stale sdk_abi_signature
+        // Both fail cleanly BEFORE omnidesk_plugin_create() is ever invoked.
+        const fs::path marker_legacy = tmp_root / "legacy56_create_called.marker";
+        const fs::path marker_badsig = tmp_root / "badsig_create_called.marker";
+        const fs::path legacy_cpp = tmp_root / "legacy56.cpp";
+        const fs::path legacy_so = tmp_root / "liblegacy56.so";
+        const fs::path badsig_cpp = tmp_root / "badsig.cpp";
+        const fs::path badsig_so = tmp_root / "libbadsig.so";
+
+        {
+            std::ofstream ofs(legacy_cpp);
+            ofs << "#include <cstdint>\n#include <cstdlib>\n#include <fstream>\n"
+                   "struct LegacyInfo56 {\n"
+                   "  uint32_t abi_version;\n  uint32_t struct_size;\n"
+                   "  const char* id;\n  const char* name;\n  const char* version;\n"
+                   "  const char* kind;\n  const char* domain;\n  const char* sdk_version;\n"
+                   "};\n"
+                   "extern \"C\" __attribute__((visibility(\"default\"))) const LegacyInfo56* omnidesk_plugin_abi_info() {\n"
+                   "  static const LegacyInfo56 k = {1u, static_cast<uint32_t>(sizeof(LegacyInfo56)),\n"
+                   "    \"plugin-stale-test\", \"Stale\", \"0.1.0\", \"provider\", \"core\", \"0.0.9\"};\n"
+                   "  return &k;\n"
+                   "}\n"
+                   "extern \"C\" __attribute__((visibility(\"default\"))) void* omnidesk_plugin_create() {\n"
+                   "  std::ofstream m(\"" << marker_legacy.string() << "\"); m << \"called\\n\"; std::abort();\n"
+                   "}\n"
+                   "extern \"C\" __attribute__((visibility(\"default\"))) void omnidesk_plugin_destroy(void*) {}\n";
+        }
+        {
+            std::ofstream ofs(badsig_cpp);
+            ofs << "#include <cstdint>\n#include <cstdlib>\n#include <fstream>\n"
+                   "struct FullInfo {\n"
+                   "  uint32_t abi_version;\n  uint32_t struct_size;\n"
+                   "  const char* id;\n  const char* name;\n  const char* version;\n"
+                   "  const char* kind;\n  const char* domain;\n  const char* sdk_version;\n"
+                   "  const char* sdk_abi_signature;\n"
+                   "};\n"
+                   "extern \"C\" __attribute__((visibility(\"default\"))) const FullInfo* omnidesk_plugin_abi_info() {\n"
+                   "  static const FullInfo k = {1u, static_cast<uint32_t>(sizeof(FullInfo)),\n"
+                   "    \"plugin-stale-test\", \"Stale\", \"0.1.0\", \"provider\", \"core\", \"0.1.0\", \"abi1-v0.0.0-deadbeefcafebabe\"};\n"
+                   "  return &k;\n"
+                   "}\n"
+                   "extern \"C\" __attribute__((visibility(\"default\"))) void* omnidesk_plugin_create() {\n"
+                   "  std::ofstream m(\"" << marker_badsig.string() << "\"); m << \"called\\n\"; std::abort();\n"
+                   "}\n"
+                   "extern \"C\" __attribute__((visibility(\"default\"))) void omnidesk_plugin_destroy(void*) {}\n";
+        }
+        TEST_CHECK(runShell("c++ -shared -fPIC -std=c++17 '" + legacy_cpp.string() + "' -o '" + legacy_so.string() + "'") == 0);
+        TEST_CHECK(runShell("c++ -shared -fPIC -std=c++17 '" + badsig_cpp.string() + "' -o '" + badsig_so.string() + "'") == 0);
+
+        std::string abi_err;
+        nlohmann::json abi_info;
+        TEST_CHECK(!omnidesk::pm::PluginInstaller::checkSoAbiInProcess(
+            legacy_so.string(), "plugin-stale-test", abi_err, &abi_info));
+        TEST_CHECK(!fs::exists(marker_legacy));
+        TEST_CHECK(abi_err.find("older SDK") != std::string::npos ||
+                   abi_err.find("struct_size") != std::string::npos);
+
+        TEST_CHECK(!omnidesk::pm::PluginInstaller::checkSoAbiInProcess(
+            badsig_so.string(), "plugin-stale-test", abi_err, &abi_info));
+        TEST_CHECK(!fs::exists(marker_badsig));
+        TEST_CHECK(abi_err.find("sdk_abi_signature") != std::string::npos ||
+                   abi_err.find("mismatch") != std::string::npos);
+
+        // Overwrite installed .so with legacy 56-byte binary -> installer + PluginManager + CLI detect drift cleanly
+        fs::copy_file(legacy_so, rec_stale->so_path, fs::copy_options::overwrite_existing);
+        TEST_CHECK(installer.hasStaleInstalledPlugins());
+        auto abi_list = installer.checkInstalledAbiStatus();
+        TEST_CHECK(abi_list.size() == 1 && !abi_list[0].compatible && abi_list[0].needs_rebuild);
+
+        std::vector<nlohmann::json> drift_events;
+        const auto drift_tok = bus.subscribe("plugin.abi_drift", "test",
+            [&](const std::string&, const nlohmann::json& p) { drift_events.push_back(p); });
+        std::string stale_load_err;
+        TEST_CHECK(!mgr.loadPlugin("plugin-stale-test", stale_load_err));
+        TEST_CHECK(!stale_load_err.empty());
+        TEST_CHECK(!fs::exists(marker_legacy));
+        TEST_CHECK(!drift_events.empty());
+        bus.unsubscribe(drift_tok);
+
+        const std::string cli_env =
+            "OMNIDESK_DATA_HOME='" + data_dir + "' "
+            "OMNIDESK_CONFIG_HOME='" + cfg_dir + "' "
+            "OMNIDESK_SDK_CMAKE_DIR='" + std::string(OMNIDESK_TEST_SDK_CMAKE_DIR) + "' ";
+        TEST_CHECK(runShell(cli_env + "'" + OMNIDESK_TEST_PM_EXE + "' abi-status --strict >/dev/null 2>&1") != 0);
+
+        // Recover via API rebuildPlugins(true)
+        auto batch_res = installer.rebuildPlugins(true);
+        TEST_CHECK(batch_res.ok && batch_res.rebuilt_count == 1 && batch_res.failed_count == 0);
+        TEST_CHECK(!installer.hasStaleInstalledPlugins());
+        TEST_CHECK(mgr.loadPlugin("plugin-stale-test", load_err));
+        TEST_CHECK(caps.has("stale.ping.v1"));
+        mgr.unloadAll();
+
+        // Also poison with bad_sig and recover via CLI `omnidesk-pm rebuild --stale`
+        fs::copy_file(badsig_so, rec_stale->so_path, fs::copy_options::overwrite_existing);
+        TEST_CHECK(installer.hasStaleInstalledPlugins());
+        TEST_CHECK(runShell(cli_env + "'" + OMNIDESK_TEST_PM_EXE + "' rebuild --stale >/dev/null 2>&1") == 0);
+        TEST_CHECK(runShell(cli_env + "'" + OMNIDESK_TEST_PM_EXE + "' abi-status --strict >/dev/null 2>&1") == 0);
+        TEST_CHECK(!installer.hasStaleInstalledPlugins());
+        TEST_CHECK(mgr.loadPlugin("plugin-stale-test", load_err));
+        TEST_CHECK(!fs::exists(marker_badsig));
+        mgr.unloadAll();
+        TEST_CHECK(installer.removePlugin("plugin-stale-test", rm_err));
+
+        const fs::path crash_cpp = tmp_root / "crash-probe.cpp";
+        const fs::path crash_so = tmp_root / "libcrash-probe.so";
+        {
+            std::ofstream source(crash_cpp);
+            source << "#include <csignal>\n"
+                      "__attribute__((constructor)) static void crash() { std::raise(SIGSEGV); }\n";
+        }
+        TEST_CHECK(runShell("c++ -shared -fPIC '" + crash_cpp.string() + "' -o '" + crash_so.string() + "'") == 0);
+        TEST_CHECK(installer.installFromLocal(stale_src.string()).ok);
+        auto probe_rec = installer.getInstalled("plugin-stale-test");
+        TEST_CHECK(probe_rec.has_value());
+        fs::copy_file(crash_so, probe_rec->so_path, fs::copy_options::overwrite_existing);
+        TEST_CHECK(installer.setEnabled("plugin-stale-test", false));
+        auto probe_statuses = installer.checkInstalledAbiStatus();
+        TEST_CHECK(probe_statuses.size() == 1 && probe_statuses[0].needs_rebuild);
+        TEST_CHECK(probe_statuses[0].reason.find("signal") != std::string::npos);
+        TEST_CHECK(!probe_statuses[0].enabled);
+        auto repaired_probe = installer.rebuildPlugins(true);
+        TEST_CHECK(repaired_probe.ok && repaired_probe.rebuilt_count == 1);
+        TEST_CHECK(!installer.getInstalled("plugin-stale-test")->enabled);
+        TEST_CHECK(installer.removePlugin("plugin-stale-test", rm_err));
+    }
+
+    // 8. Subprocess isolation ("isolation": "subprocess") over pipe & unix_socket + Domain proxies + SIGSEGV survival & auto-restart
+    {
+        const fs::path iso_src = tmp_root / "isolated-plugin-src";
+        fs::create_directories(iso_src / "src", ec);
+        auto writeIsoManifest = [&](const std::string& transport) {
+            nlohmann::json mj = {
+                {"schema_version", 1},
+                {"id", "plugin-isolated-test"},
+                {"name", "Isolated Subprocess Test"},
+                {"version", "0.1.0"},
+                {"abi_version", 1},
+                {"kind", "hybrid"},
+                {"domain", "media"},
+                {"isolation", "subprocess"},
+                {"worker_transport", transport},
+                {"repository", {{"type", "git"}, {"url", "https://example.invalid/iso.git"}, {"branch", "main"}}},
+                {"build", {{"system", "cmake"}, {"entry_target", "plugin_isolated_test"}, {"output_lib", "libplugin_isolated_test.so"}}},
+                {"provides", {"isolated.echo.v1", "media.source.v1", "text.source.v1", "book.source.v1"}},
+                {"consumes", nlohmann::json::array()},
+                {"permissions", {"config:read"}},
+            };
+            std::ofstream ofs(iso_src / "plugin.json");
+            ofs << mj.dump(2) << "\n";
+        };
+        writeIsoManifest("pipe");
+        {
+            std::ofstream ofs(iso_src / "CMakeLists.txt");
+            ofs << "cmake_minimum_required(VERSION 3.20)\n"
+                   "project(plugin_isolated_test LANGUAGES CXX)\n"
+                   "set(CMAKE_CXX_STANDARD 17)\n"
+                   "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+                   "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
+                   "find_package(OmniDeskSDK REQUIRED)\n"
+                   "add_library(plugin_isolated_test SHARED src/plugin_main.cpp)\n"
+                   "target_link_libraries(plugin_isolated_test PRIVATE OmniDesk::SDK)\n"
+                   "set_target_properties(plugin_isolated_test PROPERTIES OUTPUT_NAME \"plugin_isolated_test\" PREFIX \"lib\")\n";
+        }
+        {
+            std::ofstream ofs(iso_src / "src" / "plugin_main.cpp");
+            ofs << R"CPP(
+#include <csignal>
+#include <filesystem>
+#include <fstream>
+#include <chrono>
+#include <thread>
+#include <unistd.h>
+#include "omnidesk/sdk.hpp"
+
+class IsoMedia final : public omnidesk::IMediaSource {
+public:
+    std::string sourceId() const override { return "iso-media"; }
+    std::string displayName() const override { return "Isolated Media"; }
+    std::vector<std::string> categories() const override { return {"all", "sci-fi"}; }
+    std::vector<omnidesk::MediaItem> fetchItems(const std::string& category, const std::string& query) override {
+        omnidesk::MediaItem item;
+        item.id = "m1";
+        item.source_id = "iso-media";
+        item.title = category + ":" + query;
+        item.kind = "video";
+        item.duration_sec = 90.0;
+        item.has_bilingual_sub = true;
+        return {item};
+    }
+    std::vector<omnidesk::LyricLine> fetchLyrics(const std::string&) override {
+        return {{1.5, "line-orig", "line-trans"}};
+    }
+    std::vector<omnidesk::ChapterSegment> fetchChapters(const std::string&) override {
+        return {{0.0, 15.0, "Ch1", "Intro", "content"}};
+    }
+};
+
+class IsoText final : public omnidesk::ITextSource {
+public:
+    std::string sourceId() const override { return "iso-text"; }
+    std::string displayName() const override { return "Isolated Text"; }
+    std::string category() const override { return "journal"; }
+    std::vector<omnidesk::TextFeedItem> fetchFeed(const std::string& query) override {
+        if (std::getenv("OMNIDESK_TEST_SLOW_DOMAIN")) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+        }
+        omnidesk::TextFeedItem t;
+        t.id = "t1";
+        t.source_id = "iso-text";
+        t.source_name = "IsoJournal";
+        t.title = "Feed:" + query;
+        return {t};
+    }
+    omnidesk::TextArticle fetchArticle(const std::string& article_id) override {
+        omnidesk::TextArticle a;
+        a.id = article_id;
+        a.title = "Article:" + article_id;
+        a.paragraphs.push_back({"p1", "paragraph", "En", "Zh"});
+        return a;
+    }
+};
+
+class IsoBook final : public omnidesk::IBookSource {
+public:
+    std::string sourceId() const override { return "iso-book"; }
+    std::string displayName() const override { return "Isolated Book"; }
+    std::vector<omnidesk::BookItem> listBooks(const std::string&, const std::string& query) override {
+        omnidesk::BookItem b;
+        b.id = "b1";
+        b.source_id = "iso-book";
+        b.title = "Book:" + query;
+        b.total_pages = 12;
+        return {b};
+    }
+    omnidesk::BookSpread fetchSpread(const std::string& book_id, int page_number) override {
+        omnidesk::BookSpread s;
+        s.book_id = book_id;
+        s.page_number = page_number;
+        s.total_pages = 12;
+        s.blocks.push_back({"blk", "paragraph", "Original", "Translated", {"word"}});
+        return s;
+    }
+    std::vector<omnidesk::VocabCard> listVocab() override {
+        omnidesk::VocabCard v;
+        v.word = "isolated";
+        v.meaning = "隔离的";
+        return {v};
+    }
+};
+
+class IsolatedTestPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        ctx_ = &ctx;
+        ctx.registerStreamingCapability(
+            "isolated.echo.v1",
+            [this](const nlohmann::json& req,
+                   const std::shared_ptr<omnidesk::CancelToken>&,
+                   const omnidesk::StreamCallback& on_chunk) -> omnidesk::CapabilityResult {
+                if (req.value("crash", false)) {
+                    const std::string marker = req.value("marker", "");
+                    if (!marker.empty() && !std::filesystem::exists(marker)) {
+                        std::ofstream ofs(marker);
+                        ofs << "1\n";
+                        ofs.flush();
+                        std::raise(SIGSEGV);
+                    }
+                }
+                if (req.value("stream", false) && on_chunk) {
+                    on_chunk({"iso-", nlohmann::json::object(), "delta", false});
+                    on_chunk({"stream", nlohmann::json::object(), "delta", false});
+                }
+                return {true,
+                        {{"worker_pid", static_cast<int>(::getpid())},
+                         {"recovered", true},
+                         {"echo", req}},
+                        "", ""};
+            });
+        ctx.registerMediaSource(std::make_shared<IsoMedia>());
+        ctx.registerTextSource(std::make_shared<IsoText>());
+        ctx.registerBookSource(std::make_shared<IsoBook>());
+        return true;
+    }
+    void onUnload() override { ctx_ = nullptr; }
+private:
+    omnidesk::PluginContext* ctx_ = nullptr;
+};
+
+OMNIDESK_DECLARE_PLUGIN(
+    IsolatedTestPlugin,
+    "plugin-isolated-test",
+    "Isolated Subprocess Test",
+    "0.1.0",
+    "hybrid",
+    "media")
+)CPP";
+        }
+
+        auto iso_inst = installer.installFromLocal(iso_src.string());
+        if (!iso_inst.ok) {
+            std::cerr << "Isolated install failed: " << iso_inst.error << "\n" << iso_inst.log << "\n";
+            return 1;
+        }
+        auto iso_rec = installer.getInstalled("plugin-isolated-test");
+        TEST_CHECK(iso_rec.has_value());
+        TEST_CHECK(iso_rec->manifest.isolation == omnidesk::pm::PluginIsolation::Subprocess);
+        TEST_CHECK(iso_rec->manifest.worker_transport == "pipe");
+
+        omnidesk::JobCenter iso_jobs(&bus, 2);
+        omnidesk::WorkerSupervisor iso_workers;
+        std::vector<omnidesk::WorkerFaultEvent> wf_events;
+        std::mutex wf_mu;
+        iso_workers.setFaultCallback([&](const omnidesk::WorkerFaultEvent& ev) {
+            {
+                std::lock_guard<std::mutex> lk(wf_mu);
+                wf_events.push_back(ev);
+            }
+            bus.publish("worker.fault", {{"worker_id", ev.worker_id}, {"signal_name", ev.signal_name}});
+        });
+        std::atomic<int> bus_wf_count{0};
+        const auto wf_tok = bus.subscribe("worker.fault", "test",
+            [&](const std::string&, const nlohmann::json&) { bus_wf_count.fetch_add(1); });
+
+        omnidesk::pm::PluginManager iso_mgr(
+            installer, caps, bus, domains, cfg, secrets, &iso_jobs, &iso_workers);
+        iso_mgr.setWorkerExecutable(OMNIDESK_TEST_WORKER_EXE);
+
+        std::string iso_err;
+        if (!iso_mgr.loadPlugin("plugin-isolated-test", iso_err)) {
+            std::cerr << "Isolated loadPlugin failed: " << iso_err << "\n";
+            return 1;
+        }
+
+        // Verify .so is NOT loaded into the host process address space!
+        TEST_CHECK(::dlopen(iso_rec->so_path.c_str(), RTLD_NOLOAD | RTLD_LOCAL) == nullptr);
+
+        // Capability RPC + streaming + all 3 domain proxies over pipe IPC
+        auto r_pipe = caps.call("isolated.echo.v1", {{"hello", "pipe"}});
+        TEST_CHECK(r_pipe.ok);
+        const int worker_pid_1 = r_pipe.data["worker_pid"].get<int>();
+        TEST_CHECK(worker_pid_1 > 0 && worker_pid_1 != static_cast<int>(::getpid()));
+
+        std::string stream_out;
+        auto s_pipe = caps.callStream("isolated.echo.v1", {{"stream", true}},
+            [&](const omnidesk::StreamChunk& ch) { stream_out += ch.delta; });
+        TEST_CHECK(s_pipe.ok && stream_out == "iso-stream");
+
+        auto m_srcs = domains.mediaSources();
+        TEST_CHECK(m_srcs.size() == 1 && m_srcs[0]->sourceId() == "iso-media");
+        auto m_items = m_srcs[0]->fetchItems("sci-fi", "dune");
+        TEST_CHECK(m_items.size() == 1 && m_items[0].title == "sci-fi:dune");
+        TEST_CHECK(m_srcs[0]->fetchLyrics("m1").size() == 1);
+        TEST_CHECK(m_srcs[0]->fetchChapters("m1").size() == 1);
+
+        auto t_srcs = domains.textSources();
+        TEST_CHECK(t_srcs.size() == 1 && t_srcs[0]->fetchFeed("abi").size() == 1);
+        TEST_CHECK(t_srcs[0]->fetchArticle("a42").title == "Article:a42");
+
+        auto b_srcs = domains.bookSources();
+        TEST_CHECK(b_srcs.size() == 1 && b_srcs[0]->listBooks("", "rust").size() == 1);
+        TEST_CHECK(b_srcs[0]->fetchSpread("b1", 5).blocks.size() == 1);
+        TEST_CHECK(b_srcs[0]->listVocab().size() == 1);
+
+        // Trigger SIGSEGV inside worker .so -> host survives, WorkerFaultEvent emitted, worker auto-restarts!
+        const fs::path segv_marker = tmp_root / "iso_segv.marker";
+        auto crash_res = caps.call(
+            "isolated.echo.v1", {{"crash", true}, {"marker", segv_marker.string()}});
+        TEST_CHECK(fs::exists(segv_marker));
+        TEST_CHECK(!crash_res.ok);
+        auto recovered_res = caps.call("isolated.echo.v1", {{"hello", "after-crash"}});
+        TEST_CHECK(recovered_res.ok);
+        TEST_CHECK(recovered_res.data.value("recovered", false));
+        const int worker_pid_2 = recovered_res.data["worker_pid"].get<int>();
+        TEST_CHECK(worker_pid_2 > 0 && worker_pid_2 != worker_pid_1);
+        TEST_CHECK(bus_wf_count.load() >= 1);
+        {
+            std::lock_guard<std::mutex> lk(wf_mu);
+            bool saw_segv = false;
+            for (const auto& ev : wf_events) {
+                if (ev.plugin_id == "plugin-isolated-test" && ev.signal_number == SIGSEGV &&
+                    ev.auto_restarted && ev.restart_succeeded) {
+                    saw_segv = true;
+                }
+            }
+            TEST_CHECK(saw_segv);
+        }
+
+        // Now switch worker_transport to "unix_socket", reinstall & reload, and verify AF_UNIX IPC
+        writeIsoManifest("unix_socket");
+        TEST_CHECK(installer.installFromLocal(iso_src.string()).ok);
+        TEST_CHECK(iso_mgr.reloadPlugin("plugin-isolated-test", iso_err));
+        auto wst_u = iso_workers.status("plugin:plugin-isolated-test");
+        TEST_CHECK(wst_u.has_value() && wst_u->transport == omnidesk::WorkerTransport::UnixSocket);
+        auto r_unix = caps.call("isolated.echo.v1", {{"hello", "unix"}});
+        TEST_CHECK(r_unix.ok && r_unix.data["echo"]["hello"] == "unix");
+        TEST_CHECK(domains.mediaSources()[0]->fetchItems("all", "ux").size() == 1);
+
+        if (std::getenv("OMNIDESK_TEST_GUI")) {
+            auto gui = omnidesk::pm::runProcess(
+                {OMNIDESK_TEST_HOST_EXE, "--smoke-ms", "700", "--domain", "text"}, "",
+                {{"OMNIDESK_DATA_HOME", data_dir}, {"OMNIDESK_CONFIG_HOME", cfg_dir},
+                 {"OMNIDESK_TEST_SLOW_DOMAIN", "1"},
+                 {"OMNIDESK_SDK_CMAKE_DIR", OMNIDESK_TEST_SDK_CMAKE_DIR}},
+                8000);
+            if (gui.exit_code != 0) std::cerr << gui.output << "\n" << gui.error << "\n";
+            TEST_CHECK(gui.exit_code == 0 && !gui.timed_out);
+        }
+
+        iso_mgr.unloadAll();
+        bus.unsubscribe(wf_tok);
+        iso_workers.stopAll();
+        iso_jobs.shutdown();
+        TEST_CHECK(installer.removePlugin("plugin-isolated-test", rm_err));
+    }
+
+    // 9. In-process throwing onLoad & throwing capability contained with "plugin.fault" events
+    {
+        const fs::path throw_src = tmp_root / "throwing-inproc-src";
+        fs::create_directories(throw_src / "src", ec);
+        {
+            nlohmann::json mj = {
+                {"schema_version", 1},
+                {"id", "plugin-throwing-inproc"},
+                {"name", "Throwing InProcess Plugin"},
+                {"version", "0.1.0"},
+                {"abi_version", 1},
+                {"kind", "provider"},
+                {"domain", "core"},
+                {"isolation", "in_process"},
+                {"repository", {{"type", "git"}, {"url", "https://example.invalid/throw.git"}, {"branch", "main"}}},
+                {"build", {{"system", "cmake"}, {"entry_target", "plugin_throwing_inproc"}, {"output_lib", "libplugin_throwing_inproc.so"}}},
+                {"provides", {"throw.cap.v1"}},
+                {"consumes", nlohmann::json::array()},
+            };
+            std::ofstream ofs(throw_src / "plugin.json");
+            ofs << mj.dump(2) << "\n";
+        }
+        {
+            std::ofstream ofs(throw_src / "CMakeLists.txt");
+            ofs << "cmake_minimum_required(VERSION 3.20)\n"
+                   "project(plugin_throwing_inproc LANGUAGES CXX)\n"
+                   "set(CMAKE_CXX_STANDARD 17)\n"
+                   "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+                   "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
+                   "find_package(OmniDeskSDK REQUIRED)\n"
+                   "add_library(plugin_throwing_inproc SHARED src/plugin_main.cpp)\n"
+                   "target_link_libraries(plugin_throwing_inproc PRIVATE OmniDesk::SDK)\n"
+                   "set_target_properties(plugin_throwing_inproc PROPERTIES OUTPUT_NAME \"plugin_throwing_inproc\" PREFIX \"lib\")\n";
+        }
+        {
+            std::ofstream ofs(throw_src / "src" / "plugin_main.cpp");
+            ofs << R"CPP(
+#include <stdexcept>
+#include "omnidesk/sdk.hpp"
+
+class ThrowingInprocPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        ctx.registerCapability("throw.canary.v1", [](const nlohmann::json&) -> omnidesk::CapabilityResult {
+            return {true, {}, "", ""};
+        });
+        if (ctx.loadConfig().value("throw_onload", true)) {
+            throw std::runtime_error("boom in onLoad");
+        }
+        ctx.registerCapability("throw.cap.v1", [](const nlohmann::json&) -> omnidesk::CapabilityResult {
+            throw std::runtime_error("boom in cap");
+        });
+        return true;
+    }
+    void onUnload() override {}
+};
+
+OMNIDESK_DECLARE_PLUGIN(
+    ThrowingInprocPlugin,
+    "plugin-throwing-inproc",
+    "Throwing InProcess Plugin",
+    "0.1.0",
+    "provider",
+    "core")
+)CPP";
+        }
+
+        auto throwing_install = installer.installFromLocal(throw_src.string());
+        if (!throwing_install.ok) {
+            std::cerr << throwing_install.error << "\n" << throwing_install.log << "\n";
+        }
+        TEST_CHECK(throwing_install.ok);
+        std::vector<nlohmann::json> plugin_faults;
+        const auto pf_tok = bus.subscribe("plugin.fault", "test",
+            [&](const std::string&, const nlohmann::json& p) { plugin_faults.push_back(p); });
+        caps.setFaultHandler([&](const std::string& p, const std::string& c, const std::string& e) {
+            bus.publish("plugin.fault", {{"plugin_id", p}, {"component", "capability:" + c}, {"error", e}});
+        });
+
+        std::string th_err;
+        TEST_CHECK(!mgr.loadPlugin("plugin-throwing-inproc", th_err));
+        TEST_CHECK(th_err.find("boom in onLoad") != std::string::npos);
+        TEST_CHECK(!caps.has("throw.canary.v1"));
+        TEST_CHECK(!plugin_faults.empty());
+
+        cfg.setPluginValue("plugin-throwing-inproc", "throw_onload", false);
+        TEST_CHECK(mgr.loadPlugin("plugin-throwing-inproc", th_err));
+        auto bad_cap = caps.call("throw.cap.v1", {});
+        TEST_CHECK(!bad_cap.ok && bad_cap.error.find("boom in cap") != std::string::npos);
+        TEST_CHECK(plugin_faults.size() >= 2);
+
+        mgr.unloadAll();
+        bus.unsubscribe(pf_tok);
+        TEST_CHECK(installer.removePlugin("plugin-throwing-inproc", rm_err));
+    }
+
+    // 10. Uncooperative slow in_process plugin: bounded shutdown + DSO pinning (zero hang & zero SIGSEGV)
+    {
+        const fs::path slow_src = tmp_root / "slow-inproc-src";
+        fs::create_directories(slow_src / "src", ec);
+        {
+            nlohmann::json mj = {
+                {"schema_version", 1},
+                {"id", "plugin-slow-inproc"},
+                {"name", "Slow InProcess Plugin"},
+                {"version", "0.1.0"},
+                {"abi_version", 1},
+                {"kind", "source"},
+                {"domain", "text"},
+                {"isolation", "in_process"},
+                {"repository", {{"type", "git"}, {"url", "https://example.invalid/slow.git"}, {"branch", "main"}}},
+                {"build", {{"system", "cmake"}, {"entry_target", "plugin_slow_inproc"}, {"output_lib", "libplugin_slow_inproc.so"}}},
+                {"provides", {"text.source.v1"}},
+                {"consumes", nlohmann::json::array()},
+            };
+            std::ofstream ofs(slow_src / "plugin.json");
+            ofs << mj.dump(2) << "\n";
+        }
+        {
+            std::ofstream ofs(slow_src / "CMakeLists.txt");
+            ofs << "cmake_minimum_required(VERSION 3.20)\n"
+                   "project(plugin_slow_inproc LANGUAGES CXX)\n"
+                   "set(CMAKE_CXX_STANDARD 17)\n"
+                   "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+                   "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
+                   "find_package(OmniDeskSDK REQUIRED)\n"
+                   "add_library(plugin_slow_inproc SHARED src/plugin_main.cpp)\n"
+                   "target_link_libraries(plugin_slow_inproc PRIVATE OmniDesk::SDK)\n"
+                   "set_target_properties(plugin_slow_inproc PROPERTIES OUTPUT_NAME \"plugin_slow_inproc\" PREFIX \"lib\")\n";
+        }
+        {
+            std::ofstream ofs(slow_src / "src" / "plugin_main.cpp");
+            ofs << R"CPP(
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <thread>
+#include "omnidesk/sdk.hpp"
+
+class SlowTextSource final : public omnidesk::ITextSource {
+public:
+    std::string sourceId() const override { return "slow-inproc-text"; }
+    std::string displayName() const override { return "Slow InProcess Text"; }
+    std::string category() const override { return "journal"; }
+    std::vector<omnidesk::TextFeedItem> fetchFeed(const std::string&) override {
+        if (const char* marker = std::getenv("OMNIDESK_TEST_SLOW_STARTED_FILE")) {
+            std::ofstream ofs(marker);
+            ofs << "started\n";
+        }
+        int ms = 300;
+        if (const char* env = std::getenv("OMNIDESK_TEST_SLOW_MS")) {
+            ms = std::stoi(env);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        if (const char* marker = std::getenv("OMNIDESK_TEST_SLOW_DONE_FILE")) {
+            std::ofstream ofs(marker);
+            ofs << "done\n";
+        }
+        return {};
+    }
+    omnidesk::TextArticle fetchArticle(const std::string& id) override {
+        omnidesk::TextArticle a;
+        a.id = id;
+        return a;
+    }
+};
+
+class SlowInprocPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        ctx.registerTextSource(std::make_shared<SlowTextSource>());
+        return true;
+    }
+    void onUnload() override {}
+};
+
+OMNIDESK_DECLARE_PLUGIN(
+    SlowInprocPlugin,
+    "plugin-slow-inproc",
+    "Slow InProcess Plugin",
+    "0.1.0",
+    "source",
+    "text")
+)CPP";
+        }
+
+        auto slow_install = installer.installFromLocal(slow_src.string());
+        if (!slow_install.ok) {
+            std::cerr << slow_install.error << "\n" << slow_install.log << "\n";
+        }
+        TEST_CHECK(slow_install.ok);
+
+        const fs::path started_marker = tmp_root / "slow_inproc.started";
+        const fs::path done_marker = tmp_root / "slow_inproc.done";
+        ::setenv("OMNIDESK_TEST_SLOW_STARTED_FILE", started_marker.c_str(), 1);
+        ::setenv("OMNIDESK_TEST_SLOW_DONE_FILE", done_marker.c_str(), 1);
+        ::setenv("OMNIDESK_TEST_SLOW_MS", "350", 1);
+        ::setenv("OMNIDESK_SHUTDOWN_GRACE_MS", "80", 1);
+
+        {
+            omnidesk::JobCenter slow_jobs(&bus, 1);
+            omnidesk::pm::PluginManager slow_mgr(
+                installer, caps, bus, domains, cfg, secrets, &slow_jobs, nullptr);
+            std::string sl_err;
+            TEST_CHECK(slow_mgr.loadPlugin("plugin-slow-inproc", sl_err));
+            auto t_srcs = domains.textSources();
+            TEST_CHECK(t_srcs.size() == 1);
+            slow_jobs.submit({"host-slow-read", "host.reader", "plugin-read", {}},
+                [src = t_srcs[0]](omnidesk::JobHandle&, std::string&) {
+                    src->fetchFeed("");
+                    return true;
+                });
+            for (int i = 0; i < 200 && !fs::exists(started_marker); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            TEST_CHECK(fs::exists(started_marker));
+
+            const auto t0 = std::chrono::steady_clock::now();
+            slow_jobs.shutdown(80);
+            domains.shutdown(0);
+            slow_mgr.unloadAll();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            TEST_CHECK(elapsed_ms < 320);
+        }
+        for (int i = 0; i < 200 && !fs::exists(done_marker); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST_CHECK(fs::exists(done_marker));
+
+        if (std::getenv("OMNIDESK_TEST_GUI")) {
+            auto gui = omnidesk::pm::runProcess(
+                {OMNIDESK_TEST_HOST_EXE, "--smoke-ms", "400", "--domain", "text"}, "",
+                {{"OMNIDESK_DATA_HOME", data_dir},
+                 {"OMNIDESK_CONFIG_HOME", cfg_dir},
+                 {"OMNIDESK_TEST_SLOW_MS", "30000"},
+                 {"OMNIDESK_SHUTDOWN_GRACE_MS", "300"},
+                 {"OMNIDESK_SDK_CMAKE_DIR", OMNIDESK_TEST_SDK_CMAKE_DIR}},
+                5000);
+            if (gui.exit_code != 0) std::cerr << gui.output << "\n" << gui.error << "\n";
+            TEST_CHECK(gui.exit_code == 0 && !gui.timed_out);
+        }
+
+        ::unsetenv("OMNIDESK_TEST_SLOW_STARTED_FILE");
+        ::unsetenv("OMNIDESK_TEST_SLOW_DONE_FILE");
+        ::unsetenv("OMNIDESK_TEST_SLOW_MS");
+        ::unsetenv("OMNIDESK_SHUTDOWN_GRACE_MS");
+        TEST_CHECK(installer.removePlugin("plugin-slow-inproc", rm_err));
+    }
 
     ::unsetenv("OMNIDESK_STAGING_DIR");
     ::unsetenv("OMNIDESK_DISABLE_GITHUB_API");

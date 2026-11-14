@@ -1,10 +1,65 @@
 #include "omnidesk/host/text_workbench.hpp"
+#include "omnidesk/host/async_load.hpp"
 
 #include "omnidesk/host/kernel.hpp"
 #include "omnidesk/ui_theme.hpp"
 
+#include <algorithm>
+#include <functional>
+
 namespace omnidesk::host {
 namespace {
+
+std::string extractTranslationTag(const std::string& raw) {
+    const std::string open_tag = "<translation>";
+    const std::string close_tag = "</translation>";
+    const size_t start = raw.find(open_tag);
+    if (start == std::string::npos) {
+        return raw;
+    }
+    const size_t body_start = start + open_tag.size();
+    const size_t end = raw.find(close_tag, body_start);
+    if (end == std::string::npos) {
+        return raw.substr(body_start);
+    }
+    return raw.substr(body_start, end - body_start);
+}
+
+std::string resolveJournalPdfUrl(const TextArticle& article) {
+    const std::string& u = article.url;
+    if (u.empty()) return "";
+    if (u.find(".pdf") != std::string::npos) return u;
+    const size_t pos = u.find("arxiv.org/abs/");
+    if (pos != std::string::npos) {
+        std::string id = u.substr(pos + std::string("arxiv.org/abs/").size());
+        const size_t q = id.find_first_of("?#");
+        if (q != std::string::npos) id = id.substr(0, q);
+        if (!id.empty()) return "https://arxiv.org/pdf/" + id + ".pdf";
+    }
+    return "";
+}
+
+bool itemMatchesCategory(const TextFeedItem& item,
+                         const std::string& source_category,
+                         const std::string& active_category) {
+    if (active_category == "all") return true;
+    if (item.category == active_category || source_category == active_category) return true;
+    return std::find(item.tags.begin(), item.tags.end(), active_category) != item.tags.end();
+}
+
+void applyTranslatedCommentsJson(std::vector<CommentNode>& nodes, const nlohmann::json& arr) {
+    if (!arr.is_array()) return;
+    const size_t n = std::min(nodes.size(), arr.size());
+    for (size_t i = 0; i < n; ++i) {
+        if (arr[i].is_object()) {
+            const std::string tr = arr[i].value("translated_body", "");
+            if (!tr.empty()) nodes[i].translated_body = tr;
+            if (arr[i].contains("replies")) {
+                applyTranslatedCommentsJson(nodes[i].replies, arr[i]["replies"]);
+            }
+        }
+    }
+}
 
 std::vector<TextFeedItem> buildShowcaseFeed() {
     return {
@@ -136,25 +191,52 @@ TextWorkbench::TextWorkbench(std::function<void(const std::string&)> on_entity_f
     refresh();
 }
 
+TextWorkbench::~TextWorkbench() {
+    alive_->store(false, std::memory_order_release);
+    feed_request_->cancel();
+    article_request_->cancel();
+    action_request_->cancel();
+}
+
 void TextWorkbench::refresh() {
+    feed_request_->cancel();
+    feed_request_ = CancelToken::create();
     auto& kernel = HostKernel::instance();
     feed_items_.clear();
-    bool live = false;
 
     if (kernel.isInitialized()) {
         const auto sources = kernel.domains().textSources();
         if (!sources.empty()) {
-            live = true;
-            for (const auto& src : sources) {
-                if (active_category_ != "all" && src->category() != active_category_) continue;
-                auto items = src->fetchFeed(search_query_);
-                feed_items_.insert(feed_items_.end(), items.begin(), items.end());
-            }
-            status_label_->setText("已接入 " + std::to_string(sources.size()) + " 个实时 TextSource 插件");
+            status_label_->setText("正在加载文章列表…");
+            rebuildCategoryPills();
+            loadInBackground(kernel.jobs(), "加载文章列表", feed_request_,
+                [sources, query = search_query_, category = active_category_](const auto& cancel) {
+                    std::vector<TextFeedItem> feed;
+                    for (const auto& source : sources) {
+                        if (cancel->isCancelled()) break;
+                        const auto source_category = source->category();
+                        const bool multi = source_category == "recipe" || source_category == "multi";
+                        if (!multi && category != "all" && source_category != category) continue;
+                        auto items = source->fetchFeed(query);
+                        for (auto& item : items) {
+                            if (!multi || itemMatchesCategory(item, source_category, category)) {
+                                feed.push_back(std::move(item));
+                            }
+                        }
+                    }
+                    return feed;
+                },
+                [this, alive = alive_, count = sources.size()](std::vector<TextFeedItem> items) {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    feed_items_ = std::move(items);
+                    status_label_->setText("已接入 " + std::to_string(count) + " 个实时 TextSource 插件");
+                    finishRefresh();
+                });
+            return;
         }
     }
 
-    if (!live) {
+    {
         for (const auto& item : buildShowcaseFeed()) {
             if (active_category_ != "all" && item.category != active_category_) continue;
             if (!search_query_.empty() &&
@@ -164,9 +246,13 @@ void TextWorkbench::refresh() {
             }
             feed_items_.push_back(item);
         }
-        status_label_->setText("高密度阅读排版预览（安装 知乎 / Linux.do / Reddit / 科学期刊 / Chrome 桥接插件后实时同步）");
+        status_label_->setText("高密度阅读排版预览（安装 知乎 / Linux.do / Reddit / 科学期刊 / 声明式配方引擎 后实时同步）");
     }
 
+    finishRefresh();
+}
+
+void TextWorkbench::finishRefresh() {
     if (!has_article_ && !feed_items_.empty()) {
         openArticle(feed_items_.front());
         return;
@@ -179,26 +265,39 @@ void TextWorkbench::refresh() {
 
 void TextWorkbench::rebuildCategoryPills() {
     category_bar_->clearViews();
-    struct Cat {
-        const char* id;
-        const char* label;
-    };
-    const Cat cats[] = {
+    std::vector<std::pair<std::string, std::string>> cats = {
         {"all", "全部阅读流"},
+        {"recipe", "配方源 (20行)"},
         {"blog", "个人博客"},
         {"zhihu", "知乎"},
         {"linuxdo", "Linux.do"},
         {"reddit", "Reddit"},
         {"journal", "科学期刊 (arXiv/Nature)"},
     };
-    for (const auto& c : cats) {
-        auto* b = ui::makeButton(c.label, [this, cid = std::string(c.id)]() {
+
+    auto& kernel = HostKernel::instance();
+    if (kernel.isInitialized() && kernel.capabilities().has("feed.recipe.v1")) {
+        const auto res = kernel.capabilities().call("feed.recipe.v1", {{"action", "list_recipes"}});
+        if (res.ok && res.data.is_object() && res.data.contains("recipes") && res.data["recipes"].is_array()) {
+            for (const auto& r : res.data["recipes"]) {
+                if (!r.is_object() || !r.value("enabled", true)) continue;
+                const std::string rid = r.value("id", "");
+                const std::string rname = r.value("name", rid);
+                if (!rid.empty()) {
+                    cats.emplace_back("recipe:" + rid, rname);
+                }
+            }
+        }
+    }
+
+    for (const auto& [cid, label] : cats) {
+        auto* b = ui::makeButton(label, [this, cid]() {
             brls::sync([this, cid]() {
                 active_category_ = cid;
                 has_article_ = false;
                 refresh();
             });
-        }, active_category_ == c.id, 34.0f);
+        }, active_category_ == cid, 34.0f);
         b->setMarginRight(8);
         category_bar_->addView(b);
     }
@@ -244,26 +343,41 @@ void TextWorkbench::rebuildFeed() {
 }
 
 void TextWorkbench::openArticle(const TextFeedItem& item) {
-    bool fetched = false;
+    article_request_->cancel();
+    article_request_ = CancelToken::create();
+    active_article_source_id_ = item.source_id;
     auto& kernel = HostKernel::instance();
     if (kernel.isInitialized()) {
         for (const auto& src : kernel.domains().textSources()) {
             if (src->sourceId() == item.source_id) {
-                active_article_ = src->fetchArticle(item.id);
-                fetched = true;
-                break;
+                status_label_->setText("正在加载文章…");
+                loadInBackground(kernel.jobs(), "加载文章", article_request_,
+                    [src, article_id = item.id](const auto&) { return src->fetchArticle(article_id); },
+                    [this, alive = alive_](TextArticle article) {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        status_label_->setText(article.title.empty() ? "文章加载失败，可重试" : "文章已加载");
+                        if (!article.id.empty()) showArticle(std::move(article));
+                    });
+                return;
             }
         }
     }
-    if (!fetched) {
-        active_article_ = buildShowcaseArticle(item);
-    }
+    showArticle(buildShowcaseArticle(item));
+}
+
+void TextWorkbench::showArticle(TextArticle article) {
+    active_article_ = std::move(article);
+    auto& kernel = HostKernel::instance();
     has_article_ = true;
     if (on_entity_focus_) {
         on_entity_focus_(active_article_.title);
     }
     if (kernel.isInitialized()) {
-        kernel.bus().publish("entity.text.open", {{"id", active_article_.id}, {"title", active_article_.title}});
+        kernel.bus().publish("entity.text.open", {
+            {"id", active_article_.id},
+            {"title", active_article_.title},
+            {"origin", "host_workbench"},
+        });
     }
     rebuildCategoryPills();
     rebuildFeed();
@@ -284,6 +398,37 @@ void TextWorkbench::rebuildReader() {
     top_row->addView(ui::makePill(active_article_.source_name, "status/info_bg", "domain/text"));
 
     auto* mode_row = new brls::Box(brls::Axis::ROW);
+    auto& kernel = HostKernel::instance();
+    const bool can_translate = kernel.isInitialized() &&
+                               (kernel.capabilities().has("feed.recipe.v1") ||
+                                kernel.capabilities().has("llm.translate.v1") ||
+                                kernel.capabilities().has("llm.chat.v1"));
+    if (can_translate && !active_article_.id.empty()) {
+        auto* tr_btn = ui::makeButton(
+            translating_ ? "翻译中..." : "一键双语翻译",
+            [this]() { translateActiveArticle(); },
+            false, 30.0f);
+        tr_btn->setMarginLeft(6);
+        mode_row->addView(tr_btn);
+    }
+    if (kernel.isInitialized() && kernel.capabilities().has("web.embed.v1") && !active_article_.url.empty()) {
+        auto* web_btn = ui::makeButton("Chrome 原页", [this]() {
+            openActiveInChrome();
+        }, false, 30.0f);
+        web_btn->setMarginLeft(6);
+        mode_row->addView(web_btn);
+    }
+    const bool is_journal = (active_article_.category == "journal") ||
+                            !active_article_.doi.empty() ||
+                            !resolveJournalPdfUrl(active_article_).empty();
+    if (kernel.isInitialized() && is_journal && kernel.capabilities().has("book.bilingual_pdf.v1")) {
+        auto* pdf_btn = ui::makeButton("BabelDOC 精译 PDF", [this]() {
+            handoffJournalToBabelDoc();
+        }, false, 30.0f);
+        pdf_btn->setMarginLeft(6);
+        mode_row->addView(pdf_btn);
+    }
+
     struct ModeDef {
         BilingualMode m;
         const char* label;
@@ -320,13 +465,21 @@ void TextWorkbench::rebuildReader() {
 
     for (const auto& p : active_article_.paragraphs) {
         if (p.kind == "heading") {
-            auto* hl = ui::makeLabel(p.original, 18.0f, "brls/text");
-            hl->setMarginTop(12);
-            hl->setMarginBottom(6);
-            doc->addView(hl);
+            if (bilingual_mode_ != BilingualMode::TranslatedOnly || p.translated.empty()) {
+                auto* hl = ui::makeLabel(p.original, 18.0f, "brls/text");
+                hl->setMarginTop(12);
+                hl->setMarginBottom(p.translated.empty() ? 6 : 2);
+                doc->addView(hl);
+            }
+            if (!p.translated.empty() && bilingual_mode_ != BilingualMode::OriginalOnly) {
+                auto* htr = ui::makeLabel(p.translated, 16.5f, "font/grey");
+                htr->setMarginTop(2);
+                htr->setMarginBottom(6);
+                doc->addView(htr);
+            }
             continue;
         }
-        if (p.kind == "code" || p.kind == "quote") {
+        if (p.kind == "code" || p.kind == "quote" || p.kind == "formula") {
             auto* blk = ui::makeCard("desktop/soft", 12.0f, 8.0f);
             blk->setMarginTop(8);
             blk->setMarginBottom(8);
@@ -365,6 +518,261 @@ void TextWorkbench::rebuildReader() {
     }
 
     reader_box_->addView(doc);
+}
+
+void TextWorkbench::translateActiveArticle() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !has_article_) return;
+
+    const bool has_recipe = kernel.capabilities().has("feed.recipe.v1");
+    const bool has_tr = kernel.capabilities().has("llm.translate.v1");
+    const bool has_chat = kernel.capabilities().has("llm.chat.v1");
+    if (!has_recipe && !has_tr && !has_chat) {
+        brls::Application::notify("未装载翻译能力插件（请安装 plugin-magpie-agent）");
+        return;
+    }
+
+    action_request_->cancel();
+    action_request_ = CancelToken::create();
+    translating_ = true;
+    const TextArticle snapshot = active_article_;
+    const std::string source_id = active_article_source_id_;
+    status_label_->setText("正在后台执行双语翻译: " + snapshot.title + "...");
+    rebuildReader();
+
+    loadInBackground(kernel.jobs(), "双语翻译: " + snapshot.title, action_request_,
+        [snapshot, source_id, has_recipe, has_tr, has_chat](const auto& cancel) {
+            TextArticle out = snapshot;
+            bool updated = false;
+            std::string err_msg;
+
+            if (has_recipe && (source_id.empty() || source_id.find("recipe") != std::string::npos)) {
+                const auto res = HostKernel::instance().capabilities().callCancellable("feed.recipe.v1", {
+                    {"action", "translate_article"},
+                    {"article_id", out.id},
+                }, cancel);
+                if (res.ok && res.data.is_object() && res.data.contains("article") &&
+                    res.data["article"].is_object()) {
+                    const auto& aj = res.data["article"];
+                    if (aj.contains("paragraphs") && aj["paragraphs"].is_array()) {
+                        const size_t n = std::min(out.paragraphs.size(), aj["paragraphs"].size());
+                        for (size_t i = 0; i < n; ++i) {
+                            const std::string tr = aj["paragraphs"][i].value("translated", "");
+                            if (!tr.empty()) {
+                                out.paragraphs[i].translated = tr;
+                                updated = true;
+                            }
+                        }
+                    }
+                    if (aj.contains("comments")) {
+                        applyTranslatedCommentsJson(out.comments, aj["comments"]);
+                        updated = true;
+                    }
+                    if (updated) {
+                        return std::tuple<bool, std::string, TextArticle>(true, "", std::move(out));
+                    }
+                } else if (!res.ok) {
+                    err_msg = res.error;
+                }
+            }
+
+            if (!has_tr && !has_chat) {
+                return std::tuple<bool, std::string, TextArticle>(
+                    false, err_msg.empty() ? "未找到可用 llm.translate.v1 / llm.chat.v1 提供方" : err_msg,
+                    std::move(out));
+            }
+
+            auto translateText = [&](const std::string& text, const std::string& ctx_before) -> std::string {
+                if (text.empty() || cancel->isCancelled()) return "";
+                CapabilityResult r;
+                if (has_tr) {
+                    r = HostKernel::instance().capabilities().callCancellable("llm.translate.v1", {
+                        {"text", text},
+                        {"source_lang", "auto"},
+                        {"target_lang", "zh-CN"},
+                        {"context_before", ctx_before},
+                        {"preserve_formatting", true},
+                    }, cancel);
+                } else {
+                    r = HostKernel::instance().capabilities().callCancellable("llm.chat.v1", {
+                        {"domain", "text"},
+                        {"context", out.title},
+                        {"prompt", "请将以下内容精准译为简体中文，保留代码/公式/引用标记不破坏：\n\n" + text},
+                    }, cancel);
+                }
+                if (!r.ok) {
+                    if (err_msg.empty()) err_msg = r.error;
+                    return "";
+                }
+                std::string tr = r.data.value("translation", r.data.value("reply", ""));
+                return extractTranslationTag(tr);
+            };
+
+            std::string prev_orig;
+            for (auto& p : out.paragraphs) {
+                if (cancel->isCancelled()) break;
+                if (p.kind == "code" || p.kind == "formula" || p.original.empty()) {
+                    continue;
+                }
+                if (p.translated.empty()) {
+                    std::string tr = translateText(p.original, prev_orig);
+                    if (!tr.empty()) {
+                        p.translated = std::move(tr);
+                        updated = true;
+                    }
+                }
+                prev_orig = p.original;
+            }
+
+            std::function<void(std::vector<CommentNode>&)> translateComments =
+                [&](std::vector<CommentNode>& nodes) {
+                    for (auto& node : nodes) {
+                        if (cancel->isCancelled()) return;
+                        if (!node.body.empty() && node.translated_body.empty()) {
+                            std::string tr = translateText(node.body, "");
+                            if (!tr.empty()) {
+                                node.translated_body = std::move(tr);
+                                updated = true;
+                            }
+                        }
+                        translateComments(node.replies);
+                    }
+                };
+            translateComments(out.comments);
+
+            return std::tuple<bool, std::string, TextArticle>(updated, std::move(err_msg), std::move(out));
+        },
+        [this, alive = alive_, target_id = snapshot.id](auto tuple_res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            translating_ = false;
+            const bool ok = std::get<0>(tuple_res);
+            const std::string& err = std::get<1>(tuple_res);
+            auto& out = std::get<2>(tuple_res);
+            if (ok && has_article_ && active_article_.id == target_id) {
+                active_article_ = std::move(out);
+                bilingual_mode_ = BilingualMode::Parallel;
+                status_label_->setText("已完成全文与评论区双语对照翻译");
+                brls::Application::notify("双语翻译完成");
+            } else {
+                status_label_->setText(err.empty() ? "翻译未产生新译文" : ("翻译失败: " + err));
+                if (!err.empty()) {
+                    brls::Application::notify("翻译失败: " + err);
+                }
+            }
+            rebuildReader();
+        });
+}
+
+void TextWorkbench::openActiveInChrome() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("web.embed.v1") || active_article_.url.empty()) {
+        return;
+    }
+    const std::string url = active_article_.url;
+    const std::string title = active_article_.title;
+    action_request_->cancel();
+    action_request_ = CancelToken::create();
+    loadInBackground(kernel.jobs(), "在 Chrome 打开: " + title, action_request_,
+        [url](const auto& cancel) {
+            return HostKernel::instance().capabilities().callCancellable("web.embed.v1", {
+                {"action", "open"},
+                {"url", url},
+            }, cancel);
+        },
+        [alive = alive_](CapabilityResult res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (!res.ok) {
+                brls::Application::notify("打开托管 Chrome 失败: " + res.error);
+            }
+        });
+}
+
+void TextWorkbench::handoffJournalToBabelDoc() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("book.bilingual_pdf.v1")) {
+        brls::Application::notify("未装载 book.bilingual_pdf.v1 插件");
+        return;
+    }
+    const std::string pdf_url = resolveJournalPdfUrl(active_article_);
+    if (pdf_url.empty()) {
+        brls::Application::notify("当前文章暂无可直达 PDF 链接；可在 Chrome 原页下载 PDF 后送入 BabelDOC");
+        return;
+    }
+    const std::string title = active_article_.title;
+    action_request_->cancel();
+    action_request_ = CancelToken::create();
+    loadInBackground(kernel.jobs(), "提交 BabelDOC PDF 精译: " + title, action_request_,
+        [pdf_url, title](const auto& cancel) {
+            return HostKernel::instance().capabilities().callCancellable("book.bilingual_pdf.v1", {
+                {"action", "import_pdf"},
+                {"source", pdf_url},
+                {"url", pdf_url},
+                {"title", title},
+            }, cancel);
+        },
+        [alive = alive_, title](CapabilityResult res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (!res.ok) {
+                brls::Application::notify("BabelDOC 导入失败: " + res.error);
+                return;
+            }
+            const std::string bid = res.data.value("book_id", "");
+            if (!bid.empty() && HostKernel::instance().isInitialized()) {
+                HostKernel::instance().bus().publish("entity.book.open", {
+                    {"book_id", bid},
+                    {"title", title},
+                    {"format", "pdf"},
+                    {"page", 1},
+                });
+            } else {
+                brls::Application::notify("已送入 BabelDOC 书架: " + title);
+            }
+        });
+}
+
+void TextWorkbench::openExternalArticle(const nlohmann::json& payload) {
+    if (!payload.is_object()) return;
+    const std::string aid = payload.value("article_id", payload.value("id", ""));
+    const std::string sid = payload.value("source_id", "");
+    const std::string title = payload.value("title", "");
+    const std::string url = payload.value("url", "");
+    const std::string doi = payload.value("doi", "");
+
+    for (const auto& item : feed_items_) {
+        if ((!aid.empty() && item.id == aid) || (!url.empty() && item.url == url)) {
+            openArticle(item);
+            return;
+        }
+    }
+
+    auto& kernel = HostKernel::instance();
+    if (!aid.empty() && kernel.isInitialized()) {
+        const auto sources = kernel.domains().textSources();
+        for (const auto& src : sources) {
+            if (!sid.empty() && src->sourceId() != sid) continue;
+            TextFeedItem item;
+            item.id = aid;
+            item.source_id = src->sourceId();
+            item.source_name = src->displayName();
+            item.category = src->category();
+            item.title = title;
+            item.url = url;
+            openArticle(item);
+            return;
+        }
+    }
+
+    if (!title.empty() || !url.empty()) {
+        TextArticle article;
+        article.id = !aid.empty() ? aid : ("ext-text:" + url);
+        article.source_name = sid.empty() ? "外部阅读" : sid;
+        article.category = !doi.empty() ? "journal" : "blog";
+        article.title = title.empty() ? url : title;
+        article.url = url;
+        article.doi = doi;
+        article.subtitle = article.source_name + (doi.empty() ? "" : (" · DOI: " + doi));
+        showArticle(std::move(article));
+    }
 }
 
 void TextWorkbench::renderCommentNode(brls::Box* parent, const CommentNode& node, int depth) {

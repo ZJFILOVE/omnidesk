@@ -23,6 +23,8 @@ struct InstalledPluginRecord {
     bool dev_local = false;
     std::string install_source = "source-build";
     std::string release_tag;
+    std::string sdk_version;
+    std::string sdk_abi_signature;
     std::vector<std::string> backup_versions;
 };
 
@@ -53,6 +55,30 @@ struct UpdateCheckResult {
     std::string error;
 };
 
+struct AbiStatusEntry {
+    std::string plugin_id;
+    std::string version;
+    std::string so_path;
+    std::string plugin_sdk_version;
+    std::string plugin_abi_signature;
+    std::string host_sdk_version;
+    std::string host_abi_signature;
+    bool enabled = true;
+    bool compatible = false;
+    bool needs_rebuild = false;
+    bool can_rebuild = false;
+    std::string reason;
+};
+
+struct BatchRebuildResult {
+    bool ok = true;
+    int rebuilt_count = 0;
+    int skipped_count = 0;
+    int failed_count = 0;
+    std::vector<InstallResult> results;
+    std::string error;
+};
+
 using ProgressCallback = std::function<void(const std::string& stage, const std::string& detail)>;
 
 /**
@@ -76,7 +102,8 @@ public:
     InstallResult installFromGit(const std::string& git_source,
                                  const std::string& branch = "",
                                  ProgressCallback cb = nullptr,
-                                 const std::optional<ReleaseArtifactSpec>& release_hint = std::nullopt);
+                                 const std::optional<ReleaseArtifactSpec>& release_hint = std::nullopt,
+                                 bool allow_prebuilt = true);
 
     InstallResult installFromPrebuilt(const ReleaseArtifactSpec& release,
                                       const std::string& source_url = "",
@@ -94,6 +121,15 @@ public:
 
     InstallResult updatePlugin(const std::string& plugin_id,
                                ProgressCallback cb = nullptr);
+
+    std::vector<AbiStatusEntry> checkInstalledAbiStatus(bool verify_binaries = true) const;
+    bool hasStaleInstalledPlugins(bool verify_binaries = true) const;
+
+    InstallResult rebuildPlugin(const std::string& plugin_id,
+                                ProgressCallback cb = nullptr);
+
+    BatchRebuildResult rebuildPlugins(bool only_stale = true,
+                                      ProgressCallback cb = nullptr);
 
     InstallResult rollbackPlugin(const std::string& plugin_id);
     bool removePlugin(const std::string& plugin_id, std::string& error);
@@ -138,7 +174,8 @@ private:
     bool verifyViaSubprocess(const std::string& so_path,
                              const std::string& expected_id,
                              std::string& log,
-                             std::string& error) const;
+                             std::string& error,
+                             nlohmann::json* info_out = nullptr) const;
 
     nlohmann::json loadLockFile() const;
     bool saveLockFile(const nlohmann::json& j) const;

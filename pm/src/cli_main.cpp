@@ -8,10 +8,13 @@
 #include "omnidesk/config_store.hpp"
 #include "omnidesk/domain_registry.hpp"
 #include "omnidesk/entity_bus.hpp"
+#include "omnidesk/job_center.hpp"
+#include "omnidesk/plugin.hpp"
 #include "omnidesk/pm/catalog.hpp"
 #include "omnidesk/pm/installer.hpp"
 #include "omnidesk/pm/manager.hpp"
 #include "omnidesk/pm/scaffold.hpp"
+#include "omnidesk/worker_supervisor.hpp"
 
 namespace fs = std::filesystem;
 
@@ -125,6 +128,8 @@ void printUsage() {
         "  omnidesk-pm install <github-owner/repo | git-url | local-dir | catalog-id> [--branch <br>] [--no-verify-load]\n"
         "  omnidesk-pm radar [--no-changelog]\n"
         "  omnidesk-pm update [<plugin-id> | --all]\n"
+        "  omnidesk-pm abi-status [--json] [--strict]\n"
+        "  omnidesk-pm rebuild [<plugin-id> | --stale | --all]\n"
         "  omnidesk-pm rollback <plugin-id>\n"
         "  omnidesk-pm enable <plugin-id>\n"
         "  omnidesk-pm disable <plugin-id>\n"
@@ -133,7 +138,7 @@ void printUsage() {
         "  omnidesk-pm config <plugin-id> [show | set <key> <val> | set-secret <key> <val> | get <key>]\n"
         "  omnidesk-pm init <dir> --id <plugin-id> [--name <n>] [--kind provider|workspace|hybrid|extension]\n"
         "                  [--domain core|media|text|book] [--provides a,b] [--consumes c,d] [--owner <github_user>]\n"
-        "  omnidesk-pm abi-check <so-path> [--expect-id <id>]\n"
+        "  omnidesk-pm abi-check <so-path> [--expect-id <id>] [--json]\n"
         "  omnidesk-pm verify <plugin-id>\n";
 }
 
@@ -154,23 +159,34 @@ int main(int argc, char** argv) {
     // Fast path for isolated subprocess ABI verification
     if (cmd == "abi-check") {
         if (argc < 3) {
-            std::cerr << "Usage: omnidesk-pm abi-check <so-path> [--expect-id <id>]\n";
+            std::cerr << "Usage: omnidesk-pm abi-check <so-path> [--expect-id <id>] [--json]\n";
             return 2;
         }
         const std::string so_path = argv[2];
         std::string expect_id;
-        for (int i = 3; i + 1 < argc; ++i) {
-            if (std::string(argv[i]) == "--expect-id") {
+        bool json_out = false;
+        for (int i = 3; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--expect-id" && i + 1 < argc) {
                 expect_id = argv[++i];
+            } else if (a == "--json") {
+                json_out = true;
             }
         }
         std::string err;
         nlohmann::json info;
         if (!omnidesk::pm::PluginInstaller::checkSoAbiInProcess(so_path, expect_id, err, &info)) {
-            std::cerr << err << "\n";
+            if (json_out) {
+                if (!info.is_object()) info = nlohmann::json::object();
+                info["compatible"] = false;
+                info["error"] = err;
+                std::cout << "\n" << info.dump() << "\n";
+            } else {
+                std::cerr << err << "\n";
+            }
             return 1;
         }
-        std::cout << info.dump(2) << "\n";
+        std::cout << "\n" << (json_out ? info.dump() : info.dump(2)) << "\n";
         return 0;
     }
 
@@ -184,7 +200,9 @@ int main(int argc, char** argv) {
     omnidesk::DomainRegistry domains;
     omnidesk::ConfigStore config(defaultConfigRoot());
     omnidesk::SecretVault secrets(defaultConfigRoot());
-    omnidesk::pm::PluginManager manager(installer, caps, bus, domains, config, secrets);
+    omnidesk::JobCenter jobs(&bus, 2);
+    omnidesk::WorkerSupervisor workers;
+    omnidesk::pm::PluginManager manager(installer, caps, bus, domains, config, secrets, &jobs, &workers);
 
     omnidesk::pm::MarketplaceCatalog catalog;
     if (!catalog_path.empty()) {
@@ -386,6 +404,103 @@ int main(int argc, char** argv) {
             }
         }
         return failures == 0 ? 0 : 1;
+    }
+
+    if (cmd == "abi-status") {
+        bool json_out = false;
+        bool strict = false;
+        for (int i = 2; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--json") json_out = true;
+            else if (a == "--strict") strict = true;
+        }
+        auto statuses = installer.checkInstalledAbiStatus();
+        int stale_count = 0;
+        for (const auto& st : statuses) {
+            if (st.needs_rebuild) ++stale_count;
+        }
+        if (json_out) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& st : statuses) {
+                arr.push_back({
+                    {"plugin_id", st.plugin_id},
+                    {"version", st.version},
+                    {"so_path", st.so_path},
+                    {"enabled", st.enabled},
+                    {"compatible", st.compatible},
+                    {"needs_rebuild", st.needs_rebuild},
+                    {"can_rebuild", st.can_rebuild},
+                    {"plugin_sdk_version", st.plugin_sdk_version},
+                    {"plugin_abi_signature", st.plugin_abi_signature},
+                    {"host_sdk_version", st.host_sdk_version},
+                    {"host_abi_signature", st.host_abi_signature},
+                    {"reason", st.reason},
+                });
+            }
+            nlohmann::json root = {
+                {"host_sdk_version", omnidesk::sdkVersion()},
+                {"host_abi_signature", omnidesk::sdkAbiSignature()},
+                {"stale_count", stale_count},
+                {"plugins", std::move(arr)},
+            };
+            std::cout << root.dump(2) << "\n";
+        } else {
+            std::cout << "Host SDK: " << omnidesk::sdkVersion()
+                      << " (ABI signature: " << omnidesk::sdkAbiSignature() << ")\n";
+            if (statuses.empty()) {
+                std::cout << "No plugins installed.\n";
+            }
+            for (const auto& st : statuses) {
+                std::cout << st.plugin_id << "\tv" << st.version << "\t"
+                          << (st.compatible ? "[OK]" : "[STALE - REBUILD REQUIRED]");
+                if (!st.plugin_abi_signature.empty()) {
+                    std::cout << "\tsig=" << st.plugin_abi_signature;
+                }
+                if (!st.compatible && !st.reason.empty()) {
+                    std::cout << "\t" << st.reason;
+                }
+                std::cout << "\n";
+            }
+            std::cout << "ABI Status: " << stale_count << "/" << statuses.size()
+                      << " installed plugin(s) need rebuild.\n";
+        }
+        return (strict && stale_count > 0) ? 1 : 0;
+    }
+
+    if (cmd == "rebuild") {
+        if (sdk_cmake_dir.empty()) {
+            std::cerr << "Error: Cannot locate OmniDeskSDKConfig.cmake (set OMNIDESK_SDK_CMAKE_DIR)\n";
+            return 1;
+        }
+        auto progress = [](const std::string& stage, const std::string& detail) {
+            std::cout << "[" << stage << "] " << detail;
+            if (detail.empty() || detail.back() != '\n') {
+                std::cout << "\n";
+            }
+        };
+
+        std::string target = (argc >= 3) ? argv[2] : "--stale";
+        if (target == "--stale" || target == "--all") {
+            const bool only_stale = (target == "--stale");
+            auto batch = installer.rebuildPlugins(only_stale, progress);
+            std::cout << "Batch rebuild complete: rebuilt=" << batch.rebuilt_count
+                      << ", skipped=" << batch.skipped_count
+                      << ", failed=" << batch.failed_count << "\n";
+            if (!batch.ok) {
+                std::cerr << "Batch rebuild errors: " << batch.error << "\n";
+                return 1;
+            }
+            return 0;
+        }
+
+        auto res = installer.rebuildPlugin(target, progress);
+        if (!res.ok) {
+            std::cerr << "Rebuild failed (" << target << "): " << res.error << "\n";
+            return 1;
+        }
+        std::cout << "Rebuilt " << res.plugin_id << " v" << res.version
+                  << " (" << res.so_path << ")\n";
+        return 0;
     }
 
     if (cmd == "rollback" && argc >= 3) {

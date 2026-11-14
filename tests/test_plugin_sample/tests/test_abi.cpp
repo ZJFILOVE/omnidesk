@@ -18,7 +18,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     const OmniDeskPluginInfo* info = info_fn();
-    if (!info || info->abi_version != OMNIDESK_PLUGIN_ABI_VERSION || std::string(info->id) != argv[2]) {
+    if (!info || info->abi_version != OMNIDESK_PLUGIN_ABI_VERSION ||
+        info->struct_size < sizeof(OmniDeskPluginInfo) || !info->id ||
+        std::string(info->id) != argv[2] ||
+        !info->sdk_abi_signature || !*info->sdk_abi_signature) {
         dlclose(h);
         return 1;
     }

@@ -250,6 +250,43 @@
         "total_chunks": { "type": "integer", "minimum": 1 },
         "progress": { "type": "number", "minimum": 0, "maximum": 1 }
       }
+    },
+    "FeedRecipeRequest": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list_recipes",
+            "get_recipe",
+            "save_recipe",
+            "delete_recipe",
+            "reload",
+            "test_recipe",
+            "fetch_feed",
+            "translate_article"
+          ]
+        },
+        "id": { "type": "string" },
+        "recipe_id": { "type": "string" },
+        "article_id": { "type": "string" },
+        "query": { "type": "string" },
+        "format": { "type": "string", "enum": ["json", "lua"] },
+        "content": { "type": "string" },
+        "target_lang": { "type": "string", "default": "zh-CN" },
+        "force": { "type": "boolean", "default": true }
+      }
+    },
+    "WebCookiesRequest": {
+      "type": "object",
+      "required": ["action", "url"],
+      "properties": {
+        "action": { "type": "string", "enum": ["get_cookies"] },
+        "url": { "type": "string" },
+        "domain": { "type": "string" },
+        "include_subdomains": { "type": "boolean", "default": true }
+      }
     }
   }
 }

@@ -62,6 +62,22 @@ public:
 
     std::string submitJob(JobSpec spec, JobCenter::TaskFn task);
     bool registerWorker(WorkerSpec spec);
+    bool registerWorkerCapability(const std::string& capability_id,
+                                  const std::string& worker_id,
+                                  const std::string& default_action = "",
+                                  nlohmann::json metadata = nlohmann::json::object(),
+                                  int priority = 100);
+    bool registerWorkerMediaSource(const std::string& worker_id,
+                                   const std::string& source_id,
+                                   const std::string& display_name,
+                                   std::vector<std::string> categories = {});
+    bool registerWorkerTextSource(const std::string& worker_id,
+                                  const std::string& source_id,
+                                  const std::string& display_name,
+                                  const std::string& category = "blog");
+    bool registerWorkerBookSource(const std::string& worker_id,
+                                  const std::string& source_id,
+                                  const std::string& display_name);
 
     void registerMediaSource(std::shared_ptr<IMediaSource> source);
     void registerTextSource(std::shared_ptr<ITextSource> source);
@@ -95,6 +111,8 @@ private:
     mutable std::vector<std::string> recent_logs_;
 };
 
+#define OMNIDESK_PLUGIN_INTERFACE_REVISION 1u
+
 /**
  * Base interface every standalone C++17 .so plugin implements.
  */
@@ -120,5 +138,6 @@ public:
 };
 
 OMNIDESK_API std::string sdkVersion();
+OMNIDESK_API std::string sdkAbiSignature();
 
 } // namespace omnidesk

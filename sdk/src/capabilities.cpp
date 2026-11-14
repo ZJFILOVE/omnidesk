@@ -1,7 +1,11 @@
 #include "omnidesk/capabilities.hpp"
+#include "shutdown_grace.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <queue>
 #include <thread>
 #include <unordered_set>
@@ -22,6 +26,27 @@ std::string extractTextFallback(const nlohmann::json& data) {
 
 }  // namespace
 
+struct CapabilityRegistry::FaultDispatcher {
+    std::mutex mutex;
+    FaultHandler handler;
+
+    void report(const std::string& plugin_id,
+                const std::string& component,
+                const std::string& error) const {
+        FaultHandler cb;
+        {
+            std::lock_guard lock(const_cast<std::mutex&>(mutex));
+            cb = handler;
+        }
+        if (cb) {
+            try {
+                cb(plugin_id, component, error);
+            } catch (...) {
+            }
+        }
+    }
+};
+
 struct CapabilityRegistry::AsyncExecutor {
     struct TaskRecord {
         uint64_t id = 0;
@@ -30,34 +55,85 @@ struct CapabilityRegistry::AsyncExecutor {
         std::function<void()> fn;
     };
 
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::condition_variable done_cv;
+        std::queue<TaskRecord> queue;
+        std::vector<std::thread::id> worker_ids;
+        std::unordered_map<uint64_t, std::shared_ptr<CancelToken>> active_tokens;
+        std::unordered_map<uint64_t, std::string> active_plugins;
+        std::unordered_map<std::string, size_t> in_flight_by_plugin;
+        size_t active_workers = 0;
+        uint64_t next_id = 1;
+        bool stopping = false;
+        std::atomic<bool> owner_alive{true};
+    };
+
+    struct WorkerEntry {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> exited;
+    };
+
     explicit AsyncExecutor(size_t num_threads = 4) {
+        state->active_workers = num_threads;
         workers.reserve(num_threads);
         for (size_t i = 0; i < num_threads; ++i) {
-            workers.emplace_back([this]() { loop(); });
+            auto exited = std::make_shared<std::atomic<bool>>(false);
+            std::thread t([st = state, exited]() { loop(st, exited); });
+            {
+                std::lock_guard lock(state->mutex);
+                state->worker_ids.push_back(t.get_id());
+            }
+            workers.push_back(WorkerEntry{std::move(t), std::move(exited)});
         }
     }
 
     ~AsyncExecutor() {
-        shutdown();
+        shutdown(-1);
     }
 
-    void shutdown() {
+    void shutdown(int timeout_ms) {
         std::vector<std::shared_ptr<CancelToken>> to_cancel;
+        std::vector<TaskRecord> dropped;
         {
-            std::lock_guard lock(mutex);
-            if (stopping) return;
-            stopping = true;
-            for (const auto& [_, tok] : active_tokens) {
+            std::lock_guard lock(state->mutex);
+            if (state->stopping) return;
+            state->stopping = true;
+            state->owner_alive.store(false, std::memory_order_release);
+            for (const auto& [_, tok] : state->active_tokens) {
                 if (tok) to_cancel.push_back(tok);
             }
+            while (!state->queue.empty()) {
+                dropped.push_back(std::move(state->queue.front()));
+                state->queue.pop();
+            }
         }
+        dropped.clear();
         for (auto& tok : to_cancel) tok->cancel();
-        cv.notify_all();
+        state->cv.notify_all();
+
+        const int grace_ms = detail::resolveShutdownGraceMs(timeout_ms);
         const auto self_id = std::this_thread::get_id();
-        for (auto& t : workers) {
-            if (t.joinable()) {
-                if (t.get_id() == self_id) t.detach();
-                else t.join();
+        {
+            std::unique_lock lock(state->mutex);
+            if (grace_ms > 0) {
+                state->done_cv.wait_for(lock, std::chrono::milliseconds(grace_ms), [this]() {
+                    return state->active_workers == 0;
+                });
+            }
+            if (state->active_workers > 0) {
+                std::fprintf(stderr,
+                             "[CapabilityRegistry] shutdown grace (%d ms) expired with %zu active worker(s); detaching stuck worker(s)\n",
+                             grace_ms, state->active_workers);
+            }
+        }
+        for (auto& w : workers) {
+            if (!w.thread.joinable()) continue;
+            if (w.thread.get_id() == self_id || !w.exited->load(std::memory_order_acquire)) {
+                w.thread.detach();
+            } else {
+                w.thread.join();
             }
         }
         workers.clear();
@@ -65,8 +141,8 @@ struct CapabilityRegistry::AsyncExecutor {
 
     bool isWorkerThread() const {
         const auto self_id = std::this_thread::get_id();
-        for (const auto& t : workers) {
-            if (t.get_id() == self_id) return true;
+        for (const auto& wid : state->worker_ids) {
+            if (wid == self_id) return true;
         }
         return false;
     }
@@ -74,26 +150,26 @@ struct CapabilityRegistry::AsyncExecutor {
     void submit(const std::string& plugin_hint,
                 std::shared_ptr<CancelToken> cancel,
                 std::function<void()> fn) {
-        std::lock_guard lock(mutex);
-        if (stopping) {
+        std::lock_guard lock(state->mutex);
+        if (state->stopping) {
             if (cancel) cancel->cancel();
             return;
         }
-        const uint64_t id = next_id++;
-        active_tokens[id] = cancel;
-        active_plugins[id] = plugin_hint;
-        queue.push(TaskRecord{id, plugin_hint, std::move(cancel), std::move(fn)});
-        cv.notify_one();
+        const uint64_t id = state->next_id++;
+        state->active_tokens[id] = cancel;
+        state->active_plugins[id] = plugin_hint;
+        state->queue.push(TaskRecord{id, plugin_hint, std::move(cancel), std::move(fn)});
+        state->cv.notify_one();
     }
 
-    void cancelAndWaitPlugin(const std::string& plugin_id) {
+    void cancelAndWaitPlugin(const std::string& plugin_id, int timeout_ms = -1) {
         std::vector<std::shared_ptr<CancelToken>> to_cancel;
         {
-            std::lock_guard lock(mutex);
-            for (const auto& [id, pid] : active_plugins) {
+            std::lock_guard lock(state->mutex);
+            for (const auto& [id, pid] : state->active_plugins) {
                 if (pid.empty() || pid == plugin_id) {
-                    auto it = active_tokens.find(id);
-                    if (it != active_tokens.end() && it->second) {
+                    auto it = state->active_tokens.find(id);
+                    if (it != state->active_tokens.end() && it->second) {
                         to_cancel.push_back(it->second);
                     }
                 }
@@ -102,66 +178,103 @@ struct CapabilityRegistry::AsyncExecutor {
         for (auto& tok : to_cancel) tok->cancel();
         if (isWorkerThread()) return;
 
-        std::unique_lock lock(mutex);
-        done_cv.wait(lock, [this, &plugin_id]() {
-            return in_flight_by_plugin[plugin_id] == 0;
-        });
-    }
-
-    void trackPluginStart(const std::string& plugin_id) {
-        if (plugin_id.empty()) return;
-        std::lock_guard lock(mutex);
-        ++in_flight_by_plugin[plugin_id];
-    }
-
-    void trackPluginEnd(const std::string& plugin_id) {
-        if (plugin_id.empty()) return;
-        std::lock_guard lock(mutex);
-        auto it = in_flight_by_plugin.find(plugin_id);
-        if (it != in_flight_by_plugin.end() && it->second > 0) {
-            --it->second;
-            if (it->second == 0) done_cv.notify_all();
+        std::unique_lock lock(state->mutex);
+        if (state->stopping) return;
+        const int grace_ms = detail::resolveShutdownGraceMs(timeout_ms);
+        if (grace_ms > 0) {
+            state->done_cv.wait_for(lock, std::chrono::milliseconds(grace_ms), [this, &plugin_id]() {
+                auto it = state->in_flight_by_plugin.find(plugin_id);
+                return it == state->in_flight_by_plugin.end() || it->second == 0;
+            });
         }
     }
 
-    void loop() {
+    bool hasInFlight(const std::string& plugin_id) const {
+        if (plugin_id.empty()) return false;
+        std::lock_guard lock(state->mutex);
+        auto it = state->in_flight_by_plugin.find(plugin_id);
+        return it != state->in_flight_by_plugin.end() && it->second > 0;
+    }
+
+    static void trackPluginStart(const std::shared_ptr<State>& st, const std::string& plugin_id) {
+        if (!st || plugin_id.empty()) return;
+        std::lock_guard lock(st->mutex);
+        ++st->in_flight_by_plugin[plugin_id];
+    }
+
+    static void trackPluginEnd(const std::shared_ptr<State>& st, const std::string& plugin_id) {
+        if (!st || plugin_id.empty()) return;
+        std::lock_guard lock(st->mutex);
+        auto it = st->in_flight_by_plugin.find(plugin_id);
+        if (it != st->in_flight_by_plugin.end() && it->second > 0) {
+            --it->second;
+            if (it->second == 0) {
+                st->in_flight_by_plugin.erase(it);
+                st->done_cv.notify_all();
+            }
+        }
+    }
+
+    static void loop(std::shared_ptr<State> st, std::shared_ptr<std::atomic<bool>> exited) {
+        struct ExitGuard {
+            std::shared_ptr<State> state_ptr;
+            std::shared_ptr<std::atomic<bool>> exit_flag;
+            ~ExitGuard() {
+                {
+                    std::lock_guard lock(state_ptr->mutex);
+                    if (state_ptr->active_workers > 0) --state_ptr->active_workers;
+                    state_ptr->done_cv.notify_all();
+                }
+                exit_flag->store(true, std::memory_order_release);
+            }
+        } exit_guard{st, exited};
+
         while (true) {
             TaskRecord task;
             {
-                std::unique_lock lock(mutex);
-                cv.wait(lock, [this]() { return stopping || !queue.empty(); });
-                if (stopping && queue.empty()) return;
-                task = std::move(queue.front());
-                queue.pop();
+                std::unique_lock lock(st->mutex);
+                st->cv.wait(lock, [&st]() { return st->stopping || !st->queue.empty(); });
+                if (st->stopping && st->queue.empty()) return;
+                task = std::move(st->queue.front());
+                st->queue.pop();
             }
             try {
                 if (task.fn) task.fn();
             } catch (...) {
             }
+            task.fn = {};
             {
-                std::lock_guard lock(mutex);
-                active_tokens.erase(task.id);
-                active_plugins.erase(task.id);
+                std::lock_guard lock(st->mutex);
+                st->active_tokens.erase(task.id);
+                st->active_plugins.erase(task.id);
             }
         }
     }
 
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::condition_variable done_cv;
-    std::queue<TaskRecord> queue;
-    std::vector<std::thread> workers;
-    std::unordered_map<uint64_t, std::shared_ptr<CancelToken>> active_tokens;
-    std::unordered_map<uint64_t, std::string> active_plugins;
-    std::unordered_map<std::string, size_t> in_flight_by_plugin;
-    uint64_t next_id = 1;
-    bool stopping = false;
+    std::shared_ptr<State> state = std::make_shared<State>();
+    std::vector<WorkerEntry> workers;
 };
 
-CapabilityRegistry::CapabilityRegistry() : executor_(std::make_unique<AsyncExecutor>(4)) {}
+CapabilityRegistry::CapabilityRegistry()
+    : fault_dispatcher_(std::make_shared<FaultDispatcher>()),
+      executor_(std::make_unique<AsyncExecutor>(4)) {}
 
 CapabilityRegistry::~CapabilityRegistry() {
-    if (executor_) executor_->shutdown();
+    shutdown(-1);
+}
+
+void CapabilityRegistry::shutdown(int timeout_ms) {
+    if (fault_dispatcher_) {
+        std::lock_guard lock(fault_dispatcher_->mutex);
+        fault_dispatcher_->handler = {};
+    }
+    if (executor_) {
+        executor_->shutdown(timeout_ms);
+    }
+}
+
+bool CapabilityRegistry::hasInFlight(const std::string& plugin_id) const {
+    return executor_ ? executor_->hasInFlight(plugin_id) : false;
 }
 
 bool CapabilityRegistry::registerCapability(const std::string& capability_id,
@@ -341,26 +454,46 @@ CapabilityResult CapabilityRegistry::invokeInternal(const std::string& plugin_id
         return {false, nlohmann::json::object(), std::move(err), "", false};
     }
 
-    if (executor_) executor_->trackPluginStart(pid);
+    auto exec_state = executor_ ? executor_->state : nullptr;
+    auto fault_disp = fault_dispatcher_;
+    AsyncExecutor::trackPluginStart(exec_state, pid);
     struct FlightGuard {
-        AsyncExecutor* exec;
+        std::shared_ptr<AsyncExecutor::State> st;
         std::string plugin;
         ~FlightGuard() {
-            if (exec) exec->trackPluginEnd(plugin);
+            AsyncExecutor::trackPluginEnd(st, plugin);
         }
-    } guard{executor_.get(), pid};
+    } guard{exec_state, pid};
 
     std::shared_ptr<CancelToken> eff_cancel = cancel ? cancel : CancelToken::create();
     CapabilityResult res;
+    auto safeChunk = [&](const StreamChunk& chunk) {
+        if (!on_chunk) return;
+        try {
+            on_chunk(chunk);
+        } catch (...) {
+        }
+    };
+
     if (stream_fn && (stream_mode || cancel != nullptr)) {
         bool saw_done = false;
         StreamCallback wrapped = [&](const StreamChunk& chunk) {
             if (chunk.done) saw_done = true;
             if (on_chunk && (!eff_cancel->isCancelled() || chunk.done)) {
-                on_chunk(chunk);
+                safeChunk(chunk);
             }
         };
-        res = stream_fn(request, eff_cancel, stream_mode ? wrapped : StreamCallback{});
+        try {
+            res = stream_fn(request, eff_cancel, stream_mode ? wrapped : StreamCallback{});
+        } catch (const std::exception& e) {
+            res.ok = false;
+            res.error = std::string("plugin capability threw exception: ") + e.what();
+            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+        } catch (...) {
+            res.ok = false;
+            res.error = "plugin capability threw unknown exception";
+            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+        }
         if (eff_cancel->isCancelled()) {
             res.cancelled = true;
             res.ok = false;
@@ -371,10 +504,20 @@ CapabilityResult CapabilityRegistry::invokeInternal(const std::string& plugin_id
             terminal.done = true;
             terminal.data = res.data;
             terminal.event = res.cancelled ? "cancelled" : (res.ok ? "done" : "error");
-            on_chunk(terminal);
+            safeChunk(terminal);
         }
     } else {
-        res = sync_fn(request);
+        try {
+            res = sync_fn(request);
+        } catch (const std::exception& e) {
+            res.ok = false;
+            res.error = std::string("plugin capability threw exception: ") + e.what();
+            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+        } catch (...) {
+            res.ok = false;
+            res.error = "plugin capability threw unknown exception";
+            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+        }
         if (eff_cancel->isCancelled()) {
             res.cancelled = true;
             res.ok = false;
@@ -387,18 +530,29 @@ CapabilityResult CapabilityRegistry::invokeInternal(const std::string& plugin_id
                 c.data = res.data;
                 c.event = "delta";
                 c.done = false;
-                on_chunk(c);
+                safeChunk(c);
             }
             StreamChunk terminal;
             terminal.done = true;
             terminal.data = res.data;
             terminal.event = res.ok ? "done" : "error";
-            on_chunk(terminal);
+            safeChunk(terminal);
         }
     }
 
     if (res.provider_plugin_id.empty()) res.provider_plugin_id = pid;
     return res;
+}
+
+void CapabilityRegistry::setFaultHandler(FaultHandler handler) {
+    std::lock_guard lock(fault_dispatcher_->mutex);
+    fault_dispatcher_->handler = std::move(handler);
+}
+
+void CapabilityRegistry::reportFault(const std::string& plugin_id,
+                                     const std::string& component,
+                                     const std::string& error) const {
+    if (fault_dispatcher_) fault_dispatcher_->report(plugin_id, component, error);
 }
 
 CapabilityResult CapabilityRegistry::call(const std::string& capability_id,
@@ -446,10 +600,11 @@ std::shared_ptr<CancelToken> CapabilityRegistry::callProviderAsync(const std::st
                                                                    CapabilityAsyncCallback on_complete,
                                                                    std::shared_ptr<CancelToken> cancel) const {
     if (!cancel) cancel = CancelToken::create();
-    executor_->submit(plugin_id, cancel, [this, plugin_id, capability_id, request,
+    auto exec_state = executor_->state;
+    executor_->submit(plugin_id, cancel, [this, exec_state, plugin_id, capability_id, request,
                                           on_complete = std::move(on_complete), cancel]() {
         auto res = invokeInternal(plugin_id, capability_id, request, {}, cancel, false);
-        if (on_complete) on_complete(res);
+        if (on_complete && exec_state->owner_alive.load(std::memory_order_acquire)) on_complete(res);
     });
     return cancel;
 }
@@ -471,11 +626,12 @@ std::shared_ptr<CancelToken> CapabilityRegistry::callProviderStreamAsync(
     CapabilityAsyncCallback on_complete,
     std::shared_ptr<CancelToken> cancel) const {
     if (!cancel) cancel = CancelToken::create();
-    executor_->submit(plugin_id, cancel, [this, plugin_id, capability_id, request,
+    auto exec_state = executor_->state;
+    executor_->submit(plugin_id, cancel, [this, exec_state, plugin_id, capability_id, request,
                                           on_chunk = std::move(on_chunk),
                                           on_complete = std::move(on_complete), cancel]() {
         auto res = invokeInternal(plugin_id, capability_id, request, on_chunk, cancel, true);
-        if (on_complete) on_complete(res);
+        if (on_complete && exec_state->owner_alive.load(std::memory_order_acquire)) on_complete(res);
     });
     return cancel;
 }
@@ -500,7 +656,12 @@ void CapabilityRegistry::notifyChanged() {
             if (cb) snapshot.push_back(cb);
         }
     }
-    for (const auto& cb : snapshot) cb();
+    for (const auto& cb : snapshot) {
+        try {
+            cb();
+        } catch (...) {
+        }
+    }
 }
 
 } // namespace omnidesk

@@ -47,6 +47,8 @@ private:
     void startLocalInstall(const std::string& dir);
     void startUpdate(const std::string& plugin_id);
     void startUpdateRadar();
+    void startRebuildPlugin(const std::string& plugin_id);
+    void startBatchRebuild(bool only_stale);
 
     FilterTab filter_tab_ = FilterTab::All;
     std::string search_query_;
@@ -55,8 +57,12 @@ private:
 
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     std::unordered_map<std::string, pm::UpdateCheckResult> radar_results_;
-    std::mutex log_mutex_;
-    std::string log_buffer_;
+    std::unordered_map<std::string, pm::AbiStatusEntry> abi_status_cache_;
+    struct LogState {
+        std::mutex mutex;
+        std::string buffer;
+    };
+    std::shared_ptr<LogState> log_state_ = std::make_shared<LogState>();
     bool busy_ = false;
     bool radar_busy_ = false;
 
@@ -65,6 +71,7 @@ private:
     brls::Box* list_container_ = nullptr;
     brls::Box* detail_container_ = nullptr;
     brls::Label* console_label_ = nullptr;
+    brls::Button* rebuild_stale_btn_ = nullptr;
 };
 
 } // namespace omnidesk::host

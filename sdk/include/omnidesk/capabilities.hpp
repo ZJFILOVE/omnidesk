@@ -35,14 +35,12 @@ struct CapabilityDescriptor {
     nlohmann::json metadata = nlohmann::json::object();
 };
 
+#define OMNIDESK_CAPABILITY_INTERFACE_REVISION 2u
+
 /**
  * Central service registry enabling decoupled cross-plugin collaboration.
  * Supports synchronous calls, cancellable async calls, and SSE-style token streaming.
  */
-#define OMNIDESK_CAPABILITY_INTERFACE_REVISION 2u
-
-namespace omnidesk {
-
 class OMNIDESK_API CapabilityRegistry {
 public:
     using ChangeCallback = std::function<void()>;
@@ -55,6 +53,9 @@ public:
 
     CapabilityRegistry(const CapabilityRegistry&) = delete;
     CapabilityRegistry& operator=(const CapabilityRegistry&) = delete;
+
+    void shutdown(int timeout_ms = -1);
+    bool hasInFlight(const std::string& plugin_id) const;
 
     void setFaultHandler(FaultHandler handler);
 
@@ -132,6 +133,7 @@ private:
         CapabilityStreamHandler stream_handler;
     };
 
+    struct FaultDispatcher;
     struct AsyncExecutor;
 
     CapabilityResult invokeInternal(const std::string& plugin_id_filter,
@@ -149,8 +151,7 @@ private:
     std::unordered_map<std::string, std::vector<Entry>> entries_;
     std::mutex listeners_mutex_;
     std::unordered_map<uint64_t, ChangeCallback> listeners_;
-    mutable std::mutex fault_mutex_;
-    FaultHandler fault_handler_;
+    std::shared_ptr<FaultDispatcher> fault_dispatcher_;
     uint64_t next_token_ = 1;
     std::unique_ptr<AsyncExecutor> executor_;
 };

@@ -109,6 +109,7 @@ struct DockWidgetSpec {
  */
 class OMNIDESK_API DomainRegistry {
 public:
+    struct FlightTracker;
     using ChangeCallback = std::function<void()>;
     using FaultHandler = std::function<void(const std::string& plugin_id,
                                             const std::string& component,
@@ -135,7 +136,12 @@ public:
         }
     };
 
-    DomainRegistry() = default;
+    DomainRegistry();
+    ~DomainRegistry();
+
+    void shutdown(int timeout_ms = -1);
+    bool hasInFlight(const std::string& plugin_id) const;
+
     void setFaultHandler(FaultHandler handler);
 
     void registerMediaSource(const std::string& plugin_id, std::shared_ptr<IMediaSource> source);
@@ -172,6 +178,7 @@ private:
     std::vector<DockWidgetSpec> dock_widgets_;
 
     std::shared_ptr<FaultDispatcher> fault_dispatcher_ = std::make_shared<FaultDispatcher>();
+    std::shared_ptr<FlightTracker> flight_tracker_;
 
     std::mutex listeners_mutex_;
     std::unordered_map<uint64_t, ChangeCallback> listeners_;

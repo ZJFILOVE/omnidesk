@@ -34,7 +34,8 @@ flowchart TB
         W_ARR["plugin-arr-imdb (IMDb 发现 + Radarr/Sonarr 选片队列)"]
         W_PDF["plugin-pdf-babeldoc (PDF 左右双语排版翻译)"]
         W_EPUB["plugin-epub-companion (EPUB/MOBI 原版书伴读 + 生词本)"]
-        W_BOOK["plugin-book-finder (Z-Library / Anna's Archive 搜书)"]
+        W_ZLIB["plugin-zlib (Z-Library 书库检索与下载)"]
+        W_ANNAS["plugin-annas-archive (Anna's Archive 元搜索与下载)"]
         W_CHROME["plugin-chrome-web (托管 Chrome --app 论文/网页浏览 + 自动注入 MV3 网页翻译与下载接管插件)"]
         W_COMM["plugin-linuxdo / plugin-zhihu / plugin-reddit (社区插件)"]
     end
@@ -59,8 +60,10 @@ flowchart TB
 | `plugin-arr-imdb` | 工作区 | IMDb 榜单/详情 + Radarr (`7878`) / Sonarr (`8989`) 做种分档选片与 qBittorrent 队列管理 | 探测 `media.local_match.v1`（已入库直接调飞牛播，未入库一键下发 Arr） |
 | `plugin-pdf-babeldoc` | 工作区 + 能力 | 基于 BabelDOC 的本地 PDF 版面识别、术语提取、页码范围选择与左右对照 `dual.pdf` 生成 | **提供** `doc.translate.pdf.v1`；消费 `llm.v1` |
 | `plugin-epub-companion` | 工作区 + 能力 | `.epub`/`.mobi`/`.azw3`/`.txt` 分页伴读、点词词源、前后段语境精读、SM-2 生词本、飞牛双端进度同步 | **提供** `doc.open.ebook.v1`；若检测到 `plugin-fnos-nas` 则激活「美剧台词一键跳播原片片段」 |
-| `plugin-book-finder` | 工作区 | Z-Library / Anna's Archive 检索（遇人机验证直接复用 `plugin-chrome-web` 真实 Chrome 会话），下载完成后投递给 `doc.translate.pdf.v1` 或 `doc.open.ebook.v1` | 消费 `web.open_and_translate.v1`, `EntityBus` |
+| `plugin-zlib` | 工作区 + 能力 | Z-Library EAPI 搜书、域名自检、登录态/Cookie 认证、已下载书架管理，遇人机验证可交由 `plugin-chrome-web` 处理并投递给 BabelDOC 或 NAS | **提供** `book.search.v1`, `zlib.library.v1`；消费 `book.bilingual_pdf.v1`, `book.sync.v1`, `nas.connection.v1`, `web.embed.v1`, `web.extract.v1` |
+| `plugin-annas-archive` | 工作区 + 能力 | Anna's Archive 元搜索、Fast Download API 与慢速/外部镜像解析，下载完成后投递给 BabelDOC、EPUB 书架或 NAS | **提供** `book.search.v1`, `annas.archive.v1`；消费 `book.bilingual_pdf.v1`, `book.sync.v1`, `nas.connection.v1`, `web.embed.v1`, `web.extract.v1` |
 | `plugin-linuxdo` / `zhihu` / `reddit` | 工作区（各独立） | 帖子列表与评论树原生浏览；遇复杂外链论文/文章一键交给 `plugin-chrome-web` 打开并双语翻译 | 消费 `llm.translate.v1`, `web.open_and_translate.v1` |
+| `plugin-feed-recipe` | 工作区 + 能力 | 20 行声明式 JSON/Lua 轻量源配方引擎，免编译接入 HN / V2EX / 学者 Blog / 顶会论文列表，自动复用 `plugin-chrome-web` 登录 Cookie 过验证并注入纸白双语排版与折叠评论树 | **提供** `text.source.v1`, `text.comments.v1`, `feed.recipe.v1`；消费 `web.cookies.v1`, `web.embed.v1`, `web.extract.v1`, `llm.translate.v1`, `llm.chat.v1` |
 
 ---
 
@@ -99,6 +102,6 @@ OmniDesk 采用 **「上游零侵入锁（`upstreams.lock.json`）+ 极薄适配
 
 1. **Phase 1：宿主微内核 + 内置「插件市场 & 上游更新中心」+ `omnidesk-pm` 工具链**
 2. **Phase 2：底座能力插件（`plugin-llm-gateway`、`plugin-asr-funasr`、`plugin-sponsorblock`）+ `plugin-bilibili` 零侵入外挂化迁移**
-3. **Phase 3：`plugin-chrome-web`（托管 Chrome 论文/网页双语浏览与下载接管）+ `plugin-pdf-babeldoc` + `plugin-epub-companion` + `plugin-book-finder`**
+3. **Phase 3：`plugin-chrome-web`（托管 Chrome 论文/网页双语浏览与下载接管）+ `plugin-pdf-babeldoc` + `plugin-epub-companion` + `plugin-zlib` + `plugin-annas-archive`**
 4. **Phase 4：`plugin-fnos-nas` + `plugin-arr-imdb` + `plugin-sub-hunter` + `plugin-youtube`**
 5. **Phase 5：社区插件群（`plugin-linuxdo`、`plugin-zhihu`、`plugin-reddit`）**

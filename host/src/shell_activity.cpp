@@ -29,8 +29,12 @@ WorkspaceShellActivity::~WorkspaceShellActivity() {
         for (uint64_t tok : job_open_sub_tokens_) {
             if (tok != 0) kernel.bus().unsubscribe(tok);
         }
+        for (uint64_t tok : fault_sub_tokens_) {
+            if (tok != 0) kernel.bus().unsubscribe(tok);
+        }
     }
     job_open_sub_tokens_.clear();
+    fault_sub_tokens_.clear();
     brls::Application::getWindowSizeChangedEvent()->unsubscribe(resize_sub_);
 }
 
@@ -165,7 +169,35 @@ void WorkspaceShellActivity::populateRootBox() {
     job_bar_box_->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
     job_bar_box_->setVisibility(brls::Visibility::GONE);
 
+    fault_banner_box_ = new brls::Box(brls::Axis::ROW);
+    fault_banner_box_->setBackgroundColor(ui::color("status/warn_bg"));
+    fault_banner_box_->setCornerRadius(10.0f);
+    fault_banner_box_->setPadding(6.0f, 12.0f, 6.0f, 12.0f);
+    fault_banner_box_->setMargins(4.0f, 12.0f, 4.0f, 12.0f);
+    fault_banner_box_->setAlignItems(brls::AlignItems::CENTER);
+    fault_banner_box_->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    fault_banner_box_->setVisibility(brls::Visibility::GONE);
+
+    fault_banner_label_ = ui::makeLabel("", 13.5f, "status/warn_fg", 1.2f);
+    fault_banner_label_->setSingleLine(true);
+    fault_banner_label_->setGrow(1.0f);
+    fault_banner_label_->setMarginRight(10.0f);
+    fault_banner_box_->addView(fault_banner_label_);
+
+    auto* banner_actions = new brls::Box(brls::Axis::ROW);
+    banner_actions->setAlignItems(brls::AlignItems::CENTER);
+    auto* go_store_btn = ui::makeButton("前往插件市场", [this]() {
+        selectWorkspace(WorkspaceId::Store);
+    }, false, 28.0f);
+    go_store_btn->setMarginRight(6.0f);
+    banner_actions->addView(go_store_btn);
+    banner_actions->addView(ui::makeButton("✕", [this]() {
+        dismissWarningBanner();
+    }, false, 28.0f));
+    fault_banner_box_->addView(banner_actions);
+
     stage_container_->addView(views_host_);
+    stage_container_->addView(fault_banner_box_);
     stage_container_->addView(job_bar_box_);
 
     main_split_->addView(stage_container_);
@@ -228,7 +260,13 @@ void WorkspaceShellActivity::onContentAvailable() {
             uint64_t tok = kernel.bus().subscribe(
                 topic, "host.shell.job_open",
                 [this, alive = alive_](const std::string& ev_topic, const nlohmann::json& payload) {
-                    if (!payload.is_object() || !payload.contains("job_id")) {
+                    if (!payload.is_object()) {
+                        return;
+                    }
+                    if (payload.value("origin", "") == "host_workbench") {
+                        return;
+                    }
+                    if (ev_topic == "job.open_requested" && !payload.contains("job_id")) {
                         return;
                     }
                     brls::sync([this, alive, ev_topic, payload]() {
@@ -238,6 +276,143 @@ void WorkspaceShellActivity::onContentAvailable() {
                     });
                 });
             job_open_sub_tokens_.push_back(tok);
+        }
+
+        auto join_names = [](const std::vector<std::string>& names) {
+            std::string joined;
+            for (size_t i = 0; i < names.size() && i < 3; ++i) {
+                if (!joined.empty()) joined += ", ";
+                joined += names[i];
+            }
+            if (names.size() > 3) joined += " 等";
+            return joined;
+        };
+
+        const uint64_t wf_tok = kernel.bus().subscribe(
+            "worker.fault", "host.shell.fault",
+            [this, alive = alive_](const std::string&, const nlohmann::json& payload) {
+                const std::string pid = payload.is_object()
+                    ? payload.value("plugin_id", payload.value("worker_id", "unknown-plugin"))
+                    : std::string("unknown-plugin");
+                const std::string sig = payload.is_object() ? payload.value("signal_name", "") : "";
+                const std::string err = payload.is_object() ? payload.value("error", "") : "";
+                const bool quarantined = payload.is_object() && payload.value("quarantined", false);
+                const bool restarted = payload.is_object() && payload.value("restart_succeeded", false);
+                const std::string detail = !sig.empty() ? sig : err;
+                std::string msg;
+                if (quarantined) {
+                    msg = "⚠ 隔离插件 " + pid + " 连续崩溃已熔断停用 (" + detail + ")";
+                } else if (restarted) {
+                    msg = "⚠ 隔离插件 " + pid + " 异常退出 (" + detail + ")，已自动拉起，宿主未受影响";
+                } else {
+                    msg = "⚠ 隔离插件 " + pid + " 异常 (" + detail + ")，宿主运行未受影响";
+                }
+                brls::sync([this, alive, msg = std::move(msg)]() {
+                    if (alive->load(std::memory_order_acquire)) {
+                        showWarningBanner(msg, "worker.fault");
+                    }
+                });
+            });
+        if (wf_tok != 0) fault_sub_tokens_.push_back(wf_tok);
+
+        const uint64_t pf_tok = kernel.bus().subscribe(
+            "plugin.fault", "host.shell.fault",
+            [this, alive = alive_](const std::string&, const nlohmann::json& payload) {
+                const std::string pid = payload.is_object()
+                    ? payload.value("plugin_id", "unknown-plugin")
+                    : std::string("unknown-plugin");
+                const std::string comp = payload.is_object() ? payload.value("component", "") : "";
+                const std::string err = payload.is_object() ? payload.value("error", "") : "";
+                std::string msg = "⚠ 插件 " + pid;
+                if (!comp.empty()) msg += " [" + comp + "]";
+                msg += " 异常已被宿主隔离拦截: " + err;
+                brls::sync([this, alive, msg = std::move(msg)]() {
+                    if (alive->load(std::memory_order_acquire)) {
+                        showWarningBanner(msg, "plugin.fault");
+                    }
+                });
+            });
+        if (pf_tok != 0) fault_sub_tokens_.push_back(pf_tok);
+
+        const uint64_t abi_tok = kernel.bus().subscribe(
+            "plugin.abi_drift", "host.shell.fault",
+            [this, alive = alive_, join_names](const std::string&, const nlohmann::json& payload) {
+                std::vector<std::string> names;
+                if (payload.is_object() && payload.contains("stale_plugins") &&
+                    payload["stale_plugins"].is_array()) {
+                    for (const auto& item : payload["stale_plugins"]) {
+                        if (item.is_string()) {
+                            names.push_back(item.get<std::string>());
+                        }
+                    }
+                }
+                if (names.empty()) return;
+                std::string msg = "⚠ 检测到 " + std::to_string(names.size()) +
+                                  " 个插件 SDK ABI 已过期 (" + join_names(names) +
+                                  ")，请前往插件市场一键重编";
+                brls::sync([this, alive, msg = std::move(msg)]() {
+                    if (alive->load(std::memory_order_acquire)) {
+                        showWarningBanner(msg, "plugin.abi_drift");
+                    }
+                });
+            });
+        if (abi_tok != 0) fault_sub_tokens_.push_back(abi_tok);
+
+        const uint64_t st_tok = kernel.bus().subscribe(
+            "plugin.state_changed", "host.shell.fault",
+            [this, alive = alive_](const std::string&, const nlohmann::json&) {
+                brls::sync([this, alive]() {
+                    if (!alive->load(std::memory_order_acquire) ||
+                        !fault_banner_box_ ||
+                        fault_banner_box_->getVisibility() != brls::Visibility::VISIBLE) {
+                        return;
+                    }
+                    if (active_warning_topic_ != "plugin.abi_drift" &&
+                        active_warning_topic_ != "plugin.load_error") {
+                        return;
+                    }
+                    auto& k = HostKernel::instance();
+                    if (!k.isInitialized()) return;
+                    if (!k.installer().hasStaleInstalledPlugins(false)) {
+                        bool any_failed = false;
+                        for (const auto& st : k.plugins().statuses()) {
+                            if (st.record.enabled && !st.load_error.empty()) {
+                                any_failed = true;
+                                break;
+                            }
+                        }
+                        if (!any_failed) {
+                            dismissWarningBanner();
+                        }
+                    }
+                });
+            });
+        if (st_tok != 0) fault_sub_tokens_.push_back(st_tok);
+
+        // Check boot-time ABI drift or load errors emitted before UI subscribed
+        std::vector<std::string> stale_names;
+        for (const auto& entry : kernel.installer().checkInstalledAbiStatus(false)) {
+            if (entry.needs_rebuild) {
+                stale_names.push_back(entry.plugin_id);
+            }
+        }
+        if (!stale_names.empty()) {
+            showWarningBanner("⚠ 检测到 " + std::to_string(stale_names.size()) +
+                                  " 个已安装插件 SDK ABI 已过期 (" + join_names(stale_names) +
+                                  ")，请前往插件市场一键重编",
+                              "plugin.abi_drift");
+        } else {
+            std::vector<std::string> failed_names;
+            for (const auto& st : kernel.plugins().statuses()) {
+                if (st.record.enabled && !st.load_error.empty()) {
+                    failed_names.push_back(st.record.manifest.id);
+                }
+            }
+            if (!failed_names.empty()) {
+                showWarningBanner("⚠ 部分已启用插件加载异常 (" + join_names(failed_names) +
+                                      ")，请前往插件市场诊断或重编",
+                                  "plugin.load_error");
+            }
         }
     }
 
@@ -647,27 +822,70 @@ void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const 
         (payload.is_object() && payload.contains("title") && payload["title"].is_string())
             ? payload["title"].get<std::string>()
             : std::string{};
+    const bool from_job = payload.is_object() && payload.contains("job_id");
 
     if (topic == "entity.book.open" || domain == "book" || domain == "books") {
         selectWorkspace(WorkspaceId::Book);
+        if (book_view_) {
+            book_view_->openExternalBook(payload);
+        }
         if (dock_view_ && !title.empty()) {
             dock_view_->setDomainContext(ContentDomain::Book, title);
         }
     } else if (topic == "entity.text.open" || domain == "text" || domain == "journal" || domain == "journals") {
         selectWorkspace(WorkspaceId::Text);
+        if (text_view_) {
+            text_view_->openExternalArticle(payload);
+        }
         if (dock_view_ && !title.empty()) {
             dock_view_->setDomainContext(ContentDomain::Text, title);
         }
     } else if (topic == "entity.media.open" || domain == "media" || domain == "video" ||
                domain == "music" || domain == "nas") {
         selectWorkspace(WorkspaceId::Media);
+        if (media_view_) {
+            media_view_->openExternalMedia(payload);
+        }
         if (dock_view_ && !title.empty()) {
             dock_view_->setDomainContext(ContentDomain::Media, title);
         }
     }
     if (!title.empty()) {
-        brls::Application::notify("后台任务完成，已定位结果: " + title);
+        brls::Application::notify(
+            (from_job ? "后台任务完成，已定位结果: " : "已跳转至: ") + title);
     }
+}
+
+void WorkspaceShellActivity::showWarningBanner(const std::string& message,
+                                               const std::string& topic) {
+    if (!fault_banner_box_ || !fault_banner_label_ || message.empty()) {
+        return;
+    }
+    std::string clean;
+    clean.reserve(message.size());
+    for (char ch : message) {
+        clean.push_back((ch == '\r' || ch == '\n') ? ' ' : ch);
+    }
+    if (clean.size() > 150) {
+        size_t cut = 146;
+        while (cut > 0 && (static_cast<unsigned char>(clean[cut]) & 0xC0) == 0x80) {
+            --cut;
+        }
+        clean = clean.substr(0, cut) + "...";
+    }
+    active_warning_topic_ = topic;
+    fault_banner_label_->setText(clean);
+    fault_banner_box_->setVisibility(brls::Visibility::VISIBLE);
+    fault_banner_box_->invalidate();
+}
+
+void WorkspaceShellActivity::dismissWarningBanner() {
+    if (!fault_banner_box_) {
+        return;
+    }
+    active_warning_topic_.clear();
+    fault_banner_box_->setVisibility(brls::Visibility::GONE);
+    fault_banner_box_->invalidate();
 }
 
 } // namespace omnidesk::host

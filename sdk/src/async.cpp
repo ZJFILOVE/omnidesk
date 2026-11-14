@@ -16,14 +16,22 @@ void CancelToken::cancel() {
         cbs.swap(callbacks_);
     }
     for (auto& cb : cbs) {
-        if (cb) cb();
+        if (cb) {
+            try {
+                cb();
+            } catch (...) {
+            }
+        }
     }
 }
 
 void CancelToken::onCancel(std::function<void()> cb) {
     if (!cb) return;
     if (isCancelled()) {
-        cb();
+        try {
+            cb();
+        } catch (...) {
+        }
         return;
     }
 
@@ -37,7 +45,10 @@ void CancelToken::onCancel(std::function<void()> cb) {
         }
     }
     if (invoke_now) {
-        cb();
+        try {
+            cb();
+        } catch (...) {
+        }
     }
 }
 

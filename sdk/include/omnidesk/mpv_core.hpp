@@ -41,9 +41,52 @@ struct OMNIDESK_API MpvPlaybackState {
     int volume = 85;
     int video_width = 0;
     int video_height = 0;
+    double fps = 0.0;
+    double video_bitrate = 0.0;
+    int64_t decoder_drop_frames = 0;
+    int64_t output_drop_frames = 0;
+    std::string video_codec;
+    std::string audio_codec;
+    int audio_samplerate = 0;
+    int audio_channels = 0;
+    double cache_duration_sec = 0.0;
     std::string hwdec_current;
     std::string last_error;
     std::string current_url;
+};
+
+struct OMNIDESK_API DanmakuCue {
+    double time_sec = 0.0;
+    int mode = 1;           ///< 1..3: scroll, 4: bottom, 5: top
+    uint32_t color = 0xFFFFFF;
+    std::string text;
+};
+
+/// Real-time NanoVG danmaku overlay rendered synchronously onto the video stage.
+class OMNIDESK_API DanmakuOverlay {
+public:
+    void setCues(std::vector<DanmakuCue> cues);
+    void clear();
+    bool empty() const;
+    size_t cueCount() const;
+
+    void setVisible(bool visible) { visible_ = visible; }
+    bool isVisible() const { return visible_; }
+    void setOpacity(float opacity) { opacity_ = opacity; }
+    float opacity() const { return opacity_; }
+
+    void draw(NVGcontext* vg,
+              float x,
+              float y,
+              float width,
+              float height,
+              double playback_sec,
+              float alpha = 1.0f) const;
+
+private:
+    std::vector<DanmakuCue> cues_;
+    bool visible_ = true;
+    float opacity_ = 0.86f;
 };
 
 /// Bilingual / dual-line subtitle renderer overlaid onto the OpenGL video stage via NanoVG.
@@ -137,12 +180,19 @@ public:
                    std::vector<ChapterSegment> chapters = {},
                    const std::string& title = "");
     void setSubtitles(std::vector<LyricLine> subtitles);
+    void setDanmaku(std::vector<DanmakuCue> cues);
     void setChapters(std::vector<ChapterSegment> chapters);
+    void setTitle(const std::string& title);
+    void setStageMinHeight(float height);
+    void setFullscreenCallback(std::function<void()> on_fullscreen);
+    void setFullscreenLabel(bool fullscreen_active);
+    void showMediaStatsDialog();
     bool skipSponsorIfActive();
     void stopMedia();
 
     MPVCore& core() const { return *core_; }
     SubtitleOverlay& subtitles() { return subtitles_; }
+    DanmakuOverlay& danmaku() { return danmaku_; }
 
 private:
     class VideoCanvas;
@@ -152,6 +202,7 @@ private:
 
     MPVCore* core_ = nullptr;
     SubtitleOverlay subtitles_;
+    DanmakuOverlay danmaku_;
     uint64_t state_sub_ = 0;
     std::shared_ptr<std::atomic<bool>> alive_;
 
@@ -162,7 +213,10 @@ private:
     brls::View* time_label_ = nullptr;
     brls::View* play_btn_ = nullptr;
     brls::View* sub_btn_ = nullptr;
+    brls::View* dm_btn_ = nullptr;
     brls::View* speed_btn_ = nullptr;
+    brls::View* fs_btn_ = nullptr;
+    std::function<void()> on_fullscreen_;
     bool has_loaded_ = false;
 };
 

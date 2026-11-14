@@ -89,23 +89,35 @@ Use `omnidesk-pm init <dir> --id <id> ...` (or the in-app `+ 脚手架` button) 
 ### Valid Enums
 - `kind`: `"provider"` | `"workspace"` | `"hybrid"` | `"extension"`
 - `domain`: `"core"` | `"media"` | `"text"` | `"book"`
+- `isolation` (optional, default `"in_process"`): `"in_process"` | `"subprocess"`
+- `worker_transport` (optional, default `"pipe"`): `"pipe"` | `"unix_socket"` (used when `isolation == "subprocess"`)
 - `config_schema[].type`: `"string"` | `"secret"` | `"bool"` | `"int"` | `"select"`
 - `id`: must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$`
 
 ---
 
-## 3. Binary C ABI v1 & C++17 `IPlugin` Interface
+## 3. Binary C ABI v1, SDK Layout Fingerprint & Fault Isolation
 
-Defined in `<omnidesk/plugin_abi.h>` and `<omnidesk/plugin.hpp>`:
+Defined in `<omnidesk/plugin_abi.h>`, `<omnidesk/abi_fingerprint.hpp>`, and `<omnidesk/plugin.hpp>`:
 
 - Every `.so` must export three unmangled `extern "C"` symbols via `OMNIDESK_DECLARE_PLUGIN(ClassName, id, name, version, kind, domain)`:
   - `const OmniDeskPluginInfo* omnidesk_plugin_abi_info(void)`
   - `void* omnidesk_plugin_create(void)` -> returns `static_cast<void*>(static_cast<omnidesk::IPlugin*>(new ClassName()))`
   - `void omnidesk_plugin_destroy(void* instance)`
-- Before loading into the host process, `PluginInstaller` forks a child verification process (`omnidesk-pm abi-check <so> --expect-id <id>`) to guarantee the `.so` opens cleanly, reports `OMNIDESK_PLUGIN_ABI_VERSION == 1`, matches manifest `id`, and constructs/destructs safely.
+- `OMNIDESK_DECLARE_PLUGIN` embeds a compile-time `sdk_abi_signature`. CMake hashes the public SDK and Borealis headers with SHA-256 and regenerates the signature header when their contents change; the final fingerprint also includes type sizes/alignment, interface revisions, compiler/stdlib ABI traits, and nlohmann JSON version/options. Same-size field edits and virtual-method changes therefore invalidate old binaries even when the manual ABI version is unchanged. This is conservative: header-only documentation edits can also require rebuilding. The C handshake returns static POD/string storage without constructing SDK objects or allocating memory.
+- Before calling `omnidesk_plugin_create()`, `PluginInstaller` (`omnidesk-pm abi-check <so> --expect-id <id>`) and `PluginManager` verify `abi_version == OMNIDESK_PLUGIN_ABI_VERSION`, `struct_size >= sizeof(OmniDeskPluginInfo)`, and `sdk_abi_signature == omnidesk::sdkAbiSignature()` so older/stale `.so` binaries are cleanly rejected without segfaulting.
+- **Process & Exception Fault Isolation**:
+  - **Subprocess Isolation (`"isolation": "subprocess"`)**: Third-party or untrusted `.so` plugins load exclusively inside `omnidesk-plugin-worker`, communicating with the host via pure-JSON NDJSON RPC over `"pipe"` or `"unix_socket"` (`WorkerSupervisor` + `WorkerMediaSource`/`WorkerTextSource`/`WorkerBookSource`). Worker crashes (`SIGSEGV`/`SIGABRT`) are isolated from the host UI, reported via `worker.fault`, and automatically restarted (with crash-loop quarantine).
+  - **In-Process Exception Barriers**: `CapabilityRegistry`, `EntityBus`, `DomainRegistry`, and `PluginManager` catch C++ exceptions and report `"plugin.fault"`. In-process native code, including static initializers run by `dlopen`, can still crash or deadlock the host. Reserve this mode for trusted UI code.
+  - **Bounded Worker IO**: Requests have interruptible queue waits, nonblocking writes, and read deadlines. Timeouts and malformed responses produce fault events and participate in restart/quarantine limits. Frames and accumulated stream text are limited to 8 MiB, and stderr retains at most 100 chunks of 4096 bytes. Stopping a worker also terminates descendants in its process group.
+  - **Request Semantics**: Plugin workers restart after a fault, but do not replay the failed capability call automatically. Explicit `WorkerSpec::retry_on_crash` is for idempotent operations only; streams that already delivered a chunk are never replayed. Unregistering a worker prevents an in-flight request from restarting it.
+
+For a plugin with custom NanoVG/Borealis views, keep its small UI shell in-process and register a separate worker with `PluginContext::registerWorker`, `registerWorkerCapability`, and the `registerWorker*Source` helpers. Whole-plugin subprocess mode exposes capabilities and media/text/book data sources; it rejects UI registrations rather than silently dropping them. The worker has local registries and an event bus: calls to other host capabilities and host event subscriptions are not forwarded by this protocol. This is process fault isolation, not a security sandbox or a permanent C++ ABI guarantee.
+
+Host article feeds, articles, book libraries/pages, and media lyrics/chapters perform provider IO on background jobs and apply results on the UI thread. Replaced requests and destroyed views discard late results.
 
 ### Scoped Cleanup Guarantee
-When `onLoad(PluginContext& ctx)` registers capabilities (`ctx.registerCapability(...)`), subscribes to bus events (`ctx.subscribe(...)`), or adds domain sources/tabs/widgets (`ctx.registerMediaSource(...)`, `ctx.registerWorkspaceTab(...)`, etc.), `PluginManager::unloadPlugin()` automatically revokes **every** registration tagged with `plugin_id` on unload, hot-reload, update, or failure.
+When `onLoad(PluginContext& ctx)` registers capabilities (`ctx.registerCapability(...)`), subscribes to bus events (`ctx.subscribe(...)`), or adds domain sources/tabs/widgets (`ctx.registerMediaSource(...)`, `ctx.registerWorkspaceTab(...)`, etc.), `PluginManager::unloadPlugin()` automatically revokes **every** registration tagged with `plugin_id` (and stops its isolated worker if running in `subprocess` mode) on unload, hot-reload, update, or failure.
 
 ---
 
@@ -131,12 +143,16 @@ Plugins collaborate strictly through `CapabilityRegistry` and `EntityBus`—neve
 - `entity.vocab.add` (`word`, `book`)
 - `entity.ai.route_changed` (`harness`, `group`, `model`)
 - `plugin.state_changed` (`plugin_id`, `loaded`)
+- `plugin.fault` (`plugin_id`, `component`, `error`)
+- `worker.fault` (`worker_id`, `plugin_id`, `signal_name`, `crash_count`, `auto_restarted`, `restart_succeeded`, `quarantined`, `error`)
+- `plugin.abi_drift` (`count`, `stale_plugins`, `entries`)
 
 ---
 
 ## 5. Security, Lockfiles & Rollback
 
 1. **Staging Build Isolation**: Clones and builds inside `<XDG_DATA_HOME>/omnidesk/staging/` with `-DOmniDeskSDK_DIR=...`. Previous active plugins remain untouched if configure/build/test/ABI checks fail.
-2. **Cryptographic Pinning**: Activated `.so` binaries are SHA-256 hashed and pinned in `<XDG_DATA_HOME>/omnidesk/upstreams.lock.json` along with git commit SHA.
+2. **Cryptographic Pinning & ABI Drift Recovery**: Activated `.so` binaries are SHA-256 hashed and pinned in `<XDG_DATA_HOME>/omnidesk/upstreams.lock.json` along with git commit SHA and `sdk_abi_signature`. Run `omnidesk-pm abi-status [--strict]` to audit compatibility, and `omnidesk-pm rebuild [--stale | --all | <id>]` (or the UI «一键重编过期») to batch-rebuild plugins from source against the current SDK.
+   Installation and full ABI audits always probe binaries in a separate, time-limited `omnidesk-pm abi-check` process, including disabled plugins. A missing checker fails verification; it never falls back to host-process `dlopen`. UI refresh uses recorded build signatures to stay responsive; actual loading and explicit CLI audits validate the binary. Rebuilding preserves enabled/disabled state.
 3. **1-Click Rollback**: Up to 5 previous versions are snapshotted in `<XDG_DATA_HOME>/omnidesk/backups/<plugin_id>/`. `omnidesk-pm rollback <id>` or the UI «回滚» button restores cleanly.
 4. **0600 Config & SecretVault**: Plain configuration lives in `<XDG_CONFIG_HOME>/omnidesk/plugins/<id>.json`; secrets marked `"type": "secret"` live separately in `<XDG_CONFIG_HOME>/omnidesk/vault.json` (`0600`) and are never printed in diagnostics.

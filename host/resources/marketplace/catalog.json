@@ -20,7 +20,8 @@
       "provides": [
         "ai.agent.v1",
         "llm.router.v1",
-        "llm.chat.v1"
+        "llm.chat.v1",
+        "llm.translate.v1"
       ],
       "consumes": [],
       "official": true
@@ -41,6 +42,26 @@
       },
       "provides": [
         "speech.asr.v1"
+      ],
+      "consumes": [],
+      "official": true
+    },
+    {
+      "id": "plugin-sponsorblock",
+      "name": "SponsorBlock 空降助手",
+      "version": "0.1.0",
+      "kind": "extension",
+      "domain": "media",
+      "author": "ZJFILOVE",
+      "description": "B 站 (bsbsb.top) 与 YouTube (sponsor.ajay.app) 通用空降片段扩展插件：支持 SHA-256 隐私前缀查询、多分类过滤、章节合并与 F9 一键跳过，对外提供标准 player.timeline.v1 能力。",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-sponsorblock",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-sponsorblock.git",
+        "branch": "main"
+      },
+      "provides": [
+        "player.timeline.v1"
       ],
       "consumes": [],
       "official": true
@@ -157,7 +178,9 @@
       },
       "provides": [
         "web.embed.v1",
-        "web.extract.v1"
+        "web.extract.v1",
+        "web.cookies.v1",
+        "web.open_and_translate.v1"
       ],
       "consumes": [],
       "official": true
@@ -258,6 +281,34 @@
       "official": true
     },
     {
+      "id": "plugin-feed-recipe",
+      "name": "Declarative Feed Recipe Engine",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "20-line declarative JSON/Lua source recipe engine for Hacker News, V2EX, personal scholar blogs, and conference paper feeds with Chrome cookie reuse, bilingual parallel reading, and collapsible comment trees.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-feed-recipe",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-feed-recipe.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1",
+        "feed.recipe.v1"
+      ],
+      "consumes": [
+        "web.cookies.v1",
+        "web.embed.v1",
+        "web.extract.v1",
+        "llm.translate.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
       "id": "plugin-pdf-babeldoc",
       "name": "PDF & BabelDOC Bilingual Engine",
       "version": "0.1.0",
@@ -307,27 +358,58 @@
       "official": true
     },
     {
-      "id": "plugin-book-finder",
-      "name": "E-Book & Academic Resource Finder",
+      "id": "plugin-zlib",
+      "name": "Z-Library Digital Library",
       "version": "0.1.0",
-      "kind": "extension",
+      "kind": "hybrid",
       "domain": "book",
       "author": "OmniDesk",
-      "description": "Multi-catalog open-access book & monograph search plugin routing verified downloads straight to local shelf or fnOS NAS.",
-      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-book-finder",
+      "description": "Z-Library EAPI book search, domain doctor, cookie/login auth, downloaded bookshelf integration, and BabelDOC/NAS handoff (adapted from heartleo/zlib).",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-zlib",
       "repository": {
         "type": "git",
-        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-book-finder.git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-zlib.git",
         "branch": "main"
       },
       "provides": [
-        "book.search.v1"
+        "book.search.v1",
+        "zlib.library.v1"
       ],
       "consumes": [
+        "book.bilingual_pdf.v1",
+        "book.sync.v1",
         "nas.connection.v1",
-        "book.sync.v1"
+        "web.embed.v1",
+        "web.extract.v1"
       ],
-      "official": false
+      "official": true
+    },
+    {
+      "id": "plugin-annas-archive",
+      "name": "Anna's Archive",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "book",
+      "author": "OmniDesk",
+      "description": "Anna's Archive shadow library meta-search (Gumbo DOM + comment-unwrapped cards), Fast Download API, slow/external mirror resolution, bookshelf integration, and BabelDOC/WebEmbed handoff.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-annas-archive",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-annas-archive.git",
+        "branch": "main"
+      },
+      "provides": [
+        "book.search.v1",
+        "annas.archive.v1"
+      ],
+      "consumes": [
+        "book.bilingual_pdf.v1",
+        "book.sync.v1",
+        "nas.connection.v1",
+        "web.embed.v1",
+        "web.extract.v1"
+      ],
+      "official": true
     }
   ]
 }

@@ -116,6 +116,28 @@ bool parseManifestJson(const nlohmann::json& j, PluginManifest& out, std::string
     readStringArray(j, "consumes", m.consumes);
     readStringArray(j, "permissions", m.permissions);
 
+    if (j.contains("isolation")) {
+        if (!j["isolation"].is_string()) {
+            error = "Manifest field 'isolation' must be a string";
+            return false;
+        }
+        const std::string iso_str = j["isolation"].get<std::string>();
+        if (!parsePluginIsolation(iso_str, m.isolation)) {
+            error = "Unsupported isolation mode '" + iso_str + "' (expected 'in_process' or 'subprocess')";
+            return false;
+        }
+    }
+    if (j.contains("worker_transport")) {
+        if (!j["worker_transport"].is_string()) {
+            error = "Manifest field 'worker_transport' must be a string";
+            return false;
+        }
+        m.worker_transport = j["worker_transport"].get<std::string>();
+        if (m.worker_transport.empty()) {
+            m.worker_transport = "pipe";
+        }
+    }
+
     if (j.contains("config_schema")) {
         if (!j["config_schema"].is_array()) {
             error = "config_schema must be a JSON array";
@@ -194,6 +216,12 @@ bool validateManifest(const PluginManifest& m, std::string& error) {
         error = "build.output_lib must be a safe relative path inside build directory";
         return false;
     }
+    if (!m.worker_transport.empty() &&
+        m.worker_transport != "pipe" &&
+        m.worker_transport != "unix_socket") {
+        error = "Manifest field 'worker_transport' must be 'pipe' or 'unix_socket'";
+        return false;
+    }
 
     std::set<std::string> seen_keys;
     for (const auto& f : m.config_schema) {
@@ -260,6 +288,8 @@ nlohmann::json manifestToJson(const PluginManifest& m) {
         {"provides", m.provides},
         {"consumes", m.consumes},
         {"permissions", m.permissions},
+        {"isolation", toString(m.isolation)},
+        {"worker_transport", m.worker_transport.empty() ? std::string("pipe") : m.worker_transport},
         {"config_schema", std::move(schema_arr)},
     };
     if (!m.release.empty() || !m.release.sha256.empty() ||

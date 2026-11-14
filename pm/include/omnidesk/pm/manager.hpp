@@ -58,13 +58,25 @@ public:
 
     brls::View* createCustomSettingsView(const std::string& plugin_id);
 
+    void setWorkerExecutable(std::string path);
+    const std::string& workerExecutable() const { return worker_executable_; }
+    std::string resolveWorkerExecutable() const;
+
 private:
     struct LoadedHandle {
         void* dl_handle = nullptr;
         IPlugin* instance = nullptr;
         void (*destroy_fn)(void*) = nullptr;
         std::unique_ptr<PluginContext> context;
+        bool is_subprocess = false;
+        std::string worker_id;
     };
+
+    bool loadSubprocessPlugin(const InstalledPluginRecord& rec, std::string& error);
+    void emitFault(const std::string& plugin_id,
+                   const std::string& component,
+                   const std::string& error);
+    RuntimePluginStatus buildStatusLocked(const InstalledPluginRecord& rec) const;
 
     PluginInstaller& installer_;
     CapabilityRegistry& capabilities_;
@@ -78,6 +90,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, LoadedHandle> loaded_;
     std::unordered_map<std::string, std::string> last_errors_;
+    std::string worker_executable_;
 };
 
 } // namespace omnidesk::pm

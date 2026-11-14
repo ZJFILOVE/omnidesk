@@ -50,19 +50,8 @@ void closeFd(int& fd) {
     }
 }
 
-bool writeAll(int fd, const std::string& data) {
-    size_t sent = 0;
-    while (sent < data.size()) {
-        ssize_t n = write(fd, data.data() + sent, data.size() - sent);
-        if (n > 0) {
-            sent += static_cast<size_t>(n);
-            continue;
-        }
-        if (n < 0 && errno == EINTR) continue;
-        return false;
-    }
-    return true;
-}
+constexpr size_t max_frame_bytes = 8 * 1024 * 1024;
+constexpr size_t max_stderr_line_bytes = 4096;
 
 std::string extractJsonDelta(const nlohmann::json& obj) {
     if (!obj.is_object()) return {};
@@ -184,6 +173,10 @@ bool WorkerSupervisor::registerWorker(const WorkerSpec& spec) {
         workers_[spec.worker_id] = std::move(rt);
     }
     if (previous) {
+        {
+            std::lock_guard lock(previous->state_mutex);
+            previous->retired = true;
+        }
         stopRuntime(*previous);
     }
     return true;
@@ -198,7 +191,13 @@ bool WorkerSupervisor::unregisterWorker(const std::string& worker_id) {
         rt = std::move(it->second);
         workers_.erase(it);
     }
-    if (rt) stopRuntime(*rt);
+    if (rt) {
+        {
+            std::lock_guard lock(rt->state_mutex);
+            rt->retired = true;
+        }
+        stopRuntime(*rt);
+    }
     return true;
 }
 
@@ -207,6 +206,37 @@ std::shared_ptr<WorkerSupervisor::WorkerRuntime> WorkerSupervisor::findRuntime(
     std::lock_guard lock(mutex_);
     auto it = workers_.find(worker_id);
     return it == workers_.end() ? nullptr : it->second;
+}
+
+void WorkerSupervisor::recordFailureLocked(WorkerRuntime& rt, int pid,
+                                           const std::string& error,
+                                           WorkerFaultEvent& event) {
+    const int64_t now = steadyNowMs();
+    rt.last_crash_ms = now;
+    rt.last_exited_unexpectedly = true;
+    rt.last_error = error;
+    ++rt.crash_count;
+    rt.recent_crash_times_ms.push_back(now);
+    const int64_t window_ms = std::max<int64_t>(1000, rt.spec.restart_window_ms);
+    while (!rt.recent_crash_times_ms.empty() &&
+           now - rt.recent_crash_times_ms.front() > window_ms) {
+        rt.recent_crash_times_ms.pop_front();
+    }
+    rt.quarantined = rt.quarantined ||
+        rt.recent_crash_times_ms.size() > static_cast<size_t>(std::max(1, rt.spec.max_restarts_in_window));
+    rt.pending_auto_restart = rt.spec.auto_restart && !rt.quarantined;
+    event.worker_id = rt.spec.worker_id;
+    event.plugin_id = rt.spec.plugin_id;
+    event.pid = pid;
+    event.exit_code = rt.last_exit_code;
+    event.signal_number = rt.last_signal;
+    event.signal_name = rt.last_signal_name;
+    event.crash_count = rt.crash_count;
+    event.restart_count = rt.restart_count;
+    event.quarantined = rt.quarantined;
+    event.error = error;
+    const size_t tail = std::min<size_t>(10, rt.stderr_ring.size());
+    event.recent_stderr.assign(rt.stderr_ring.end() - tail, rt.stderr_ring.end());
 }
 
 bool WorkerSupervisor::reapExitedLocked(WorkerRuntime& rt,
@@ -239,18 +269,15 @@ bool WorkerSupervisor::reapExitedLocked(WorkerRuntime& rt,
     }
 
     const int dead_pid = rt.pid;
+    if (res == dead_pid) kill(-dead_pid, SIGKILL);
     rt.pid = -1;
     closeIoFdsLocked(rt);
 
     const bool crashed = !rt.stopping_child && (force_unexpected || sig != 0 || exit_code != 0);
     if (crashed) {
-        const int64_t now = steadyNowMs();
         rt.last_exit_code = exit_code;
         rt.last_signal = sig;
         rt.last_signal_name = sig_name;
-        rt.last_crash_ms = now;
-        rt.last_exited_unexpectedly = true;
-        ++rt.crash_count;
 
         std::string err = "worker process crashed";
         if (!sig_name.empty()) {
@@ -260,38 +287,11 @@ bool WorkerSupervisor::reapExitedLocked(WorkerRuntime& rt,
         } else {
             err += " (unexpected EOF)";
         }
-        rt.last_error = err;
-
-        const int64_t window_ms = std::max<int64_t>(1000, rt.spec.restart_window_ms);
-        const int threshold = std::max(1, rt.spec.max_restarts_in_window);
-        rt.recent_crash_times_ms.push_back(now);
-        while (!rt.recent_crash_times_ms.empty() &&
-               (now - rt.recent_crash_times_ms.front()) > window_ms) {
-            rt.recent_crash_times_ms.pop_front();
-        }
-        if (static_cast<int>(rt.recent_crash_times_ms.size()) > threshold) {
-            rt.quarantined = true;
-        }
-        rt.pending_auto_restart = (rt.spec.auto_restart && !rt.quarantined);
-
+        WorkerFaultEvent event;
+        recordFailureLocked(rt, dead_pid, err, event);
         if (unexpected_crash) *unexpected_crash = true;
         if (crash_event) {
-            WorkerFaultEvent evt;
-            evt.worker_id = rt.spec.worker_id;
-            evt.plugin_id = rt.spec.plugin_id;
-            evt.pid = dead_pid;
-            evt.exit_code = exit_code;
-            evt.signal_number = sig;
-            evt.signal_name = sig_name;
-            evt.crash_count = rt.crash_count;
-            evt.restart_count = rt.restart_count;
-            evt.quarantined = rt.quarantined;
-            evt.error = err;
-            const size_t tail = std::min<size_t>(10, rt.stderr_ring.size());
-            if (tail > 0) {
-                evt.recent_stderr.assign(rt.stderr_ring.end() - tail, rt.stderr_ring.end());
-            }
-            *crash_event = std::move(evt);
+            *crash_event = std::move(event);
         }
     } else if (res == dead_pid) {
         rt.last_exit_code = exit_code;
@@ -310,6 +310,10 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
                                    WorkerFaultEvent* crash_out) {
     ignoreSigpipeOnce();
     rt.lifecycle_cv.wait(lk, [&rt]() { return !rt.stopping_child; });
+    if (rt.retired) {
+        if (error) *error = "worker unregistered";
+        return false;
+    }
 
     bool crashed_prior = false;
     WorkerFaultEvent local_crash;
@@ -352,6 +356,7 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
     int in_pipe[2] = {-1, -1};
     int out_pipe[2] = {-1, -1};
     int listen_fd = -1;
+    int sock_pair[2] = {-1, -1};
     std::string sock_path;
 
     if (rt.spec.transport == WorkerTransport::UnixSocket) {
@@ -381,12 +386,22 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
             listen(listen_fd, 4) != 0) {
             closeFd(listen_fd);
             ::unlink(sock_path.c_str());
-            closeFd(err_pipe[0]);
-            closeFd(err_pipe[1]);
-            if (error) *error = std::string("bind/listen AF_UNIX failed: ") + std::strerror(errno);
-            return false;
+            sock_path.clear();
+            // Fallback to unnamed AF_UNIX socketpair when filesystem bind() is blocked
+            // by seccomp sandboxes (EPERM/EACCES) or read-only /tmp.
+            if (socketpair(AF_UNIX, SOCK_STREAM, 0, sock_pair) != 0) {
+                closeFd(err_pipe[0]);
+                closeFd(err_pipe[1]);
+                if (error) {
+                    *error = std::string("bind/listen AF_UNIX and socketpair fallback failed: ") +
+                             std::strerror(errno);
+                }
+                return false;
+            }
+            setCloexec(sock_pair[0]);
+        } else {
+            chmod(sock_path.c_str(), 0600);
         }
-        chmod(sock_path.c_str(), 0600);
     } else {
         if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
             if (error) *error = std::string("pipe failed: ") + std::strerror(errno);
@@ -404,7 +419,8 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
     pid_t pid = fork();
     if (pid < 0) {
         if (error) *error = std::string("fork failed: ") + std::strerror(errno);
-        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1], listen_fd}) {
+        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1],
+                       err_pipe[0], err_pipe[1], listen_fd, sock_pair[0], sock_pair[1]}) {
             closeFd(fd);
         }
         if (!sock_path.empty()) ::unlink(sock_path.c_str());
@@ -429,7 +445,18 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
             close(err_pipe[0]);
             close(err_pipe[1]);
             if (listen_fd >= 0) close(listen_fd);
-            setenv("OMNIDESK_WORKER_SOCKET", sock_path.c_str(), 1);
+            if (sock_pair[0] >= 0) close(sock_pair[0]);
+            if (sock_pair[1] >= 0) {
+                int fd_flags = fcntl(sock_pair[1], F_GETFD, 0);
+                if (fd_flags >= 0) {
+                    fcntl(sock_pair[1], F_SETFD, fd_flags & ~FD_CLOEXEC);
+                }
+                const std::string fd_str = std::to_string(sock_pair[1]);
+                setenv("OMNIDESK_WORKER_SOCKET_FD", fd_str.c_str(), 1);
+                setenv("OMNIDESK_WORKER_SOCKET", ("fd://" + fd_str).c_str(), 1);
+            } else {
+                setenv("OMNIDESK_WORKER_SOCKET", sock_path.c_str(), 1);
+            }
         } else {
             dup2(in_pipe[0], STDIN_FILENO);
             dup2(out_pipe[1], STDOUT_FILENO);
@@ -465,21 +492,27 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
 
     if (rt.spec.transport == WorkerTransport::UnixSocket) {
         int conn_fd = -1;
-        const int64_t accept_deadline = steadyNowMs() + 5000;
-        while (steadyNowMs() < accept_deadline) {
-            struct pollfd pfd{listen_fd, POLLIN, 0};
-            int pr = poll(&pfd, 1, 25);
-            if (pr > 0 && (pfd.revents & POLLIN)) {
-                conn_fd = accept(listen_fd, nullptr, nullptr);
-                if (conn_fd >= 0) {
-                    setCloexec(conn_fd);
+        if (sock_pair[0] >= 0) {
+            closeFd(sock_pair[1]);
+            conn_fd = sock_pair[0];
+            sock_pair[0] = -1;
+        } else {
+            const int64_t accept_deadline = steadyNowMs() + 5000;
+            while (steadyNowMs() < accept_deadline) {
+                struct pollfd pfd{listen_fd, POLLIN, 0};
+                int pr = poll(&pfd, 1, 25);
+                if (pr > 0 && (pfd.revents & POLLIN)) {
+                    conn_fd = accept(listen_fd, nullptr, nullptr);
+                    if (conn_fd >= 0) {
+                        setCloexec(conn_fd);
+                        break;
+                    }
+                }
+                int st = 0;
+                pid_t exited = waitpid(pid, &st, WNOHANG);
+                if (exited == pid) {
                     break;
                 }
-            }
-            int st = 0;
-            pid_t exited = waitpid(pid, &st, WNOHANG);
-            if (exited == pid) {
-                break;
             }
         }
         closeFd(listen_fd);
@@ -507,6 +540,10 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
     }
 
     rt.stderr_fd = err_pipe[0];
+    for (int fd : {rt.stdin_fd, rt.stdout_fd, rt.stderr_fd}) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
     rt.last_active_ms = steadyNowMs();
     rt.pending_auto_restart = false;
     ++rt.restart_count;
@@ -522,14 +559,22 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
         char buf[1024];
         std::string line;
         while (true) {
+            {
+                std::lock_guard lk(rt.state_mutex);
+                if (rt.stderr_fd != err_fd || rt.stopping_child) break;
+            }
+            struct pollfd descriptor{err_fd, POLLIN, 0};
+            int ready = poll(&descriptor, 1, 50);
+            if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
+            if (ready < 0) break;
             ssize_t n = read(err_fd, buf, sizeof(buf));
             if (n <= 0) {
-                if (n < 0 && errno == EINTR) continue;
+                if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
                 break;
             }
             for (ssize_t i = 0; i < n; ++i) {
                 if (buf[i] == '\r') continue;
-                if (buf[i] == '\n') {
+                if (buf[i] == '\n' || line.size() >= max_stderr_line_bytes) {
                     std::lock_guard lk(rt.state_mutex);
                     rt.stderr_ring.push_back(std::move(line));
                     line.clear();
@@ -555,6 +600,7 @@ void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
     {
         std::unique_lock<std::mutex> lk(rt.state_mutex);
         rt.lifecycle_cv.wait(lk, [&rt]() { return !rt.stopping_child; });
+        ++rt.stop_generation;
         if (rt.pid <= 0 && rt.stdin_fd < 0 && rt.stdout_fd < 0 && rt.stderr_fd < 0 &&
             !rt.stderr_thread.joinable()) {
             if (!rt.active_socket_path.empty()) {
@@ -616,6 +662,7 @@ void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
         }
     }
 
+    if (pid > 0) kill(-pid, SIGKILL);
     std::thread err_join;
     {
         std::lock_guard lk(rt.state_mutex);
@@ -719,6 +766,7 @@ size_t WorkerSupervisor::evictIdleNow() {
         bool crashed_now = false;
         {
             std::unique_lock<std::mutex> lk(rt->state_mutex);
+            if (rt->in_flight > 0 || rt->retired) continue;
             reapExitedLocked(*rt, &crashed_now, &crash_evt, false);
             if ((crashed_now || rt->pending_auto_restart) && !shutting_down &&
                 rt->spec.auto_restart && !rt->quarantined && !rt->stopping_child &&
@@ -769,6 +817,44 @@ void WorkerSupervisor::watchdogLoop() {
     }
 }
 
+bool WorkerSupervisor::writeLineInterruptible(WorkerRuntime& rt,
+                                              const std::string& line,
+                                              const std::shared_ptr<CancelToken>& cancel,
+                                              int64_t deadline_ms,
+                                              bool& timed_out,
+                                              bool& cancelled) {
+    size_t sent = 0;
+    while (sent < line.size()) {
+        if (cancel && cancel->isCancelled()) {
+            cancelled = true;
+            return false;
+        }
+        const int64_t remaining = deadline_ms - steadyNowMs();
+        if (remaining <= 0) {
+            timed_out = true;
+            return false;
+        }
+        int descriptor = -1;
+        ssize_t written = -1;
+        {
+            std::lock_guard lock(rt.state_mutex);
+            descriptor = rt.stdin_fd;
+            if (descriptor < 0 || rt.stopping_child) return false;
+            written = write(descriptor, line.data() + sent, line.size() - sent);
+        }
+        if (written > 0) {
+            sent += static_cast<size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        if (written >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return false;
+        struct pollfd poll_descriptor{descriptor, POLLOUT, 0};
+        int ready = poll(&poll_descriptor, 1, static_cast<int>(std::min<int64_t>(remaining, 50)));
+        if (ready < 0 && errno != EINTR) return false;
+    }
+    return true;
+}
+
 bool WorkerSupervisor::readLineInterruptible(WorkerRuntime& rt,
                                              std::string& out_line,
                                              const std::shared_ptr<CancelToken>& cancel,
@@ -781,6 +867,11 @@ bool WorkerSupervisor::readLineInterruptible(WorkerRuntime& rt,
     eof = false;
 
     while (true) {
+        if (cancel && cancel->isCancelled()) {
+            cancelled = true;
+            return false;
+        }
+
         auto nl = rt.stdout_buf.find('\n');
         if (nl != std::string::npos) {
             out_line = rt.stdout_buf.substr(0, nl);
@@ -788,9 +879,8 @@ bool WorkerSupervisor::readLineInterruptible(WorkerRuntime& rt,
             rt.stdout_buf.erase(0, nl + 1);
             return true;
         }
-
-        if (cancel && cancel->isCancelled()) {
-            cancelled = true;
+        if (rt.stdout_buf.size() >= max_frame_bytes) {
+            eof = true;
             return false;
         }
 
@@ -823,7 +913,15 @@ bool WorkerSupervisor::readLineInterruptible(WorkerRuntime& rt,
         }
 
         char buf[4096];
-        ssize_t n = read(fd, buf, sizeof(buf));
+        ssize_t n = -1;
+        {
+            std::lock_guard lock(rt.state_mutex);
+            if (fd != rt.stdout_fd || rt.stopping_child) {
+                eof = true;
+                return false;
+            }
+            n = read(fd, buf, sizeof(buf));
+        }
         if (n > 0) {
             rt.stdout_buf.append(buf, static_cast<size_t>(n));
             continue;
@@ -865,7 +963,22 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
         return {false, nlohmann::json::object(), "worker not registered: " + worker_id, "", false};
     }
 
-    std::lock_guard io_lk(rt->io_mutex);
+    const int64_t deadline = steadyNowMs() + std::max<int64_t>(100, timeout_ms);
+    std::unique_lock<std::timed_mutex> io_lk(rt->io_mutex, std::defer_lock);
+    while (!io_lk.try_lock_for(std::chrono::milliseconds(25))) {
+        if (cancel && cancel->isCancelled()) {
+            return {false, nlohmann::json::object(), "cancelled", rt->spec.plugin_id, true};
+        }
+        if (steadyNowMs() >= deadline) {
+            return {false, nlohmann::json::object(), "worker request timed out waiting for pending request",
+                    rt->spec.plugin_id, false};
+        }
+    }
+    const std::string line = payload.dump() + "\n";
+    if (line.size() > max_frame_bytes) {
+        return {false, nlohmann::json::object(), "worker request exceeds 8 MiB frame limit",
+                rt->spec.plugin_id, false};
+    }
 
     struct FlightGuard {
         WorkerRuntime& rt;
@@ -879,8 +992,8 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
     const int max_attempts = rt->spec.retry_on_crash ? 2 : 1;
 
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
-        int stdin_fd = -1;
         uint64_t gen = 0;
+        uint64_t stop_generation = 0;
         WorkerFaultEvent pre_crash;
         bool spawn_ok = false;
         std::string spawn_err;
@@ -890,8 +1003,8 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
             if (spawn_ok) {
                 ++rt->in_flight;
                 rt->last_active_ms = steadyNowMs();
-                stdin_fd = rt->stdin_fd;
                 gen = rt->restart_count;
+                stop_generation = rt->stop_generation;
             }
         }
         if (!pre_crash.worker_id.empty()) {
@@ -910,6 +1023,12 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
         auto handleUnexpectedCrash = [&](const std::string& fallback_reason,
                                          bool& out_restarted_ok) -> CapabilityResult {
             out_restarted_ok = false;
+            {
+                std::lock_guard lock(rt->state_mutex);
+                if (rt->retired || rt->stop_generation != stop_generation) {
+                    return {false, nlohmann::json::object(), "worker stopped", rt->spec.plugin_id, false};
+                }
+            }
             // Briefly wait for zombie status so signal (e.g. SIGSEGV) is accurately captured.
             bool crashed = false;
             WorkerFaultEvent evt;
@@ -925,31 +1044,17 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
             }
             if (!crashed) {
                 bool alive = false;
+                int failed_pid = -1;
                 {
                     std::lock_guard lk(rt->state_mutex);
                     alive = (rt->pid > 0);
+                    failed_pid = rt->pid;
                 }
                 if (alive) {
                     stopRuntime(*rt);
                 }
                 std::lock_guard lk(rt->state_mutex);
-                rt->last_exited_unexpectedly = true;
-                rt->last_crash_ms = steadyNowMs();
-                ++rt->crash_count;
-                rt->last_error = fallback_reason;
-                evt.worker_id = rt->spec.worker_id;
-                evt.plugin_id = rt->spec.plugin_id;
-                evt.exit_code = rt->last_exit_code;
-                evt.signal_number = rt->last_signal;
-                evt.signal_name = rt->last_signal_name;
-                evt.crash_count = rt->crash_count;
-                evt.restart_count = rt->restart_count;
-                evt.quarantined = rt->quarantined;
-                evt.error = fallback_reason;
-                const size_t tail = std::min<size_t>(10, rt->stderr_ring.size());
-                if (tail > 0) {
-                    evt.recent_stderr.assign(rt->stderr_ring.end() - tail, rt->stderr_ring.end());
-                }
+                recordFailureLocked(*rt, failed_pid, fallback_reason, evt);
             }
 
             bool shutting_down = false;
@@ -973,20 +1078,27 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
             return {false, nlohmann::json::object(), evt.error, rt->spec.plugin_id, false};
         };
 
-        const std::string line = payload.dump() + "\n";
-        if (!writeAll(stdin_fd, line)) {
+        bool write_timed_out = false;
+        bool write_cancelled = false;
+        if (!writeLineInterruptible(*rt, line, cancel, deadline, write_timed_out, write_cancelled)) {
+            if (write_cancelled) {
+                stopRuntime(*rt);
+                return {false, nlohmann::json::object(), "cancelled", rt->spec.plugin_id, true};
+            }
             bool restarted_ok = false;
-            CapabilityResult err_res = handleUnexpectedCrash("failed to write request to worker", restarted_ok);
-            if (attempt + 1 < max_attempts && restarted_ok) {
+            CapabilityResult err_res = handleUnexpectedCrash(
+                write_timed_out ? "worker request timed out writing request" : "failed to write request to worker",
+                restarted_ok);
+            if (!write_timed_out && attempt + 1 < max_attempts && restarted_ok) {
                 continue;
             }
             return err_res;
         }
 
-        const int64_t deadline = steadyNowMs() + std::max<int64_t>(100, timeout_ms);
         CapabilityResult result;
         result.provider_plugin_id = rt->spec.plugin_id;
         std::string accumulated;
+        bool delivered_chunk = false;
 
         bool retry_this_attempt = false;
         while (true) {
@@ -1003,15 +1115,15 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
                     return result;
                 }
                 if (timed_out) {
-                    stopRuntime(*rt);
-                    result.ok = false;
-                    result.error = "worker request timed out";
-                    return result;
+                    bool restarted_ok = false;
+                    return handleUnexpectedCrash("worker request timed out", restarted_ok);
                 }
                 bool restarted_ok = false;
                 CapabilityResult err_res = handleUnexpectedCrash(
-                    "worker closed stream unexpectedly before returning final response", restarted_ok);
-                if (attempt + 1 < max_attempts && restarted_ok) {
+                    rt->stdout_buf.size() >= max_frame_bytes
+                        ? "worker response exceeds 8 MiB frame limit"
+                        : "worker closed stream unexpectedly before returning final response", restarted_ok);
+                if (!delivered_chunk && attempt + 1 < max_attempts && restarted_ok) {
                     retry_this_attempt = true;
                     break;
                 }
@@ -1023,6 +1135,7 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
             nlohmann::json obj = nlohmann::json::parse(resp_line, nullptr, false);
             if (obj.is_discarded() || !obj.is_object()) {
                 if (on_chunk) {
+                    delivered_chunk = true;
                     StreamChunk chunk;
                     chunk.delta = resp_line + "\n";
                     chunk.event = "delta";
@@ -1032,9 +1145,21 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
                     }
                 }
                 accumulated += resp_line;
+                if (accumulated.size() > max_frame_bytes) {
+                    bool restarted_ok = false;
+                    return handleUnexpectedCrash("worker stream exceeds 8 MiB limit", restarted_ok);
+                }
                 continue;
             }
 
+            if ((obj.contains("type") && !obj["type"].is_string()) ||
+                (obj.contains("event") && !obj["event"].is_string()) ||
+                (obj.contains("error") && !obj["error"].is_string()) ||
+                (obj.contains("ok") && !obj["ok"].is_boolean()) ||
+                (obj.contains("done") && !obj["done"].is_boolean())) {
+                bool restarted_ok = false;
+                return handleUnexpectedCrash("invalid worker response envelope", restarted_ok);
+            }
             const std::string type = obj.value("type", "");
             const bool has_done_flag = obj.contains("done") && obj["done"].is_boolean();
             const bool is_done_true = has_done_flag && obj["done"].get<bool>();
@@ -1045,9 +1170,14 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
 
             std::string delta = extractJsonDelta(obj);
             if (!delta.empty()) accumulated += delta;
+            if (accumulated.size() > max_frame_bytes) {
+                bool restarted_ok = false;
+                return handleUnexpectedCrash("worker stream exceeds 8 MiB limit", restarted_ok);
+            }
 
             if (is_intermediate_event && type != "done" && type != "result" && type != "error") {
                 if (on_chunk) {
+                    delivered_chunk = true;
                     StreamChunk chunk;
                     chunk.delta = std::move(delta);
                     chunk.data = obj.contains("data") ? obj["data"] : obj;
@@ -1116,7 +1246,9 @@ std::optional<WorkerStatus> WorkerSupervisor::status(const std::string& worker_i
     WorkerStatus st;
     {
         std::lock_guard lk(rt->state_mutex);
-        const_cast<WorkerSupervisor*>(this)->reapExitedLocked(*rt, &crashed_now, &evt, false);
+        if (rt->in_flight == 0) {
+            const_cast<WorkerSupervisor*>(this)->reapExitedLocked(*rt, &crashed_now, &evt, false);
+        }
         st.worker_id = rt->spec.worker_id;
         st.plugin_id = rt->spec.plugin_id;
         st.registered = true;

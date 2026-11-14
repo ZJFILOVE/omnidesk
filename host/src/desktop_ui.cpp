@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <borealis/views/edit_text_dialog.hpp>
 #include <nanovg.h>
 #include "omnidesk/ui_theme.hpp"
 
@@ -18,15 +19,42 @@ struct HintTarget {
 struct State {
     DesktopCallbacks callbacks;
     bool hint_mode = false;
+    brls::View* hint_root = nullptr;
     std::string hint_prefix;
     std::vector<HintTarget> hints;
     bool pending_g = false;
     std::chrono::steady_clock::time_point pending_g_time;
+    bool watched_keys_registered = false;
 };
 
 State& state() {
     static State s;
     return s;
+}
+
+brls::View* currentRootView() {
+    const auto& stack = brls::Application::getActivitiesStack();
+    return stack.empty() ? nullptr : stack.back()->getContentView();
+}
+
+bool isEditingText() {
+    return dynamic_cast<brls::EditTextDialog*>(currentRootView()) != nullptr;
+}
+
+void cancelHints() {
+    auto& st = state();
+    st.hint_mode = false;
+    st.hint_root = nullptr;
+    st.hint_prefix.clear();
+    st.hints.clear();
+}
+
+brls::Rect intersectRect(const brls::Rect& a, const brls::Rect& b) {
+    const float x = std::max(a.getMinX(), b.getMinX());
+    const float y = std::max(a.getMinY(), b.getMinY());
+    const float w = std::max(0.0f, std::min(a.getMaxX(), b.getMaxX()) - x);
+    const float h = std::max(0.0f, std::min(a.getMaxY(), b.getMaxY()) - y);
+    return {x, y, w, h};
 }
 
 brls::ScrollingFrame* findAncestorScroll(brls::View* v) {
@@ -39,19 +67,25 @@ brls::ScrollingFrame* findAncestorScroll(brls::View* v) {
     return nullptr;
 }
 
-void collectHintTargets(brls::View* root, std::vector<brls::View*>& out) {
-    if (!root || root->getVisibility() != brls::Visibility::VISIBLE) {
+void collectHintTargets(brls::View* root,
+                        brls::Rect clip,
+                        std::vector<std::pair<brls::View*, brls::Rect>>& out) {
+    if (!root || root->getVisibility() != brls::Visibility::VISIBLE || root->getAlpha() < 0.1f) {
+        return;
+    }
+    const brls::Rect frame = intersectRect(root->getFrame(), clip);
+    if (frame.getWidth() < 8.0f || frame.getHeight() < 8.0f) {
         return;
     }
     if (root->isFocusable()) {
-        brls::Rect r = root->getFrame();
-        if (r.size.width > 4.0f && r.size.height > 4.0f) {
-            out.push_back(root);
-        }
+        out.emplace_back(root, frame);
     }
     if (auto* box = dynamic_cast<brls::Box*>(root)) {
+        if (dynamic_cast<brls::ScrollingFrame*>(root)) {
+            clip = frame;
+        }
         for (brls::View* child : box->getChildren()) {
-            collectHintTargets(child, out);
+            collectHintTargets(child, clip, out);
         }
     }
 }
@@ -61,21 +95,24 @@ void buildHints() {
     st.hints.clear();
     st.hint_prefix.clear();
 
-    const auto& stack = brls::Application::getActivitiesStack();
-    if (stack.empty()) {
+    brls::View* content = currentRootView();
+    if (!content) {
         return;
     }
-    brls::View* content = stack.back()->getContentView();
-    std::vector<brls::View*> views;
-    collectHintTargets(content, views);
+    const float viewport_w =
+        brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+    const float viewport_h =
+        brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+    std::vector<std::pair<brls::View*, brls::Rect>> views;
+    collectHintTargets(content, {0.0f, 0.0f, viewport_w, viewport_h}, views);
 
     static constexpr const char kAlphabet[] = "ASDFGHJKLQWERTYUIOPZXCVBNM";
     const size_t alpha_n = 26;
     const size_t count = std::min(views.size(), alpha_n * 2);
     for (size_t i = 0; i < count; ++i) {
         HintTarget ht;
-        ht.view = views[i];
-        ht.frame = views[i]->getFrame();
+        ht.view = views[i].first;
+        ht.frame = views[i].second;
         if (i < alpha_n) {
             ht.label = std::string(1, kAlphabet[i]);
         } else {
@@ -83,6 +120,7 @@ void buildHints() {
         }
         st.hints.push_back(std::move(ht));
     }
+    st.hint_root = content;
 }
 
 bool scrollCurrentBy(float delta_y) {
@@ -115,102 +153,159 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
     state().callbacks = std::move(callbacks);
 
     brls::Application::keyboardOverlayRenderer = renderHintOverlay;
+    brls::Application::controllerShortcutHandler = [](brls::ControllerButton button, bool) {
+        auto& st = state();
+        if (!st.hint_mode) {
+            return false;
+        }
+        if (button == brls::BUTTON_B) {
+            cancelHints();
+            return true;
+        }
+        if (button == brls::BUTTON_A) {
+            return true;
+        }
+        return false;
+    };
 
     brls::Application::keyboardShortcutHandler = [](brls::BrlsKeyCombination combo,
                                                     bool repeating,
-                                                    bool pressed) -> bool {
-        if (!pressed) {
-            return false;
-        }
+                                                    bool fallback) -> bool {
         auto& st = state();
+        if (isEditingText()) {
+            cancelHints();
+            return fallback;
+        }
+        if (st.hint_mode && st.hint_root != currentRootView()) {
+            cancelHints();
+        }
+        const bool in_modal_activity = brls::Application::getActivitiesStack().size() > 1;
+
         const int key = combo.code;
         const int mods = combo.mod;
         const bool ctrl = (mods & brls::BRLS_KBD_MODIFIER_CTRL) != 0;
         const bool shift = (mods & brls::BRLS_KBD_MODIFIER_SHIFT) != 0;
 
-        // Global shortcuts even while focused anywhere:
-        if (!repeating && key == brls::BRLS_KBD_KEY_F8) {
-            if (st.callbacks.on_toggle_dock) {
-                st.callbacks.on_toggle_dock();
-            }
-            return true;
-        }
-
-        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_F9) {
-            if (st.callbacks.on_skip_ad && st.callbacks.on_skip_ad()) {
-                return true;
-            }
-        }
-
-        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_ESCAPE && !st.hint_mode &&
-            brls::Application::getActivitiesStack().size() <= 1 &&
-            !brls::Application::isInputBlocks()) {
-            if (st.callbacks.on_cancel_active && st.callbacks.on_cancel_active()) {
-                return true;
-            }
-        }
-
-        if (!repeating && ctrl && key == brls::BRLS_KBD_KEY_TAB) {
-            if (st.callbacks.on_cycle_workspace) {
-                st.callbacks.on_cycle_workspace(shift ? -1 : 1);
-            }
-            return true;
-        }
-
-        if (!repeating && ctrl && key >= brls::BRLS_KBD_KEY_1 && key <= brls::BRLS_KBD_KEY_9) {
-            if (st.callbacks.on_select_workspace) {
-                st.callbacks.on_select_workspace(key - brls::BRLS_KBD_KEY_1);
-            }
-            return true;
-        }
-
-        // Vim hint overlay mode
-        if (st.hint_mode) {
-            if (key == brls::BRLS_KBD_KEY_ESCAPE) {
-                st.hint_mode = false;
-                st.hints.clear();
-                return true;
-            }
-            if (key >= brls::BRLS_KBD_KEY_A && key <= brls::BRLS_KBD_KEY_Z) {
-                const char ch = static_cast<char>('A' + (key - brls::BRLS_KBD_KEY_A));
-                st.hint_prefix += ch;
-                std::vector<HintTarget> matches;
-                for (const auto& h : st.hints) {
-                    if (h.label.rfind(st.hint_prefix, 0) == 0) {
-                        matches.push_back(h);
-                    }
+        if (!fallback) {
+            // Global shortcuts handled before focused view actions:
+            if (!repeating && key == brls::BRLS_KBD_KEY_F8) {
+                if (st.callbacks.on_toggle_dock) {
+                    st.callbacks.on_toggle_dock();
                 }
-                if (matches.empty()) {
-                    st.hint_mode = false;
-                    st.hints.clear();
-                } else if (matches.size() == 1 && matches[0].label == st.hint_prefix) {
-                    brls::View* target = matches[0].view;
-                    st.hint_mode = false;
-                    st.hints.clear();
-                    if (target) {
-                        brls::Application::giveFocus(target);
-                        for (const auto& act : target->getActions()) {
-                            if (act && act->getButton() == brls::BUTTON_A && act->isAvailable()) {
-                                auto listener = act->getActionListener();
-                                if (listener) {
-                                    target->playClickAnimation();
-                                    listener(target);
+                return true;
+            }
+
+            if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_F9) {
+                if (st.callbacks.on_skip_ad && st.callbacks.on_skip_ad()) {
+                    return true;
+                }
+            }
+
+            if (!repeating && ctrl && key == brls::BRLS_KBD_KEY_TAB) {
+                if (st.callbacks.on_cycle_workspace) {
+                    st.callbacks.on_cycle_workspace(shift ? -1 : 1);
+                }
+                return true;
+            }
+
+            if (!repeating && ctrl && key >= brls::BRLS_KBD_KEY_1 && key <= brls::BRLS_KBD_KEY_9) {
+                if (st.callbacks.on_select_workspace) {
+                    st.callbacks.on_select_workspace(key - brls::BRLS_KBD_KEY_1);
+                }
+                return true;
+            }
+
+            // Vim hint overlay mode
+            if (st.hint_mode) {
+                if (key == brls::BRLS_KBD_KEY_ESCAPE) {
+                    cancelHints();
+                    return true;
+                }
+                if (key == brls::BRLS_KBD_KEY_BACKSPACE) {
+                    if (!st.hint_prefix.empty()) {
+                        st.hint_prefix.pop_back();
+                    } else {
+                        cancelHints();
+                    }
+                    return true;
+                }
+                if (!repeating && !ctrl && key >= brls::BRLS_KBD_KEY_A && key <= brls::BRLS_KBD_KEY_Z) {
+                    const char ch = static_cast<char>('A' + (key - brls::BRLS_KBD_KEY_A));
+                    st.hint_prefix += ch;
+                    std::vector<HintTarget> matches;
+                    for (const auto& h : st.hints) {
+                        if (h.label.rfind(st.hint_prefix, 0) == 0) {
+                            matches.push_back(h);
+                        }
+                    }
+                    if (matches.empty()) {
+                        cancelHints();
+                    } else if (matches.size() == 1 && matches[0].label == st.hint_prefix) {
+                        brls::View* target = matches[0].view;
+                        cancelHints();
+                        if (target && target->getVisibility() == brls::Visibility::VISIBLE) {
+                            brls::Application::giveFocus(target);
+                            for (const auto& act : target->getActions()) {
+                                if (act && act->getButton() == brls::BUTTON_A && act->isAvailable()) {
+                                    auto listener = act->getActionListener();
+                                    if (listener) {
+                                        target->playClickAnimation();
+                                        listener(target);
+                                    }
+                                    break;
                                 }
-                                break;
                             }
                         }
                     }
+                    return true;
                 }
+                cancelHints();
                 return true;
             }
-            st.hint_mode = false;
-            st.hints.clear();
-            return true;
+
+            if (brls::Application::isInputBlocks()) {
+                return false;
+            }
+            if (in_modal_activity) {
+                return false;
+            }
+
+            if (!repeating && !ctrl) {
+                if (key == brls::BRLS_KBD_KEY_F && !shift) {
+                    buildHints();
+                    st.hint_mode = !st.hints.empty();
+                    return true;
+                }
+                if (key == brls::BRLS_KBD_KEY_SLASH && !shift) {
+                    if (st.callbacks.on_search) {
+                        st.callbacks.on_search();
+                        return true;
+                    }
+                }
+                if (key == brls::BRLS_KBD_KEY_SLASH && shift) { // '?'
+                    showShortcutsHelp();
+                    return true;
+                }
+                if (key == brls::BRLS_KBD_KEY_T && !shift) {
+                    if (st.callbacks.on_toggle_theme) {
+                        st.callbacks.on_toggle_theme();
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         // Don't hijack typing if inputs are blocked
-        if (brls::Application::isInputBlocks()) {
+        if (brls::Application::isInputBlocks() || in_modal_activity) {
             return false;
+        }
+
+        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_ESCAPE &&
+            brls::Application::getActivitiesStack().size() <= 1) {
+            if (st.callbacks.on_cancel_active && st.callbacks.on_cancel_active()) {
+                return true;
+            }
         }
 
         // Ctrl+D / Ctrl+U half-page scroll
@@ -221,72 +316,89 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             return scrollCurrentBy(-280.0f);
         }
 
-        if (!repeating && !ctrl) {
-            if (key == brls::BRLS_KBD_KEY_F) {
-                buildHints();
-                st.hint_mode = !st.hints.empty();
-                return true;
+        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_G) {
+            if (shift) {
+                st.pending_g = false;
+                return scrollToEdge(true);
             }
-            if (key == brls::BRLS_KBD_KEY_SLASH && !shift) {
-                if (st.callbacks.on_search) {
-                    st.callbacks.on_search();
-                    return true;
-                }
+            auto now = std::chrono::steady_clock::now();
+            if (st.pending_g &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - st.pending_g_time).count() < 550) {
+                st.pending_g = false;
+                return scrollToEdge(false);
             }
-            if (key == brls::BRLS_KBD_KEY_SLASH && shift) { // '?'
-                showShortcutsHelp();
-                return true;
-            }
-            if (key == brls::BRLS_KBD_KEY_T) {
-                if (st.callbacks.on_toggle_theme) {
-                    st.callbacks.on_toggle_theme();
-                    return true;
-                }
-            }
-            if (key == brls::BRLS_KBD_KEY_G) {
-                if (shift) {
-                    st.pending_g = false;
-                    return scrollToEdge(true);
-                }
-                auto now = std::chrono::steady_clock::now();
-                if (st.pending_g &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - st.pending_g_time).count() < 550) {
-                    st.pending_g = false;
-                    return scrollToEdge(false);
-                }
-                st.pending_g = true;
-                st.pending_g_time = now;
-                return true;
-            }
+            st.pending_g = true;
+            st.pending_g_time = now;
+            return true;
         }
+        st.pending_g = false;
 
         // hjkl directional focus movement
         if (!ctrl && !shift) {
             if (key == brls::BRLS_KBD_KEY_H) {
-                brls::Application::onControllerButtonPressed(brls::BUTTON_LEFT, repeating);
+                brls::Application::onControllerButtonPressed(brls::BUTTON_NAV_LEFT, repeating);
                 return true;
             }
             if (key == brls::BRLS_KBD_KEY_J) {
-                brls::Application::onControllerButtonPressed(brls::BUTTON_DOWN, repeating);
+                brls::Application::onControllerButtonPressed(brls::BUTTON_NAV_DOWN, repeating);
                 return true;
             }
             if (key == brls::BRLS_KBD_KEY_K) {
-                brls::Application::onControllerButtonPressed(brls::BUTTON_UP, repeating);
+                brls::Application::onControllerButtonPressed(brls::BUTTON_NAV_UP, repeating);
                 return true;
             }
             if (key == brls::BRLS_KBD_KEY_L) {
-                brls::Application::onControllerButtonPressed(brls::BUTTON_RIGHT, repeating);
+                brls::Application::onControllerButtonPressed(brls::BUTTON_NAV_RIGHT, repeating);
                 return true;
             }
         }
 
         return false;
     };
+
+    if (!state().watched_keys_registered) {
+        state().watched_keys_registered = true;
+        const brls::BrlsKeyCombination combos[] = {
+            {brls::BRLS_KBD_KEY_F8, 0},
+            {brls::BRLS_KBD_KEY_F9, 0},
+            {brls::BRLS_KBD_KEY_ESCAPE, 0},
+            {brls::BRLS_KBD_KEY_BACKSPACE, 0},
+            {brls::BRLS_KBD_KEY_TAB, 0},
+            {brls::BRLS_KBD_KEY_TAB, brls::BRLS_KBD_MODIFIER_SHIFT},
+            {brls::BRLS_KBD_KEY_TAB, brls::BRLS_KBD_MODIFIER_CTRL},
+            {brls::BRLS_KBD_KEY_TAB,
+             static_cast<short>(brls::BRLS_KBD_MODIFIER_CTRL | brls::BRLS_KBD_MODIFIER_SHIFT)},
+            {brls::BRLS_KBD_KEY_D, brls::BRLS_KBD_MODIFIER_CTRL},
+            {brls::BRLS_KBD_KEY_U, brls::BRLS_KBD_MODIFIER_CTRL},
+            {brls::BRLS_KBD_KEY_SLASH, 0},
+            {brls::BRLS_KBD_KEY_SLASH, brls::BRLS_KBD_MODIFIER_SHIFT},
+            {brls::BRLS_KBD_KEY_G, brls::BRLS_KBD_MODIFIER_SHIFT},
+        };
+        for (const auto& c : combos) {
+            brls::Application::addToWatchedKeys(c);
+        }
+        for (int k = brls::BRLS_KBD_KEY_A; k <= brls::BRLS_KBD_KEY_Z; ++k) {
+            brls::Application::addToWatchedKeys(
+                {static_cast<brls::BrlsKeyboardScancode>(k), 0});
+        }
+        for (int k = brls::BRLS_KBD_KEY_0; k <= brls::BRLS_KBD_KEY_9; ++k) {
+            brls::Application::addToWatchedKeys(
+                {static_cast<brls::BrlsKeyboardScancode>(k), 0});
+            if (k >= brls::BRLS_KBD_KEY_1) {
+                brls::Application::addToWatchedKeys(
+                    {static_cast<brls::BrlsKeyboardScancode>(k), brls::BRLS_KBD_MODIFIER_CTRL});
+            }
+        }
+    }
 }
 
 void DesktopInputController::renderHintOverlay(NVGcontext* vg) {
     const auto& st = state();
     if (!st.hint_mode || st.hints.empty()) {
+        return;
+    }
+    if (st.hint_root != currentRootView() || isEditingText()) {
+        cancelHints();
         return;
     }
 

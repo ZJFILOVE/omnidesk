@@ -5,12 +5,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <queue>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -64,6 +61,7 @@ class JobCenter;
 /// Execution context handed to each background JobCenter task.
 class OMNIDESK_API JobHandle {
 public:
+    struct State;
     const std::string& jobId() const noexcept { return job_id_; }
     bool isCancelled() const noexcept { return cancel_->isCancelled(); }
     const std::shared_ptr<CancelToken>& cancelToken() const noexcept { return cancel_; }
@@ -73,9 +71,9 @@ public:
 
 private:
     friend class JobCenter;
-    JobHandle(JobCenter& center, std::string job_id, std::shared_ptr<CancelToken> cancel);
+    JobHandle(std::shared_ptr<State> state, std::string job_id, std::shared_ptr<CancelToken> cancel);
 
-    JobCenter& center_;
+    std::shared_ptr<State> state_;
     std::string job_id_;
     std::shared_ptr<CancelToken> cancel_;
 };
@@ -94,12 +92,15 @@ public:
     JobCenter(const JobCenter&) = delete;
     JobCenter& operator=(const JobCenter&) = delete;
 
+    static int defaultShutdownGraceMs() noexcept;
+
     void setBus(EntityBus* bus);
-    void shutdown();
+    void shutdown(int timeout_ms = -1);
 
     std::string submit(const JobSpec& spec, TaskFn task);
     bool cancel(const std::string& job_id);
-    void cancelByPlugin(const std::string& plugin_id);
+    bool cancelByPlugin(const std::string& plugin_id, bool wait = true, int timeout_ms = -1);
+    bool hasActiveJobs(const std::string& plugin_id = "") const;
     void dismissFinished(const std::string& job_id);
 
     std::optional<JobInfo> getJob(const std::string& job_id) const;
@@ -114,33 +115,15 @@ public:
 private:
     friend class JobHandle;
 
-    struct QueuedTask {
-        std::string job_id;
-        TaskFn fn;
+    struct WorkerEntry {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> exited;
     };
 
-    void workerLoop();
-    void updateProgress(const std::string& job_id, float progress, const std::string& stage_message);
-    void updateOpenTarget(const std::string& job_id, const JobTarget& target);
-    void publishJobEvent(const std::string& topic, const JobInfo& info);
-    void notifyListeners();
-
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::condition_variable done_cv_;
-    std::unordered_map<std::string, JobInfo> jobs_;
-    std::unordered_map<std::string, std::shared_ptr<CancelToken>> tokens_;
-    std::unordered_map<std::string, size_t> active_running_by_plugin_;
-    std::vector<std::string> insertion_order_;
-    std::queue<QueuedTask> queue_;
-    std::vector<std::thread> workers_;
-    bool stopping_ = false;
-    uint64_t next_id_ = 1;
-
-    EntityBus* bus_ = nullptr;
-    mutable std::mutex listeners_mutex_;
-    std::unordered_map<uint64_t, Listener> listeners_;
-    uint64_t next_listener_token_ = 1;
+    using State = JobHandle::State;
+    static void workerLoop(std::shared_ptr<State> state, std::shared_ptr<std::atomic<bool>> exited);
+    std::shared_ptr<State> state_;
+    std::vector<WorkerEntry> workers_;
 };
 
 OMNIDESK_API const char* jobStateLabel(JobState state);

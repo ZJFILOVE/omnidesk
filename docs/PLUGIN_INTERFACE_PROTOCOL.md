@@ -108,6 +108,8 @@ add_test(NAME abi_smoke COMMAND test_abi $<TARGET_FILE:plugin_example> "plugin-e
 | `provides` | `string[]` | 否 | 本插件向 `CapabilityRegistry` 注册的能力 ID 列表 |
 | `consumes` | `string[]` | 否 | 本插件可选消费的能力 ID 列表 |
 | `permissions` | `string[]` | 否 | 声明式权限标签（见下表） |
+| `isolation` | `string` | 否 | 故障隔离级别：`"in_process"`（默认，宿主内 `dlopen` + 异常屏障）或 `"subprocess"`（在独立 `omnidesk-plugin-worker` 进程加载 `.so`） |
+| `worker_transport` | `string` | 否 | 当 `isolation == "subprocess"` 时生效：`"pipe"`（默认 NDJSON 管道）或 `"unix_socket"`（`AF_UNIX` 局部套接字） |
 | `config_schema` | `ConfigField[]` | 否 | 声明式配置项数组；当插件未重写自定义设置页时，插件市场据此自动生成原生 Borealis 设置表单 |
 
 #### 推荐权限标签枚举（`permissions`）
@@ -138,20 +140,25 @@ omnidesk-pm install ZJFILOVE/omnidesk-plugin-fnos-nas # 直接按 GitHub owner/r
 omnidesk-pm install ~/Projects/omnidesk-plugin-dev    # 本地开发目录安装验证
 omnidesk-pm config plugin-fnos-nas set mount_root /mnt/feiniu-smb
 omnidesk-pm config plugin-fnos-nas set-secret api_token "<secret>"
+omnidesk-pm abi-status --strict                       # 检查全部已安装 .so 的 SDK ABI 布局签名是否过期
+omnidesk-pm rebuild --stale                           # 按当前宿主 SDK 一键批量重编 ABI 过期插件
 omnidesk-pm update --all                              # 检查远端 commit 并在 /tmp 冒烟通过后原子升级
 omnidesk-pm rollback plugin-magpie-agent              # 1 秒回滚至上一备份版本
 ```
 
 ---
 
-## 三、C ABI v1 二进制握手与 `libomnidesk_sdk.so` 生命周期契约
+## 三、C ABI v1 二进制握手、`sdk_abi_signature` 与故障隔离契约
 
-### 3.1 C ABI 握手层（[`sdk/include/omnidesk/plugin_abi.h`](../sdk/include/omnidesk/plugin_abi.h)）
+### 3.1 C ABI 握手层、布局指纹与子进程 RPC（[`sdk/include/omnidesk/plugin_abi.h`](../sdk/include/omnidesk/plugin_abi.h)）
 
-宿主通过 `dlopen(..., RTLD_NOW | RTLD_LOCAL)` 加载插件 `.so` 后，在实例化任何 C++ 对象之前，**只首先调用纯 C 符号 `omnidesk_plugin_abi_info()`** 校验二进制兼容性：
+宿主与 `omnidesk-pm` / `omnidesk-plugin-worker` 通过 `dlopen(..., RTLD_NOW | RTLD_LOCAL)` 加载插件 `.so` 后，在调用任何 `omnidesk_plugin_create()` 实例化 C++ 对象**之前**，只首先调用纯 C 符号 `omnidesk_plugin_abi_info()` 并校验：
 - `info->abi_version == OMNIDESK_PLUGIN_ABI_VERSION`（`1u`）
-- `info->struct_size == sizeof(OmniDeskPluginInfo)`
+- `info->struct_size >= sizeof(OmniDeskPluginInfo)`（安全拒绝更小的旧结构体 `.so`，杜绝越界读与段错误）
+- `info->sdk_abi_signature` 非空且与宿主 `omnidesk::sdkAbiSignature()` 完全一致。CMake 对 SDK/Borealis 公共头文件生成 SHA-256 摘要，头文件变化自动触发重新配置；编译期指纹进一步包含类型大小、对齐、接口修订、编译器/标准库 ABI 和 nlohmann JSON 版本及选项。同大小字段改动、虚函数调整也会改变签名，无需依赖手动更新 `ABI_VERSION`。此策略偏保守，头文件注释改动也可能触发重编。
 - `info->id` 与 `plugin.json` 中的 `id` 完全一致
+
+宏生成的握手数据和签名均为编译期常量，调用入口时不构造 SDK 对象、不分配字符串内存。安装、`abi-status` 和批量重编的二进制检查一律由独立、限时的 `omnidesk-pm abi-check` 进程执行；检查器缺失时直接失败，不退回宿主内 `dlopen`。UI 刷新只比较安装记录中的签名，实际加载与 CLI 完整检查仍校验二进制。批量重编保留插件原有启用/停用状态。
 
 每个插件只需在 `plugin_main.cpp` 末尾调用宏导出三个标准 C 入口（`omnidesk_plugin_abi_info`、`omnidesk_plugin_create`、`omnidesk_plugin_destroy`）：
 
@@ -165,6 +172,17 @@ OMNIDESK_DECLARE_PLUGIN(
     "core"                      // core | media | text | book
 )
 ```
+
+对于 `"isolation": "subprocess"` 的实验性或第三方插件：
+- 宿主不在主进程内 `dlopen` 该 `.so`，而是由 `PluginManager` 将其托管在 `WorkerSupervisor` 拉起的 `omnidesk-plugin-worker` 子进程（支持 `pipe` 与 `unix_socket` 传输）。
+- 能力调用、流式响应（`cap.invoke`）与三大领域数据源（`WorkerMediaSource` / `WorkerTextSource` / `WorkerBookSource`）全部通过 `types_json.hpp` 纯 JSON 协议跨进程边界传输。
+- 若插件子进程触发 `SIGSEGV` / `SIGABRT` 或异常退出，故障限制在 Worker 进程内，工作器会自动拉起（连续崩溃则触发熔断隔离），并通过 `"worker.fault"` 在主舞台底部显示一行黄字提示。
+- 排队、写入管道/Socket、等待响应都支持超时或取消；超时和响应协议错误计入故障与熔断。单帧及累计流式文本上限为 8 MiB，stderr 最多保留 100 段、每段 4096 字节；停止 Worker 会清理同进程组子进程。启动连接最多等待 5 秒，停止还受 `stop_grace_ms` 约束。
+- 自动重启不自动重放失败的插件能力调用，避免下载、写笔记等副作用重复执行。只有明确幂等的自定义 Worker 才启用 `retry_on_crash`；已向调用者交付部分流式结果后不重试。卸载/注销后，正在执行的请求不能重新拉起 Worker。
+
+需要 NanoVG/Borealis 自定义视图时，保留受信任的进程内 UI 薄层，用 `registerWorker`、`registerWorkerCapability`、`registerWorkerMediaSource` / `registerWorkerTextSource` / `registerWorkerBookSource` 将抓取和解析交给独立 Worker。整插件 `subprocess` 模式支持能力与领域数据源，会拒绝 UI 注册；它的 CapabilityRegistry 和 EntityBus 仅限 Worker 内部，目前不转发跨插件宿主能力调用或宿主事件订阅。
+
+宿主文章列表、正文、书库、书页及媒体歌词/章节的数据请求在后台执行，只有结果应用和视图构建回到 UI 线程。新请求替换旧请求、视图销毁后，旧结果不会覆盖界面。进程内异常屏障只能捕获 C++ 异常，不能隔离段错误、死锁或 `dlopen` 静态初始化崩溃；进程隔离也不等于权限沙箱或无限期稳定的 C++ ABI。
 
 ### 3.2 `IPlugin` 与 `PluginContext` 生命周期规范（[`sdk/include/omnidesk/plugin.hpp`](../sdk/include/omnidesk/plugin.hpp)）
 
@@ -226,15 +244,17 @@ public:
 | `llm.chat.v1` | `plugin-magpie-agent` | 全域工作区插件 | 通用 OpenAI 兼容多轮/单轮文本推理与 JSON Schema 结构化输出 |
 | `llm.translate.v1` | `plugin-magpie-agent` | 字幕/网页/期刊/PDF/EPUB 插件 | 支持上下文窗口与术语锁定（Glossary）的单段/批量双语翻译 |
 | `speech.asr.v1` | `plugin-asr-funasr` | `plugin-bilibili` / `youtube` / `MediaWorkbench` | 本地 Vulkan/CPU FunASR SenseVoiceSmall Q8 离线语音识别、音轨探测与断点分块转写 |
+| `player.timeline.v1` | `plugin-sponsorblock` | `MediaWorkbench` / `plugin-bilibili` / `plugin-youtube` | 基于 B 站 (`bsbsb.top`) 与 YouTube (`sponsor.ajay.app`) K-匿名哈希前缀查询空降/章节片段并合并进播放器时间轴 |
 | `nas.connection.v1` | `plugin-fnos-nas` | 音乐、PDF、EPUB、搜书插件 | 探测飞牛连接状态、列出受管媒体库/书库挂载根与受保护原子写回 |
 | `media.source.v1` | `plugin-bilibili` / `youtube` / `fnos-nas` / `music-lyrics` | `MediaWorkbench` | 通过 `IMediaSource` 向影视音乐工作台注入视频流、番剧、NAS 原盘与无损曲库 |
 | `media.local_match.v1` | `plugin-fnos-nas` | `plugin-bilibili` / `plugin-arr-imdb` | 根据片名 / IMDb / TMDB / 剧集季集号查询飞牛 NAS 是否已有本地高码率片源 |
 | `media.clip_jump.v1` | `plugin-fnos-nas` | `BookWorkbench` / `plugin-epub-companion` | 在本地美剧/电影双语字幕库检索英文单词或词组，返回匹配对白与一键跳播原片时间戳 |
-| `web.embed.v1` / `web.extract.v1` | `plugin-chrome-web` | `plugin-journals` / `zhihu` / `linuxdo` | 拉起托管无边框 Chrome `--app` 阅读窗（自动挂载双语扩展）或提取干净正文 DOM |
-| `text.source.v1` | `plugin-zhihu` / `linuxdo` / `reddit` / `journals` | `TextWorkbench` | 通过 `ITextSource` 提供文章流、公式代码块段落与嵌套评论树 |
+| `web.embed.v1` / `web.extract.v1` / `web.cookies.v1` | `plugin-chrome-web` | `plugin-journals` / `plugin-feed-recipe` / `zhihu` | 拉起托管无边框 Chrome `--app` 阅读窗、提取挑战后正文 DOM，或为配方引擎安全提供指定域名真实登录态 Cookie |
+| `feed.recipe.v1` | `plugin-feed-recipe` | `TextWorkbench`、配方工坊与设置面板 | 管理与热重载 20 行 JSON/Lua 声明式站点配方，联合 Chrome Cookie 过验证、双语对照翻译与折叠评论树 |
+| `text.source.v1` | `plugin-feed-recipe` / `zhihu` / `linuxdo` / `reddit` / `journals` | `TextWorkbench` | 通过 `ITextSource` 提供文章流、公式代码块段落与嵌套评论树 |
 | `book.source.v1` | `plugin-pdf-babeldoc` / `plugin-epub-companion` | `BookWorkbench` | 通过 `IBookSource` 提供书架、双语分页 `BookSpread` 与 `VocabCard` |
-| `book.bilingual_pdf.v1` | `plugin-pdf-babeldoc` | `plugin-journals` / `plugin-book-finder` | 提交本地 PDF 生成 BabelDOC 双栏对照文档并回流书架 |
-| `book.sync.v1` | `plugin-fnos-nas` | `plugin-epub-companion` / `book-finder` | 跨设备同步阅读进度、句段精读笔记与电子书资产至飞牛 NAS |
+| `book.bilingual_pdf.v1` | `plugin-pdf-babeldoc` | `plugin-journals` / `plugin-zlib` / `plugin-annas-archive` | 提交本地 PDF 生成 BabelDOC 双栏对照文档并回流书架 |
+| `book.sync.v1` | `plugin-fnos-nas` | `plugin-epub-companion` / `plugin-zlib` / `plugin-annas-archive` | 跨设备同步阅读进度、句段精读笔记与电子书资产至飞牛 NAS |
 | `vocab.sm2.v1` | `plugin-epub-companion` | `TextWorkbench` / `MediaWorkbench` | 划词入库、词根词源缓存查询与 SM-2 间隔重复打分更新 |
 
 ### 4.3 `EntityBus` 标准事件主题与载荷规范
@@ -249,6 +269,9 @@ public:
 | `"entity.vocab.add"` | 在期刊、社区帖或字幕中选中生词送入伴读生词本 | `{"word": "ephemeral", "context_sentence": "...", "source_title": "..."}` |
 | `"entity.ai.route_changed"` | 用户在 `plugin-magpie-agent` 切换了底层 Harness / 模型 / 路由策略 | `{"summary": "group/omnidesk-active -> antigravity/gemini-4-carbon:high", "group_id": "omnidesk-active", "primary_member": "antigravity/gemini-4-carbon:high"}` |
 | `"plugin.state_changed"` | 插件市场完成安装、更新、启用、禁用或回滚 | `{"plugin_id": "plugin-fnos-nas", "state": "loaded" \| "unloaded" \| "updated"}` |
+| `"plugin.fault"` | 进程内能力调用、域源接口或总线订阅抛出异常被宿主隔离拦截后 | `{"plugin_id": "plugin-demo", "component": "capability:...", "error": "..."}` |
+| `"worker.fault"` | `subprocess` 隔离工作进程崩溃（`SIGSEGV` 等）、重启或连续崩溃触发熔断隔离 | `{"worker_id": "plugin:...", "plugin_id": "...", "signal_name": "SIGSEGV", "crash_count": 1, "restart_succeeded": true, "quarantined": false, "error": "..."}` |
+| `"plugin.abi_drift"` | 宿主启动或状态校验检测到已安装 `.so` 与当前 SDK ABI 布局签名不一致 | `{"count": 1, "stale_plugins": ["plugin-bilibili"], "entries": [...]}` |
 
 ---
 
@@ -546,12 +569,25 @@ public:
 
 ### 6.4 `speech.asr.v1` 标准能力 RPC 契约
 
-- 通过 `ctx.registerStreamingCapability("speech.asr.v1", ...)` 注册：同时兼容同步 `call()`、异步 `callAsync()`、协作取消 `CancelToken`（触发即终止底层 `ffmpeg`/`funasr` 进程组并置位 `cancelled = true`）及 `callStream()` 逐片进度流（`StreamChunk.event = "chunk"`）。
+- 通过 `ctx.registerStreamingCapability("speech.asr.v1", ...)` 注册（卸载时 `onUnload()` 自动调用 `unregisterCapability` 注销并安全排空 `AsyncExecutor`）：同时兼容同步 `call()`、协作取消 `callCancellable()` / `callAsync()` 及流式 `callStream()` / `callStreamAsync()`。
+- **协作取消语义**：通过 `CancelToken`、内部 `action = "cancel"` 或 `onUnload()` 停机触发取消时，均立即终止底层 `ffprobe` / `ffmpeg` / `funasr` 独立进程组并统一返回 `CapabilityResult.cancelled == true` 与 `data.error_code = "timeout"`（真实超时则保持 `cancelled == false`）。
+- **流式 `StreamChunk` 契约**（调用方推荐经宿主 `JobCenter` 绑定 `job.cancelToken()` 与 `job.reportProgress()`）：
+  - `transcribe_audio` 发送 `event = "stage"`（`done = false`、`delta = ""`、`data: { job_id, stage: "normalizing" | "transcribing", progress, message }`）。
+  - `transcribe_media` 在存在历史断点或 100% 缓存命中时先发送 `event = "resumed"`（`data: { job_id, media_path, resumed_chunks, completed_chunks, total_chunks, progress, cues[] }`；全新任务不发送），随后每完成一片发送 `event = "chunk"`（`data: { job_id, media_path, chunk_index, completed_chunks, total_chunks, progress, cues[] }`）。
+  - 调用结束由 SDK 统一追加终态块 `done = true`（`event = "done"` / `"cancelled"` / `"error"`，完成时 `data` 含完整结果载荷）。
 - **`action = "status" | "probe"`**：检查 `runtime_bin` / `model_path` / `vad_path` / `ffmpeg` / `ffprobe` 就绪状态与运行配置（`probe` 额外执行 `--help` 冒烟检测）。
-- **`action = "list_streams"`**：传入 `media_path`，返回容器时长 `duration_sec` 与全部音轨列表 `audio_streams[]`（含 `audio_index`、`codec`、`channels`、`sample_rate`、`language`）。
+- **`action = "list_streams"`**：传入 `media_path`，返回容器时长 `duration_sec` 与全部音轨列表 `audio_streams[]`（含 `audio_index`、`codec`、`channels`、`sample_rate`、`language`）；支持 `CancelToken` 协作取消并中断 `ffprobe`。
 - **`action = "transcribe_audio"`**：传入 `audio_path` 或 `pcm_s16le_base64`（可选 `sample_rate`、`channels`、`normalize`、`backend`、`keep_tags`、`offset_ms`、`output_srt_path`），返回 `cues[]`、`srt`、`text`、`backend_used`、`fallback_used`。
 - **`action = "transcribe_media"`**：传入 `media_path`（可选 `audio_stream`、`chunk_seconds`、`vad_maxseg_ms`、`reset_cache`、`output_srt_path`、`job_id`），分块识别并原子输出规范 `.srt`，同时发布 `"asr.job.progress"` 与 `"asr.job.completed"` 事件。
-- **`action = "cancel" | "clear_cache"`**：取消运行中的 `job_id`（`SIGTERM -> SIGKILL` 清理子进程组）或清理断点缓存文件。
+- **`action = "cancel" | "clear_cache"`**：取消运行中的 `job_id`（`SIGTERM -> SIGKILL` 清理子进程组并置位 `cancelled = true`）或清理断点缓存文件。
+
+### 6.5 `player.timeline.v1` 标准能力 RPC 契约（`plugin-sponsorblock`）
+
+对应市场条目：`plugin-sponsorblock`（独立仓库 `https://github.com/ZJFILOVE/omnidesk-plugin-sponsorblock.git`，`kind = "extension"`，`domain = "media"`）。
+
+- **`action = "fetch_segments" | "query" | "merge_chapters"`**：传入 `video_id`（支持 BV/av 号、YouTube 11 位 ID 或完整视频 URL，可选 `platform`、`cid`、`duration_sec`、`categories[]`、`existing_chapters[]`、`force_refresh`），使用 SHA-256 前 4 位 K-匿名向 `bsbsb.top` 或 `sponsor.ajay.app` 拉取空降片段并按投票/锁定状态过滤，返回 `segments[]` 与合并排序后的 `chapters[]`（标准 `ChapterSegment` 数组，`kind = "sponsor" | "ad" | "content"`）。
+- **`action = "check_position"`**：传入 `position_sec` 与 `segments[]`（或 `video_id`），判断当前时间是否处于可跳过区间并返回 `active`、`skip_to_sec`、`auto_skip`。
+- **`action = "status" | "clear_cache"`**：查看当前启用平台、订阅分类、缓存条目数或清空内存 TTL 缓存。
 
 ---
 
@@ -626,13 +662,14 @@ public:
 后续开发任意独立插件仓库（无论是 AI 底座、飞牛存储、还是新的视频/社区/电子书站点）时，按以下 6 步即可零摩擦上架 OmniDesk 插件市场：
 
 1. **初始化独立仓库**：运行 `omnidesk-pm init <repo-dir> --id plugin-<slug> ...` 生成符合规范的 `plugin.json` 与 `CMakeLists.txt`。
-2. **核对二进制与清单字段**：确保 `OMNIDESK_DECLARE_PLUGIN` 中的 `PluginId`、`PluginKind`、`PluginDomain` 与 `plugin.json` 完全一致，`abi_version` 为 `1`。
+2. **核对二进制与清单字段**：确保 `OMNIDESK_DECLARE_PLUGIN` 中的 `PluginId`、`PluginKind`、`PluginDomain` 与 `plugin.json` 完全一致，`abi_version` 为 `1`；重新基于最新 SDK 编译以生成匹配的 `sdk_abi_signature`；若插件包含实验性或重型第三方依赖（如爬虫/本地推理库），建议声明 `"isolation": "subprocess"`。
 3. **隔离敏感配置**：凡涉及 API Key、Cookie、NAS 密码的字段，在 `plugin.json` 的 `config_schema` 中一律声明 `"type": "secret"` 并通过 `ctx.getSecret(key)` 读取；局域网请求显式禁用代理。
 4. **验证软依赖降级**：所有跨插件调用均包裹在 `if (ctx.capabilities().has("..."))` 内，底座未装时不崩溃。
 5. **本地全链路自检**：
    ```bash
    omnidesk-pm install ./omnidesk-plugin-<slug>
+   omnidesk-pm abi-status --strict
    omnidesk-pm verify plugin-<slug>
    ```
-   确认 `ctest`、`abi-check` 与 `dlopen -> onLoad -> onHealthCheck -> onUnload` 生命周期全部返回 `0`。
+   确认 `ctest`、`abi-check`（含 `sdk_abi_signature` 与 `struct_size` 校验）及 `dlopen -> onLoad -> onHealthCheck -> onUnload` 生命周期全部返回 `0`。
 6. **登记上架**：推送到独立 GitHub 仓库后，在 `catalog.json` 追加一条仓库元数据即可在图形化「插件市场」中一键检索、安装、更新与回滚。

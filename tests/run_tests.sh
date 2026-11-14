@@ -56,14 +56,29 @@ echo "[5/6] Testing headless host kernel boot with installed .so plugins loaded.
 "${HOST_BIN}" --headless-check | grep -q "capabilities: 1"
 
 echo "[6/6] Running live GUI smoke test if graphical display is active..."
-if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
+probe_sdl_video() {
+    python3 -c '
+import ctypes
+sdl = ctypes.CDLL("libSDL2-2.0.so.0")
+rc = sdl.SDL_Init(0x0020)
+sdl.SDL_Quit()
+raise SystemExit(0 if rc == 0 else 1)
+' 2>/dev/null
+}
+if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]] && probe_sdl_video; then
     "${HOST_BIN}" --smoke-ms 1200 --domain store
     "${HOST_BIN}" --smoke-ms 900 --domain media
     "${HOST_BIN}" --smoke-ms 900 --domain text
     "${HOST_BIN}" --smoke-ms 900 --domain book
     echo "Live GUI smoke windows rendered & exited cleanly across all 4 workbenches!"
+elif SDL_VIDEODRIVER=offscreen probe_sdl_video; then
+    SDL_VIDEODRIVER=offscreen "${HOST_BIN}" --smoke-ms 900 --domain store
+    SDL_VIDEODRIVER=offscreen "${HOST_BIN}" --smoke-ms 700 --domain media
+    SDL_VIDEODRIVER=offscreen "${HOST_BIN}" --smoke-ms 700 --domain text
+    SDL_VIDEODRIVER=offscreen "${HOST_BIN}" --smoke-ms 700 --domain book
+    echo "Offscreen OpenGL GUI smoke windows rendered & exited cleanly across all 4 workbenches (no-UDEV/sandbox fallback verified)!"
 else
-    echo "No WAYLAND_DISPLAY/DISPLAY set; skipping GUI window test."
+    echo "No SDL2 video driver available; skipping GUI window test."
 fi
 
 echo "ALL OMNIDESK E2E CHECKS PASSED!"

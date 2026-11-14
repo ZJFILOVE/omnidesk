@@ -28,20 +28,52 @@ void EntityBus::unsubscribeOwner(const std::string& owner_id) {
     }), subs_.end());
 }
 
+void EntityBus::setFaultHandler(FaultHandler handler) {
+    std::lock_guard lock(fault_mutex_);
+    fault_handler_ = std::move(handler);
+}
+
 size_t EntityBus::publish(const std::string& topic, const nlohmann::json& payload) const {
-    std::vector<EntityEventHandler> targets;
+    struct Target {
+        std::string owner_id;
+        EntityEventHandler fn;
+    };
+    std::vector<Target> targets;
     {
         std::lock_guard lock(mutex_);
         for (const auto& sub : subs_) {
             if (sub.topic == topic || sub.topic == "*") {
-                targets.push_back(sub.handler);
+                targets.push_back({sub.owner_id, sub.handler});
             }
         }
     }
-    for (const auto& fn : targets) {
-        fn(topic, payload);
+    FaultHandler fault_cb;
+    if (topic != "plugin.fault" && topic != "worker.fault") {
+        std::lock_guard lock(fault_mutex_);
+        fault_cb = fault_handler_;
     }
-    return targets.size();
+    size_t delivered = 0;
+    for (const auto& target : targets) {
+        try {
+            target.fn(topic, payload);
+            ++delivered;
+        } catch (const std::exception& e) {
+            if (fault_cb) {
+                try {
+                    fault_cb(target.owner_id, topic, e.what());
+                } catch (...) {
+                }
+            }
+        } catch (...) {
+            if (fault_cb) {
+                try {
+                    fault_cb(target.owner_id, topic, "unknown subscriber exception");
+                } catch (...) {
+                }
+            }
+        }
+    }
+    return delivered;
 }
 
 std::vector<std::string> EntityBus::activeTopics() const {
