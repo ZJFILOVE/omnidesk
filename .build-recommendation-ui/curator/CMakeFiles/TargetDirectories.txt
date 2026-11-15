@@ -1,0 +1,7 @@
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/ai_curator_core.dir
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/plugin-ai-curator.dir
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/test_abi.dir
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/test_ai_curator.dir
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/test.dir
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/edit_cache.dir
+/home/zhu/Projects/omnidesk/.build-recommendation-ui/curator/CMakeFiles/rebuild_cache.dir

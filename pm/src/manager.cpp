@@ -1,4 +1,5 @@
 #include "omnidesk/pm/manager.hpp"
+#include "omnidesk/dso_view_lease.hpp"
 
 #include <cstddef>
 #include <cstdio>
@@ -182,6 +183,7 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
         "--plugin-dir", rec.install_dir,
         "--data-dir", plugin_data_dir,
         "--config-dir", config_.configRoot(),
+        "--duplex",
     };
     spec.transport = (rec.manifest.worker_transport == "unix_socket")
                          ? WorkerTransport::UnixSocket
@@ -190,11 +192,15 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
     spec.stop_grace_ms = 1200;
     spec.auto_restart = true;
     spec.retry_on_crash = false;
+    spec.duplex = true;
 
     workers_->unregisterWorker(spec.worker_id);
     if (!workers_->registerWorker(spec)) {
         return fail_record("Failed registering worker runtime for " + plugin_id);
     }
+
+    auto host_bridge = attachWorkerHostBridge(
+        *workers_, spec.worker_id, plugin_id, capabilities_, bus_);
 
     CapabilityResult desc = workers_->request(spec.worker_id, {{"op", "describe"}}, nullptr, 15000);
     if (!desc.ok) {
@@ -210,6 +216,7 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
         if (!stderr_detail.empty()) {
             msg += " (" + stderr_detail + ")";
         }
+        if (host_bridge) host_bridge->detach();
         workers_->unregisterWorker(spec.worker_id);
         const bool is_abi = (msg.find("ABI") != std::string::npos ||
                              msg.find("signature") != std::string::npos);
@@ -218,6 +225,7 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
 
     const std::string worker_sig = desc.data.value("sdk_abi_signature", "");
     if (worker_sig != omnidesk::sdkAbiSignature()) {
+        if (host_bridge) host_bridge->detach();
         workers_->unregisterWorker(spec.worker_id);
         return fail_record("Worker SDK ABI signature mismatch (host rebuild mismatch)", true);
     }
@@ -282,6 +290,7 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
     LoadedHandle lh;
     lh.is_subprocess = true;
     lh.worker_id = spec.worker_id;
+    lh.host_bridge = std::move(host_bridge);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -416,6 +425,8 @@ bool PluginManager::loadPlugin(const std::string& plugin_id, std::string& error)
         plugin_id, rec->install_dir, plugin_data_dir, capabilities_, bus_, domains_, config_, secrets_,
         jobs_, workers_);
 
+    DsoViewLeaseRegistry::instance().beginPluginSession(plugin_id);
+
     bool loaded_ok = false;
     std::string load_exc;
     try {
@@ -427,6 +438,7 @@ bool PluginManager::loadPlugin(const std::string& plugin_id, std::string& error)
     }
 
     if (!loaded_ok) {
+        DsoViewLeaseRegistry::instance().revokePlugin(plugin_id, 0);
         capabilities_.unregisterPlugin(plugin_id);
         if (jobs_) jobs_->cancelByPlugin(plugin_id);
         if (workers_) workers_->stopByPlugin(plugin_id);
@@ -448,6 +460,7 @@ bool PluginManager::loadPlugin(const std::string& plugin_id, std::string& error)
     lh.instance = instance;
     lh.destroy_fn = destroy_fn;
     lh.context = std::move(ctx);
+    lh.check_state = std::make_shared<CheckState>();
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -477,6 +490,12 @@ bool PluginManager::unloadPlugin(const std::string& plugin_id) {
     }
 
     if (lh.is_subprocess) {
+        if (jobs_) jobs_->cancelByPlugin("host.reader", true);
+        capabilities_.unregisterPlugin(plugin_id);
+        domains_.unregisterPlugin(plugin_id);
+        bus_.unsubscribeOwner(plugin_id);
+        if (jobs_) jobs_->cancelByPlugin(plugin_id, true);
+
         if (workers_) {
             auto wst = workers_->status(lh.worker_id);
             if (wst && wst->running) {
@@ -485,11 +504,10 @@ bool PluginManager::unloadPlugin(const std::string& plugin_id) {
             workers_->stopByPlugin(plugin_id);
             workers_->unregisterWorker(lh.worker_id);
         }
-        if (jobs_) jobs_->cancelByPlugin("host.reader", true);
-        capabilities_.unregisterPlugin(plugin_id);
-        if (jobs_) jobs_->cancelByPlugin(plugin_id);
-        bus_.unsubscribeOwner(plugin_id);
-        domains_.unregisterPlugin(plugin_id);
+        if (lh.host_bridge) {
+            lh.host_bridge->detach();
+            lh.host_bridge.reset();
+        }
         bus_.publish("plugin.state_changed", {{"plugin_id", plugin_id}, {"loaded", false}});
         return true;
     }
@@ -500,10 +518,31 @@ bool PluginManager::unloadPlugin(const std::string& plugin_id) {
     if (workers_) workers_->stopByPlugin(plugin_id);
     bus_.unsubscribeOwner(plugin_id);
     domains_.unregisterPlugin(plugin_id);
+    DsoViewLeaseRegistry::instance().revokePlugin(plugin_id, 120);
+
+    bool self_reentrant_check = false;
+    if (lh.check_state) {
+        const auto self_tid = std::this_thread::get_id();
+        std::unique_lock<std::mutex> lock(mutex_);
+        check_cv_.wait(lock, [&]() {
+            if (lh.check_state->in_flight == 0) {
+                return true;
+            }
+            for (const auto& owner_tid : lh.check_state->owners) {
+                if (owner_tid == self_tid) {
+                    self_reentrant_check = true;
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
 
     const bool still_busy =
+        self_reentrant_check ||
         capabilities_.hasInFlight(plugin_id) ||
         domains_.hasInFlight(plugin_id) ||
+        DsoViewLeaseRegistry::instance().hasActiveLeases(plugin_id) ||
         (jobs_ && (jobs_->hasActiveJobs(plugin_id) || jobs_->hasActiveJobs("host.reader")));
 
     if (still_busy) {
@@ -566,48 +605,97 @@ bool PluginManager::disablePlugin(const std::string& plugin_id) {
     return installer_.setEnabled(plugin_id, false);
 }
 
-RuntimePluginStatus PluginManager::buildStatusLocked(const InstalledPluginRecord& rec) const {
+RuntimePluginStatus PluginManager::buildStatus(const InstalledPluginRecord& rec) const {
     RuntimePluginStatus st;
     st.record = rec;
-    auto lit = loaded_.find(rec.manifest.id);
-    if (lit != loaded_.end()) {
+
+    bool is_sub = false;
+    std::string worker_id;
+    IPlugin* inst = nullptr;
+    PluginContext* ctx = nullptr;
+    std::shared_ptr<CheckState> cs;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto lit = loaded_.find(rec.manifest.id);
+        if (lit == loaded_.end()) {
+            st.loaded = false;
+            auto eit = last_errors_.find(rec.manifest.id);
+            if (eit != last_errors_.end()) {
+                st.load_error = eit->second;
+                st.healthy = false;
+            }
+            return st;
+        }
         st.loaded = true;
-        if (lit->second.is_subprocess) {
-            if (workers_) {
-                if (auto wst = workers_->status(lit->second.worker_id)) {
-                    st.healthy = !wst->quarantined;
-                    st.recent_logs = wst->recent_stderr;
-                    if (wst->quarantined && !wst->last_error.empty()) {
-                        st.load_error = wst->last_error;
-                    }
-                } else {
-                    st.healthy = false;
+        is_sub = lit->second.is_subprocess;
+        if (is_sub) {
+            worker_id = lit->second.worker_id;
+        } else {
+            inst = lit->second.instance;
+            ctx = lit->second.context.get();
+            cs = lit->second.check_state;
+            if (cs) {
+                ++cs->in_flight;
+                cs->owners.push_back(std::this_thread::get_id());
+            }
+        }
+    }
+
+    if (is_sub) {
+        if (workers_) {
+            if (auto wst = workers_->status(worker_id)) {
+                st.healthy = !wst->quarantined;
+                st.recent_logs = wst->recent_stderr;
+                if (wst->quarantined && !wst->last_error.empty()) {
+                    st.load_error = wst->last_error;
                 }
             } else {
                 st.healthy = false;
             }
         } else {
-            try {
-                nlohmann::json hc = lit->second.instance->onHealthCheck();
-                st.healthy = hc.value("ok", true);
-            } catch (const std::exception& e) {
-                st.healthy = false;
-                st.load_error = std::string("onHealthCheck threw: ") + e.what();
-            } catch (...) {
-                st.healthy = false;
-                st.load_error = "onHealthCheck threw unknown C++ exception";
-            }
-            if (lit->second.context) {
-                st.recent_logs = lit->second.context->logs();
-            }
-        }
-    } else {
-        st.loaded = false;
-        auto eit = last_errors_.find(rec.manifest.id);
-        if (eit != last_errors_.end()) {
-            st.load_error = eit->second;
             st.healthy = false;
         }
+        return st;
+    }
+
+    struct ScopedCheckBorrow {
+        const PluginManager* self;
+        std::shared_ptr<CheckState> state;
+        ~ScopedCheckBorrow() {
+            if (!state) return;
+            const auto tid = std::this_thread::get_id();
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            for (auto it = state->owners.begin(); it != state->owners.end(); ++it) {
+                if (*it == tid) {
+                    state->owners.erase(it);
+                    break;
+                }
+            }
+            if (state->in_flight > 0) {
+                --state->in_flight;
+            }
+            if (state->in_flight == 0) {
+                self->check_cv_.notify_all();
+            }
+        }
+    } borrow{this, cs};
+
+    if (inst) {
+        try {
+            nlohmann::json hc = inst->onHealthCheck();
+            st.healthy = hc.value("ok", true);
+        } catch (const std::exception& e) {
+            st.healthy = false;
+            st.load_error = std::string("onHealthCheck threw: ") + e.what();
+        } catch (...) {
+            st.healthy = false;
+            st.load_error = "onHealthCheck threw unknown C++ exception";
+        }
+    } else {
+        st.healthy = false;
+    }
+    if (ctx) {
+        st.recent_logs = ctx->logs();
     }
     return st;
 }
@@ -617,9 +705,8 @@ std::vector<RuntimePluginStatus> PluginManager::statuses() const {
     std::vector<RuntimePluginStatus> out;
     out.reserve(installed.size());
 
-    std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& rec : installed) {
-        out.push_back(buildStatusLocked(rec));
+        out.push_back(buildStatus(rec));
     }
     return out;
 }
@@ -629,8 +716,7 @@ std::optional<RuntimePluginStatus> PluginManager::statusOf(const std::string& pl
     if (!rec.has_value()) {
         return std::nullopt;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    return buildStatusLocked(*rec);
+    return buildStatus(*rec);
 }
 
 bool PluginManager::isLoaded(const std::string& plugin_id) const {
@@ -641,6 +727,7 @@ bool PluginManager::isLoaded(const std::string& plugin_id) const {
 brls::View* PluginManager::createCustomSettingsView(const std::string& plugin_id) {
     IPlugin* inst = nullptr;
     PluginContext* ctx_ptr = nullptr;
+    std::shared_ptr<CheckState> cs;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = loaded_.find(plugin_id);
@@ -650,9 +737,39 @@ brls::View* PluginManager::createCustomSettingsView(const std::string& plugin_id
         }
         inst = it->second.instance;
         ctx_ptr = it->second.context.get();
+        cs = it->second.check_state;
+        if (cs) {
+            ++cs->in_flight;
+            cs->owners.push_back(std::this_thread::get_id());
+        }
     }
+    struct ScopedViewBorrow {
+        PluginManager* self;
+        std::shared_ptr<CheckState> state;
+        ~ScopedViewBorrow() {
+            if (!state) return;
+            const auto tid = std::this_thread::get_id();
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            for (auto it = state->owners.begin(); it != state->owners.end(); ++it) {
+                if (*it == tid) {
+                    state->owners.erase(it);
+                    break;
+                }
+            }
+            if (state->in_flight > 0) {
+                --state->in_flight;
+            }
+            if (state->in_flight == 0) {
+                self->check_cv_.notify_all();
+            }
+        }
+    } borrow{this, cs};
     try {
-        return inst->createSettingsView(*ctx_ptr);
+        if (DsoViewLeaseRegistry::instance().isRevoking(plugin_id)) {
+            return nullptr;
+        }
+        return DsoViewLeaseRegistry::instance().leaseView(
+            plugin_id, inst->createSettingsView(*ctx_ptr));
     } catch (const std::exception& e) {
         emitFault(plugin_id, "createSettingsView", e.what());
         return nullptr;

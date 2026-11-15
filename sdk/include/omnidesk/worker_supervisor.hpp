@@ -19,7 +19,7 @@
 #include <omnidesk/capabilities.hpp>
 #include <omnidesk/export.h>
 
-#define OMNIDESK_WORKER_INTERFACE_REVISION 2u
+#define OMNIDESK_WORKER_INTERFACE_REVISION 3u
 
 namespace omnidesk {
 
@@ -45,6 +45,7 @@ struct OMNIDESK_API WorkerSpec {
     bool retry_on_crash = false;              ///< Retry an idempotent request once if worker crashes mid-call.
     int max_restarts_in_window = 5;           ///< Quarantine worker if crashes exceed threshold inside window.
     int64_t restart_window_ms = 15000;        ///< Sliding window for crash-loop circuit breaker.
+    bool duplex = false;                      ///< Enable multiplexed full-duplex NDJSON RPC & host callbacks.
 };
 
 struct OMNIDESK_API WorkerStatus {
@@ -93,6 +94,19 @@ struct OMNIDESK_API WorkerFaultEvent {
 class OMNIDESK_API WorkerSupervisor {
 public:
     using FaultCallback = std::function<void(const WorkerFaultEvent& event)>;
+    using InboundRequestHandler = std::function<CapabilityResult(
+        const std::string& worker_id,
+        const std::string& plugin_id,
+        const nlohmann::json& request,
+        const std::shared_ptr<CancelToken>& cancel,
+        const StreamCallback& on_chunk)>;
+    using InboundEventHandler = std::function<void(
+        const std::string& worker_id,
+        const std::string& plugin_id,
+        const nlohmann::json& event)>;
+    using WorkerExitHandler = std::function<void(
+        const std::string& worker_id,
+        const std::string& plugin_id)>;
 
     WorkerSupervisor();
     ~WorkerSupervisor();
@@ -101,6 +115,11 @@ public:
     WorkerSupervisor& operator=(const WorkerSupervisor&) = delete;
 
     void setFaultCallback(FaultCallback cb);
+    void setWorkerCallbacks(const std::string& worker_id,
+                            InboundRequestHandler on_request,
+                            InboundEventHandler on_event = nullptr,
+                            WorkerExitHandler on_exit = nullptr);
+    bool sendEvent(const std::string& worker_id, const nlohmann::json& event);
 
     bool registerWorker(const WorkerSpec& spec);
     bool unregisterWorker(const std::string& worker_id);
@@ -130,10 +149,14 @@ public:
     std::vector<WorkerStatus> listWorkers() const;
 
 private:
+    struct PendingOutbound;
+    struct InboundExecutor;
+
     struct WorkerRuntime {
         WorkerSpec spec;
         std::mutex state_mutex;
         std::timed_mutex io_mutex;
+        std::timed_mutex write_mutex;
         int pid = -1;
         int stdin_fd = -1;
         int stdout_fd = -1;
@@ -141,6 +164,7 @@ private:
         bool shared_io_fd = false;
         std::string active_socket_path;
         std::thread stderr_thread;
+        std::thread reader_thread;
         std::string stdout_buf;
         std::deque<std::string> stderr_ring;
         std::deque<int64_t> recent_crash_times_ms;
@@ -148,6 +172,8 @@ private:
         uint64_t restart_count = 0;
         uint64_t crash_count = 0;
         uint64_t io_generation = 0;
+        uint64_t handled_crash_for_gen = 0;
+        std::atomic<uint64_t> next_req_seq{1};
         int64_t last_active_ms = 0;
         int64_t last_crash_ms = 0;
         int last_exit_code = 0;
@@ -157,11 +183,20 @@ private:
         bool last_exited_unexpectedly = false;
         bool quarantined = false;
         bool pending_auto_restart = false;
+        bool pending_exit_notify = false;
         int in_flight = 0;
         bool stopping_child = false;
         bool retired = false;
         uint64_t stop_generation = 0;
+        bool reader_active = false;
         std::condition_variable lifecycle_cv;
+        std::mutex outbound_mutex;
+        std::unordered_map<std::string, std::shared_ptr<PendingOutbound>> pending_outbound;
+        std::mutex inbound_mutex;
+        std::unordered_map<std::string, std::shared_ptr<CancelToken>> active_inbound;
+        InboundRequestHandler inbound_req_handler;
+        InboundEventHandler inbound_evt_handler;
+        WorkerExitHandler exit_handler;
     };
 
     std::shared_ptr<WorkerRuntime> findRuntime(const std::string& worker_id) const;
@@ -169,7 +204,7 @@ private:
     void closeIoFdsLocked(WorkerRuntime& rt);
     void recordFailureLocked(WorkerRuntime& rt, int pid, const std::string& error,
                              WorkerFaultEvent& event);
-    bool spawnLocked(WorkerRuntime& rt,
+    bool spawnLocked(const std::shared_ptr<WorkerRuntime>& rt_ptr,
                      std::unique_lock<std::mutex>& lk,
                      std::string* error,
                      WorkerFaultEvent* crash_out = nullptr);
@@ -191,12 +226,25 @@ private:
                                 int64_t deadline_ms,
                                 bool& timed_out,
                                 bool& cancelled);
+    bool writeLineDuplex(WorkerRuntime& rt,
+                         const std::string& line,
+                         const std::shared_ptr<CancelToken>& cancel,
+                         int64_t deadline_ms,
+                         bool& timed_out,
+                         bool& cancelled);
+    void readerLoopDuplex(std::shared_ptr<WorkerRuntime> rt, uint64_t gen);
+    CapabilityResult streamRequestDuplex(const std::shared_ptr<WorkerRuntime>& rt,
+                                         const nlohmann::json& payload,
+                                         const StreamCallback& on_chunk,
+                                         const std::shared_ptr<CancelToken>& cancel,
+                                         int64_t timeout_ms);
     void watchdogLoop();
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<WorkerRuntime>> workers_;
     mutable std::mutex fault_cb_mutex_;
     FaultCallback fault_cb_;
+    std::unique_ptr<InboundExecutor> inbound_executor_;
     std::condition_variable watchdog_cv_;
     std::thread watchdog_thread_;
     bool shutting_down_ = false;

@@ -48,8 +48,16 @@ public:
     void shutdown();
 
     static DecodedImage decodeBytes(const uint8_t* data, size_t size);
+    static std::string normalizeImageUrl(const std::string& raw, const std::string& base_url = "");
     static std::string cacheKeyFor(const std::string& url,
                                    const std::unordered_map<std::string, std::string>& headers = {});
+
+    void setDomainHeaders(const std::string& domain_suffix,
+                          std::unordered_map<std::string, std::string> headers);
+    void clearDomainHeaders(const std::string& domain_suffix);
+    std::unordered_map<std::string, std::string> headersForUrl(
+        const std::string& url,
+        const std::unordered_map<std::string, std::string>& extra = {}) const;
 
     std::optional<std::vector<uint8_t>> getCachedRawBytes(const std::string& key);
     bool putCachedRawBytes(const std::string& key, const uint8_t* data, size_t size);

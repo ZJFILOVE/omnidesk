@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "id": "plugin-ai-curator",
+  "name": "AI Curation & Archive Rehydrator",
+  "version": "0.1.0",
+  "abi_version": 1,
+  "kind": "hybrid",
+  "domain": "core",
+  "author": "ZJFILOVE",
+  "description": "Dual-repo Git mirror (ZJFILOVE/obsidian-vault & ZJFILOVE/music-daily), full historical archive rehydrator since 2026-09-04, and dual-mode write-back center providing recommend.feed.v1 with strict isolation between daily_immutable and interactive_ephemeral curation.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-ai-curator",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-ai-curator.git",
+    "branch": "main"
+  },
+  "build": {
+    "system": "cmake",
+    "entry_target": "plugin-ai-curator",
+    "output_lib": "libplugin_ai_curator.so",
+    "cmake_args": [],
+    "verify_cmd": "ctest --output-on-failure"
+  },
+  "provides": [
+    "recommend.feed.v1",
+    "ai.curation.v1"
+  ],
+  "consumes": [
+    "vocab.sm2.v1",
+    "media.playlist.v1",
+    "book.bilingual_pdf.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "filesystem.read",
+    "filesystem.write",
+    "network:wan"
+  ],
+  "config_schema": [
+    {
+      "key": "obsidian_vault_dir",
+      "label": "Obsidian Vault 本地仓库路径",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "留空时依次探测同级工作区 /home/zhu/Projects/obsidian-vault 与 <XDG_DATA_HOME>/omnidesk/curation/repos/obsidian-vault"
+    },
+    {
+      "key": "music_daily_dir",
+      "label": "Music Daily 本地仓库路径",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "留空时依次探测同级工作区 /home/zhu/Projects/music-daily 与 <XDG_DATA_HOME>/omnidesk/curation/repos/music-daily"
+    },
+    {
+      "key": "auto_rehydrate_on_load",
+      "label": "启动时自动回灌本地历史归档",
+      "type": "bool",
+      "default": true,
+      "required": false,
+      "description": "插件加载时快速加载缓存索引并增量扫描本地双仓历史推荐"
+    },
+    {
+      "key": "auto_pull_remote",
+      "label": "启动/同步时自动拉取远端更新",
+      "type": "bool",
+      "default": false,
+      "required": false,
+      "description": "默认 false 以保证快速非阻塞启动；开启或显式同步时对干净工作树执行 git fetch + merge --ff-only"
+    }
+  ]
+}

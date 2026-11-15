@@ -1,8 +1,10 @@
 #pragma once
 
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include "omnidesk/capabilities.hpp"
@@ -13,6 +15,7 @@
 #include "omnidesk/job_center.hpp"
 #include "omnidesk/plugin.hpp"
 #include "omnidesk/pm/installer.hpp"
+#include "omnidesk/worker_domain_bridge.hpp"
 #include "omnidesk/worker_supervisor.hpp"
 
 namespace omnidesk::pm {
@@ -63,20 +66,27 @@ public:
     std::string resolveWorkerExecutable() const;
 
 private:
+    struct CheckState {
+        size_t in_flight = 0;
+        std::vector<std::thread::id> owners;
+    };
+
     struct LoadedHandle {
         void* dl_handle = nullptr;
         IPlugin* instance = nullptr;
         void (*destroy_fn)(void*) = nullptr;
         std::unique_ptr<PluginContext> context;
+        std::shared_ptr<CheckState> check_state;
         bool is_subprocess = false;
         std::string worker_id;
+        std::shared_ptr<WorkerHostBridge> host_bridge;
     };
 
     bool loadSubprocessPlugin(const InstalledPluginRecord& rec, std::string& error);
     void emitFault(const std::string& plugin_id,
                    const std::string& component,
                    const std::string& error);
-    RuntimePluginStatus buildStatusLocked(const InstalledPluginRecord& rec) const;
+    RuntimePluginStatus buildStatus(const InstalledPluginRecord& rec) const;
 
     PluginInstaller& installer_;
     CapabilityRegistry& capabilities_;
@@ -88,6 +98,7 @@ private:
     WorkerSupervisor* workers_ = nullptr;
 
     mutable std::mutex mutex_;
+    mutable std::condition_variable check_cv_;
     std::unordered_map<std::string, LoadedHandle> loaded_;
     std::unordered_map<std::string, std::string> last_errors_;
     std::string worker_executable_;

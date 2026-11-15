@@ -1,10 +1,45 @@
 #include <SDL.h>
 #include <dlfcn.h>
 #include <cstdio>
+#include <cstdlib>
 
 namespace {
 
 using SdlInitFn = int (*)(Uint32);
+
+void applyDesktopWindowHints() {
+    static bool applied = false;
+    if (applied) {
+        return;
+    }
+    applied = true;
+
+    const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+    const char* sdl_driver = std::getenv("SDL_VIDEODRIVER");
+    if (wayland_display && wayland_display[0] != '\0' &&
+        (!sdl_driver || sdl_driver[0] == '\0')) {
+        SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "wayland,x11", SDL_HINT_DEFAULT);
+    }
+
+    // Hyprland supports xdg-decoration server-side borders natively; disabling libdecor
+    // prevents CSD titlebar/buffer-size desync when toggling fullscreen or tiling.
+#ifdef SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR
+    SDL_SetHintWithPriority(SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR, "0", SDL_HINT_DEFAULT);
+#else
+    SDL_SetHintWithPriority("SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR", "0", SDL_HINT_DEFAULT);
+#endif
+#ifdef SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY
+    SDL_SetHintWithPriority(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "0", SDL_HINT_DEFAULT);
+#endif
+    // Prevent fullscreen windows from auto-iconifying when Hyprland focus moves across tiles/monitors.
+#ifdef SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS
+    SDL_SetHintWithPriority(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0", SDL_HINT_DEFAULT);
+#else
+    SDL_SetHintWithPriority("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0", SDL_HINT_DEFAULT);
+#endif
+    SDL_SetHintWithPriority("SDL_VIDEO_WAYLAND_WMCLASS", "omnidesk", SDL_HINT_DEFAULT);
+    SDL_SetHintWithPriority("SDL_VIDEO_X11_WMCLASS", "omnidesk", SDL_HINT_DEFAULT);
+}
 
 SdlInitFn resolveRealSdlInit() {
     if (void* sym = dlsym(RTLD_NEXT, "SDL_Init")) {
@@ -28,6 +63,10 @@ extern "C" int __wrap_SDL_Init(Uint32 flags) {
     if (!real_init) {
         SDL_SetError("Unable to resolve real SDL_Init");
         return -1;
+    }
+
+    if ((flags & SDL_INIT_VIDEO) != 0) {
+        applyDesktopWindowHints();
     }
 
     int rc = real_init(flags);

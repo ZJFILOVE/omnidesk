@@ -97,6 +97,7 @@ int main() {
     const std::string data_dir = (tmp_root / "data").string();
     const std::string cfg_dir = (tmp_root / "config").string();
     omnidesk::pm::PluginInstaller installer(data_dir, OMNIDESK_TEST_SDK_CMAKE_DIR, OMNIDESK_TEST_PM_EXE);
+
     ::unsetenv("OMNIDESK_STAGING_DIR");
     TEST_CHECK(installer.stagingDir().rfind("/tmp/", 0) == 0);
     const std::string custom_staging = (tmp_root / "custom-staging").string();
@@ -309,6 +310,25 @@ int main() {
     }
     TEST_CHECK(mgr.loadPlugin("plugin-scaffold-smoke", load_err));
     TEST_CHECK(caps.has("smoke.ping.v1"));
+
+    // Verify DsoViewLease prevents unsafe dlclose() when a plugin view lease is still alive
+    {
+        bool saw_pinned_event = false;
+        uint64_t ev_tok = bus.subscribe("plugin.state_changed", "test", [&](const std::string&, const nlohmann::json& p) {
+            if (p.value("plugin_id", "") == "plugin-scaffold-smoke" &&
+                p.value("pinned_in_flight", false)) {
+                saw_pinned_event = true;
+            }
+        });
+        auto view_lease = omnidesk::DsoViewLeaseRegistry::instance().acquireLease("plugin-scaffold-smoke");
+        TEST_CHECK(view_lease != nullptr);
+        TEST_CHECK(mgr.unloadPlugin("plugin-scaffold-smoke"));
+        TEST_CHECK(saw_pinned_event);
+        TEST_CHECK(omnidesk::DsoViewLeaseRegistry::instance().hasActiveLeases("plugin-scaffold-smoke"));
+        view_lease.reset();
+        TEST_CHECK(!omnidesk::DsoViewLeaseRegistry::instance().hasActiveLeases("plugin-scaffold-smoke"));
+        bus.unsubscribe(ev_tok);
+    }
     mgr.unloadAll();
 
     std::string rm_err;
@@ -1026,6 +1046,687 @@ OMNIDESK_DECLARE_PLUGIN(
         TEST_CHECK(installer.removePlugin("plugin-slow-inproc", rm_err));
     }
 
+    // 10. Subprocess cross-plugin CapabilityRegistry & EntityBus forwarding (pipe & unix_socket,
+    //     subprocess<->host<->subprocess, streaming/cancel, re-entrancy, and crash recovery)
+    {
+        auto buildSubprocessPlugin = [&](const std::string& id,
+                                         const std::string& target_name,
+                                         const std::string& transport,
+                                         const std::string& cpp_src,
+                                         const std::vector<std::string>& provides) {
+            const fs::path pdir = tmp_root / (id + "-src");
+            fs::create_directories(pdir / "src", ec);
+            nlohmann::json mj = {
+                {"schema_version", 1},
+                {"id", id},
+                {"name", id},
+                {"version", "0.1.0"},
+                {"abi_version", 1},
+                {"kind", "hybrid"},
+                {"domain", "core"},
+                {"isolation", "subprocess"},
+                {"worker_transport", transport},
+                {"repository", {{"type", "git"}, {"url", "https://example.invalid/" + id + ".git"}, {"branch", "main"}}},
+                {"build", {{"system", "cmake"}, {"entry_target", target_name}, {"output_lib", "lib" + target_name + ".so"}}},
+                {"provides", provides},
+                {"consumes", {"host.llm.v1", "beta.echo.v1", "alpha.leaf.v1"}},
+            };
+            {
+                std::ofstream ofs(pdir / "plugin.json");
+                ofs << mj.dump(2) << "\n";
+            }
+            {
+                std::ofstream ofs(pdir / "CMakeLists.txt");
+                ofs << "cmake_minimum_required(VERSION 3.20)\n"
+                       "project(" << target_name << " LANGUAGES CXX)\n"
+                       "set(CMAKE_CXX_STANDARD 17)\n"
+                       "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+                       "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
+                       "find_package(OmniDeskSDK REQUIRED)\n"
+                       "add_library(" << target_name << " SHARED src/plugin_main.cpp)\n"
+                       "target_link_libraries(" << target_name << " PRIVATE OmniDesk::SDK)\n"
+                       "set_target_properties(" << target_name << " PROPERTIES OUTPUT_NAME \"" << target_name << "\" PREFIX \"lib\")\n";
+            }
+            {
+                std::ofstream ofs(pdir / "src" / "plugin_main.cpp");
+                ofs << cpp_src;
+            }
+            auto ir = installer.installFromLocal(pdir.string());
+            if (!ir.ok) {
+                std::cerr << "Install " << id << " failed: " << ir.error << "\n" << ir.log << "\n";
+                std::exit(1);
+            }
+        };
+
+        const std::string alpha_cpp = R"CPP(
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <thread>
+#include <unistd.h>
+#include "omnidesk/sdk.hpp"
+
+class AlphaPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        ctx_ = &ctx;
+        // Verify host capability query & call works right inside onLoad()!
+        onload_saw_host_llm_ = ctx.capabilities().has("host.llm.v1");
+        if (onload_saw_host_llm_) {
+            auto r = ctx.capabilities().call("host.llm.v1", {{"prompt", "onload-probe"}});
+            if (r.ok) onload_reply_ = r.data.value("reply", "");
+        }
+
+        ctx.subscribe("entity.alpha.ping", [this](const std::string& topic, const nlohmann::json& p) {
+            std::lock_guard<std::mutex> lk(mu_);
+            pings_.push_back({{"topic", topic}, {"seq", p.value("seq", 0)}});
+        });
+        ctx.subscribe("*", [this](const std::string& topic, const nlohmann::json& p) {
+            if (topic == "entity.alpha.ping" || topic == "entity.alpha.out") {
+                std::lock_guard<std::mutex> lk(mu_);
+                wildcard_events_.push_back({{"topic", topic}, {"from", p.value("from", "")}});
+            }
+        });
+
+        ctx.registerCapability("alpha.work.v1", [this](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+            const std::string action = req.value("action", "");
+            if (action == "status") {
+                std::lock_guard<std::mutex> lk(mu_);
+                return {true,
+                        {{"pid", static_cast<int>(::getpid())},
+                         {"onload_saw_host_llm", onload_saw_host_llm_},
+                         {"onload_reply", onload_reply_},
+                         {"pings", pings_},
+                         {"wildcard_events", wildcard_events_}},
+                        "", ""};
+            }
+            if (action == "call_host_and_beta") {
+                auto llm = ctx_->capabilities().call("host.llm.v1", {{"prompt", "from-alpha"}});
+                auto beta = ctx_->capabilities().call("beta.echo.v1", {{"msg", "alpha->beta"}});
+                auto beta_explicit = ctx_->capabilities().callProvider(
+                    "plugin-iso-beta", "beta.echo.v1", {{"msg", "explicit"}});
+                auto provs = ctx_->capabilities().providersFor("host.llm.v1");
+                auto all = ctx_->capabilities().listAll();
+                return {llm.ok && beta.ok && beta_explicit.ok,
+                        {{"llm_reply", llm.data.value("reply", "")},
+                         {"llm_provider", llm.provider_plugin_id},
+                         {"beta_echo", beta.data.value("echo", "")},
+                         {"beta_provider", beta.provider_plugin_id},
+                         {"beta_explicit", beta_explicit.data.value("echo", "")},
+                         {"host_llm_providers", provs.size()},
+                         {"total_caps", all.size()}},
+                        llm.ok ? beta.error : llm.error, ""};
+            }
+            if (action == "stream_cancel_host") {
+                auto cancel = omnidesk::CancelToken::create();
+                std::string got;
+                int chunks = 0;
+                auto sres = ctx_->capabilities().callStream(
+                    "host.llm.v1",
+                    {{"stream", true}},
+                    [&](const omnidesk::StreamChunk& ch) {
+                        if (!ch.delta.empty()) {
+                            got += ch.delta;
+                            if (++chunks >= 2) cancel->cancel();
+                        }
+                    },
+                    cancel);
+                return {true,
+                        {{"cancelled", sres.cancelled}, {"got", got}, {"chunks", chunks}},
+                        "", ""};
+            }
+            if (action == "reenter") {
+                return ctx_->capabilities().call("host.reenter.v1", {{"val", req.value("val", 0)}});
+            }
+            if (action == "publish_out") {
+                size_t delivered = ctx_->publish("entity.alpha.out", {{"from", "alpha"}, {"n", req.value("n", 1)}});
+                return {true, {{"delivered", delivered}}, "", ""};
+            }
+            if (action == "crash_once") {
+                const std::string marker = req.value("marker", "");
+                if (!marker.empty() && !std::filesystem::exists(marker)) {
+                    std::ofstream ofs(marker);
+                    ofs << "crashed\n";
+                    ofs.flush();
+                    std::raise(SIGSEGV);
+                }
+                return {true, {{"recovered", true}, {"pid", static_cast<int>(::getpid())}}, "", ""};
+            }
+            return {false, {}, "unknown action", ""};
+        });
+
+        ctx.registerCapability("alpha.leaf.v1", [](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+            return {true, {{"leaf", req.value("val", 0) + 100}}, "", ""};
+        });
+        return true;
+    }
+
+    void onUnload() override { ctx_ = nullptr; }
+
+private:
+    omnidesk::PluginContext* ctx_ = nullptr;
+    bool onload_saw_host_llm_ = false;
+    std::string onload_reply_;
+    std::mutex mu_;
+    nlohmann::json pings_ = nlohmann::json::array();
+    nlohmann::json wildcard_events_ = nlohmann::json::array();
+};
+
+OMNIDESK_DECLARE_PLUGIN(AlphaPlugin, "plugin-iso-alpha", "Alpha Iso", "0.1.0", "hybrid", "core")
+)CPP";
+
+        const std::string beta_cpp = R"CPP(
+#include <mutex>
+#include <unistd.h>
+#include "omnidesk/sdk.hpp"
+
+class BetaPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        ctx_ = &ctx;
+        ctx.subscribe("entity.alpha.out", [this](const std::string&, const nlohmann::json& p) {
+            std::lock_guard<std::mutex> lk(mu_);
+            alpha_outs_.push_back(p);
+        });
+        ctx.registerCapability("beta.echo.v1", [this](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+            std::lock_guard<std::mutex> lk(mu_);
+            return {true,
+                    {{"echo", req.value("msg", "")},
+                     {"pid", static_cast<int>(::getpid())},
+                     {"alpha_outs", alpha_outs_}},
+                    "", ""};
+        });
+        ctx.registerCapability("beta.call_alpha_leaf.v1", [this](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+            return ctx_->capabilities().call("alpha.leaf.v1", req);
+        });
+        return true;
+    }
+    void onUnload() override { ctx_ = nullptr; }
+private:
+    omnidesk::PluginContext* ctx_ = nullptr;
+    std::mutex mu_;
+    nlohmann::json alpha_outs_ = nlohmann::json::array();
+};
+
+OMNIDESK_DECLARE_PLUGIN(BetaPlugin, "plugin-iso-beta", "Beta Iso", "0.1.0", "hybrid", "core")
+)CPP";
+
+        buildSubprocessPlugin("plugin-iso-alpha", "plugin_iso_alpha", "pipe", alpha_cpp,
+                              {"alpha.work.v1", "alpha.leaf.v1"});
+        buildSubprocessPlugin("plugin-iso-beta", "plugin_iso_beta", "unix_socket", beta_cpp,
+                              {"beta.echo.v1", "beta.call_alpha_leaf.v1"});
+
+        omnidesk::CapabilityRegistry fwd_caps;
+        omnidesk::EntityBus fwd_bus;
+        omnidesk::DomainRegistry fwd_domains;
+        omnidesk::JobCenter fwd_jobs(&fwd_bus, 2);
+        omnidesk::WorkerSupervisor fwd_workers;
+
+        fwd_caps.registerStreamingCapability("host.llm.v1", "host.llm",
+            [](const nlohmann::json& req,
+               const std::shared_ptr<omnidesk::CancelToken>& cancel,
+               const omnidesk::StreamCallback& on_chunk) -> omnidesk::CapabilityResult {
+                if (req.value("stream", false)) {
+                    for (int i = 0; i < 30; ++i) {
+                        if (cancel && cancel->isCancelled()) {
+                            return {false, {}, "cancelled", "host.llm", true};
+                        }
+                        if (on_chunk) on_chunk({"c" + std::to_string(i), nlohmann::json::object(), "delta", false});
+                        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                    }
+                    return {true, {{"reply", "full-stream"}}, "", "host.llm"};
+                }
+                return {true, {{"reply", "ok:" + req.value("prompt", "")}}, "", "host.llm"};
+            });
+        fwd_caps.registerCapability("host.reenter.v1", "host.reenter",
+            [&](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+                return fwd_caps.call("alpha.leaf.v1", req);
+            });
+
+        omnidesk::pm::PluginManager fwd_mgr(
+            installer, fwd_caps, fwd_bus, fwd_domains, cfg, secrets, &fwd_jobs, &fwd_workers);
+        fwd_mgr.setWorkerExecutable(OMNIDESK_TEST_WORKER_EXE);
+
+        std::string fwd_err;
+        if (!fwd_mgr.loadPlugin("plugin-iso-beta", fwd_err)) {
+            std::cerr << "Load beta failed: " << fwd_err << "\n";
+            return 1;
+        }
+        if (!fwd_mgr.loadPlugin("plugin-iso-alpha", fwd_err)) {
+            std::cerr << "Load alpha failed: " << fwd_err << "\n";
+            return 1;
+        }
+
+        // Verify onLoad() forwarding + capability calls (Alpha->Host, Alpha->Beta, Beta->Alpha)
+        auto st_init = fwd_caps.call("alpha.work.v1", {{"action", "status"}});
+        TEST_CHECK(st_init.ok);
+        TEST_CHECK(st_init.data.value("onload_saw_host_llm", false));
+        TEST_CHECK(st_init.data.value("onload_reply", "") == "ok:onload-probe");
+        const int alpha_pid_1 = st_init.data.value("pid", 0);
+        TEST_CHECK(alpha_pid_1 > 0 && alpha_pid_1 != static_cast<int>(::getpid()));
+
+        auto cross = fwd_caps.call("alpha.work.v1", {{"action", "call_host_and_beta"}});
+        TEST_CHECK(cross.ok);
+        TEST_CHECK(cross.data["llm_reply"] == "ok:from-alpha");
+        TEST_CHECK(cross.data["llm_provider"] == "host.llm");
+        TEST_CHECK(cross.data["beta_echo"] == "alpha->beta");
+        TEST_CHECK(cross.data["beta_provider"] == "plugin-iso-beta");
+        TEST_CHECK(cross.data["beta_explicit"] == "explicit");
+        TEST_CHECK(cross.data["host_llm_providers"].get<int>() == 1);
+        TEST_CHECK(cross.data["total_caps"].get<int>() >= 6);
+
+        auto b_to_a = fwd_caps.call("beta.call_alpha_leaf.v1", {{"val", 23}});
+        TEST_CHECK(b_to_a.ok && b_to_a.data["leaf"] == 123);
+
+        // Streaming + mid-stream cancellation from subprocess plugin to host capability
+        auto sc = fwd_caps.call("alpha.work.v1", {{"action", "stream_cancel_host"}});
+        TEST_CHECK(sc.ok && sc.data["cancelled"] == true);
+        TEST_CHECK(sc.data["chunks"].get<int>() >= 2 && sc.data["chunks"].get<int>() < 30);
+
+        // Re-entrant call: Host -> Alpha("alpha.work.v1") -> Host("host.reenter.v1") -> Alpha("alpha.leaf.v1")
+        auto re = fwd_caps.call("alpha.work.v1", {{"action", "reenter"}, {"val", 7}});
+        TEST_CHECK(re.ok && re.data["leaf"] == 107);
+
+        // EntityBus forwarding: Host -> Alpha (exact + wildcard -> 1 delivery each, no duplicates)
+        // and Alpha -> Host & Beta (no echo back to Alpha wildcard!)
+        int host_saw_alpha_out = 0;
+        auto h_out_tok = fwd_bus.subscribe("entity.alpha.out", "host.observer",
+            [&](const std::string&, const nlohmann::json& p) {
+                if (p.value("n", 0) == 99) ++host_saw_alpha_out;
+            });
+        fwd_bus.publish("entity.alpha.ping", {{"seq", 1}});
+        auto pub_res = fwd_caps.call("alpha.work.v1", {{"action", "publish_out"}, {"n", 99}});
+        TEST_CHECK(pub_res.ok && pub_res.data["delivered"].get<int>() >= 2);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        auto st_bus = fwd_caps.call("alpha.work.v1", {{"action", "status"}});
+        TEST_CHECK(st_bus.ok);
+        TEST_CHECK(st_bus.data["pings"].size() == 1 && st_bus.data["pings"][0]["seq"] == 1);
+        // Alpha's wildcard saw entity.alpha.ping (from Host) and entity.alpha.out (delivered locally once, NOT echoed from Host)
+        TEST_CHECK(st_bus.data["wildcard_events"].size() == 2);
+        TEST_CHECK(host_saw_alpha_out == 1);
+
+        auto beta_st = fwd_caps.call("beta.echo.v1", {{"msg", "check"}});
+        TEST_CHECK(beta_st.ok && beta_st.data["alpha_outs"].size() == 1);
+        TEST_CHECK(beta_st.data["alpha_outs"][0]["n"] == 99);
+
+        // Crash Alpha with SIGSEGV -> auto-restarts -> re-subscribes on EntityBus cleanly -> no duplicate events
+        const fs::path alpha_segv = tmp_root / "alpha_segv.marker";
+        auto crashed = fwd_caps.call("alpha.work.v1", {{"action", "crash_once"}, {"marker", alpha_segv.string()}});
+        TEST_CHECK(!crashed.ok && fs::exists(alpha_segv));
+        auto recov = fwd_caps.call("alpha.work.v1", {{"action", "crash_once"}, {"marker", alpha_segv.string()}});
+        TEST_CHECK(recov.ok && recov.data.value("recovered", false));
+        const int alpha_pid_2 = recov.data.value("pid", 0);
+        TEST_CHECK(alpha_pid_2 > 0 && alpha_pid_2 != alpha_pid_1);
+
+        // Host event still reaches restarted Alpha exactly once, and Alpha still calls Host & Beta
+        fwd_bus.publish("entity.alpha.ping", {{"seq", 2}});
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        auto st_after_crash = fwd_caps.call("alpha.work.v1", {{"action", "status"}});
+        TEST_CHECK(st_after_crash.ok);
+        TEST_CHECK(st_after_crash.data["pings"].size() == 1 && st_after_crash.data["pings"][0]["seq"] == 2);
+        auto cross_after = fwd_caps.call("alpha.work.v1", {{"action", "call_host_and_beta"}});
+        TEST_CHECK(cross_after.ok && cross_after.data["beta_echo"] == "alpha->beta");
+
+        fwd_bus.unsubscribe(h_out_tok);
+        fwd_mgr.unloadAll();
+        fwd_workers.stopAll();
+        fwd_jobs.shutdown();
+        TEST_CHECK(!fwd_caps.has("alpha.work.v1"));
+        TEST_CHECK(!fwd_caps.has("beta.echo.v1"));
+        TEST_CHECK(installer.removePlugin("plugin-iso-alpha", rm_err));
+        TEST_CHECK(installer.removePlugin("plugin-iso-beta", rm_err));
+    }
+
+    // 11. Prebuilt .tar.zst symlink & hardlink escape rejection
+    {
+        const fs::path secret_vault = tmp_root / "secret_vault.json";
+        {
+            std::ofstream ofs(secret_vault);
+            ofs << "{\"api_key\":\"SUPER_SECRET_DO_NOT_EXFILTRATE\"}\n";
+        }
+
+        // 11a. Symlink README.md -> secret_vault.json inside .tar.zst
+        const fs::path sym_stage = tmp_root / "pkg-symlink-stage";
+        fs::create_directories(sym_stage, ec);
+        fs::copy_file(pkg_stage / "plugin.json", sym_stage / "plugin.json",
+                      fs::copy_options::overwrite_existing);
+        for (const auto& entry : fs::directory_iterator(pkg_stage)) {
+            if (entry.path().extension() == ".so") {
+                fs::copy_file(entry.path(), sym_stage / entry.path().filename(),
+                              fs::copy_options::overwrite_existing);
+            }
+        }
+        fs::create_symlink(secret_vault, sym_stage / "README.md", ec);
+        TEST_CHECK(!ec);
+        const fs::path sym_tar = tmp_root / "malicious-symlink.tar.zst";
+        TEST_CHECK(runShell("tar --zstd -cf '" + sym_tar.string() + "' -C '" + sym_stage.string() + "' .") == 0);
+
+        omnidesk::pm::ReleaseArtifactSpec sym_rel;
+        sym_rel.archive_url = "file://" + sym_tar.string();
+        sym_rel.sha256 = sha256File(sym_tar);
+        sym_rel.tag = "v1.0.0";
+        auto sym_res = installer.installFromPrebuilt(sym_rel);
+        TEST_CHECK(!sym_res.ok);
+        TEST_CHECK(sym_res.error.find("Symlink") != std::string::npos ||
+                   sym_res.error.find("symlink") != std::string::npos);
+        TEST_CHECK(!installer.getInstalled("plugin-sample-echo").has_value());
+        TEST_CHECK(!fs::exists(fs::path(installer.pluginsDir()) / "plugin-sample-echo"));
+
+        // 11b. Directory symlink workers -> outside directory inside .tar.zst
+        const fs::path dirsym_stage = tmp_root / "pkg-dirsym-stage";
+        fs::create_directories(dirsym_stage, ec);
+        fs::copy_file(pkg_stage / "plugin.json", dirsym_stage / "plugin.json",
+                      fs::copy_options::overwrite_existing);
+        for (const auto& entry : fs::directory_iterator(pkg_stage)) {
+            if (entry.path().extension() == ".so") {
+                fs::copy_file(entry.path(), dirsym_stage / entry.path().filename(),
+                              fs::copy_options::overwrite_existing);
+            }
+        }
+        fs::create_directory_symlink(tmp_root, dirsym_stage / "workers", ec);
+        TEST_CHECK(!ec);
+        const fs::path dirsym_tar = tmp_root / "malicious-dirsym.tar.zst";
+        TEST_CHECK(runShell("tar --zstd -cf '" + dirsym_tar.string() + "' -C '" + dirsym_stage.string() + "' .") == 0);
+
+        omnidesk::pm::ReleaseArtifactSpec dirsym_rel;
+        dirsym_rel.archive_url = "file://" + dirsym_tar.string();
+        dirsym_rel.sha256 = sha256File(dirsym_tar);
+        dirsym_rel.tag = "v1.0.0";
+        auto dirsym_res = installer.installFromPrebuilt(dirsym_rel);
+        TEST_CHECK(!dirsym_res.ok);
+        TEST_CHECK(!installer.getInstalled("plugin-sample-echo").has_value());
+
+        // 11c. Hardlink entry inside .tar.zst
+        const fs::path raw_hard_tar = tmp_root / "malicious-hardlink.tar";
+        const fs::path hard_tar_zst = tmp_root / "malicious-hardlink.tar.zst";
+        const std::string py_hardlink =
+            "python3 -c \"import os, tarfile; "
+            "tf = tarfile.open('" + raw_hard_tar.string() + "', 'w'); "
+            "tf.add('" + (pkg_stage / "plugin.json").string() + "', arcname='plugin.json'); "
+            "so_files = [f for f in os.listdir('" + pkg_stage.string() + "') if f.endswith('.so')]; "
+            "tf.add(os.path.join('" + pkg_stage.string() + "', so_files[0]), arcname=so_files[0]); "
+            "ti = tarfile.TarInfo('README.md'); ti.type = tarfile.LNKTYPE; "
+            "ti.linkname = '" + secret_vault.string() + "'; tf.addfile(ti); tf.close()\" && "
+            "zstd -q -f '" + raw_hard_tar.string() + "' -o '" + hard_tar_zst.string() + "'";
+        TEST_CHECK(runShell(py_hardlink) == 0);
+
+        omnidesk::pm::ReleaseArtifactSpec hard_rel;
+        hard_rel.archive_url = "file://" + hard_tar_zst.string();
+        hard_rel.sha256 = sha256File(hard_tar_zst);
+        hard_rel.tag = "v1.0.0";
+        auto hard_res = installer.installFromPrebuilt(hard_rel);
+        TEST_CHECK(!hard_res.ok);
+        TEST_CHECK(hard_res.error.find("hardlink") != std::string::npos ||
+                   hard_res.error.find("Hardlink") != std::string::npos ||
+                   hard_res.error.find("Unsafe") != std::string::npos);
+        TEST_CHECK(!installer.getInstalled("plugin-sample-echo").has_value());
+    }
+
+    // 12. scaffoldPluginRepo C++ string literal escaping + out-of-lock onHealthCheck / unload safety
+    {
+        const fs::path esc_dir = tmp_root / "scaffold-escape-repo";
+        omnidesk::pm::ScaffoldOptions esc_opts;
+        esc_opts.target_dir = esc_dir.string();
+        esc_opts.plugin_id = "plugin-escape-smoke";
+        esc_opts.name = "Name \"Quoted\" \\Slash\\ \nLine2\tTab\rCR";
+        esc_opts.description = "Desc \"with quotes\", C:\\dir\\file, and\nsecond line\tend";
+        esc_opts.author = "Dev \"Team\" \\ Core\nUnit";
+        esc_opts.version = "0.1.0-rc\"1";
+        esc_opts.provides = {"escape.ping.v1"};
+        esc_opts.init_git = false;
+
+        auto esc_sres = omnidesk::pm::scaffoldPluginRepo(esc_opts);
+        TEST_CHECK(esc_sres.ok);
+
+        std::ifstream cpp_ifs(esc_dir / "src" / "plugin_main.cpp");
+        const std::string gen_cpp((std::istreambuf_iterator<char>(cpp_ifs)), {});
+        TEST_CHECK(gen_cpp.find("Name \\\"Quoted\\\" \\\\Slash\\\\ \\nLine2\\tTab\\rCR") != std::string::npos);
+        TEST_CHECK(gen_cpp.find("Desc \\\"with quotes\\\", C:\\\\dir\\\\file, and\\nsecond line\\tend") !=
+                   std::string::npos);
+
+        auto esc_inst = installer.installFromLocal(esc_sres.dir_path);
+        if (!esc_inst.ok) {
+            std::cerr << "Escaped scaffold installFromLocal failed: " << esc_inst.error
+                      << "\nLOG:\n" << esc_inst.log << "\n";
+            return 1;
+        }
+        TEST_CHECK(mgr.loadPlugin("plugin-escape-smoke", load_err));
+        auto esc_provs = caps.providersFor("escape.ping.v1");
+        TEST_CHECK(esc_provs.size() == 1);
+        TEST_CHECK(esc_provs[0].metadata.value("name", "") == esc_opts.name);
+        TEST_CHECK(esc_provs[0].metadata.value("description", "") == esc_opts.description);
+        TEST_CHECK(esc_provs[0].metadata.value("author", "") == esc_opts.author);
+        TEST_CHECK(esc_provs[0].metadata.value("version", "") == esc_opts.version);
+        mgr.unloadAll();
+        TEST_CHECK(installer.removePlugin("plugin-escape-smoke", rm_err));
+
+        // Verify PluginManager::statusOf / statuses runs onHealthCheck() outside mutex_ (no re-entrant deadlock)
+        // and waits for active health check before unloading.
+        const fs::path hc_dir = tmp_root / "health-reentrant-src";
+        omnidesk::pm::ScaffoldOptions hc_opts;
+        hc_opts.target_dir = hc_dir.string();
+        hc_opts.plugin_id = "plugin-health-reentrant";
+        hc_opts.name = "Health Reentrant";
+        hc_opts.provides = {"health.reentrant.v1"};
+        hc_opts.init_git = false;
+        TEST_CHECK(omnidesk::pm::scaffoldPluginRepo(hc_opts).ok);
+        {
+            std::ofstream ofs(hc_dir / "src" / "plugin_main.cpp", std::ios::trunc);
+            ofs << R"CPP(
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <omnidesk/sdk.hpp>
+
+class HealthReentrantPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        ctx_ = &ctx;
+        unloaded_.store(false);
+        ctx.logInfo("health-reentrant loaded");
+        return true;
+    }
+    void onUnload() override {
+        unloaded_.store(true);
+        ctx_ = nullptr;
+    }
+    nlohmann::json onHealthCheck() const override {
+        if (ctx_) {
+            ctx_->publish("test.health.entered", {{"plugin_id", "plugin-health-reentrant"}});
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        const bool still_alive = !unloaded_.load();
+        return {{"ok", still_alive}};
+    }
+private:
+    omnidesk::PluginContext* ctx_ = nullptr;
+    mutable std::atomic<bool> unloaded_{false};
+};
+
+OMNIDESK_DECLARE_PLUGIN(HealthReentrantPlugin, "plugin-health-reentrant", "Health Reentrant", "0.1.0", "provider", "core")
+)CPP";
+        }
+        TEST_CHECK(installer.installFromLocal(hc_dir.string()).ok);
+        TEST_CHECK(mgr.loadPlugin("plugin-health-reentrant", load_err));
+
+        std::atomic<bool> entered_hc{false};
+        std::atomic<bool> reentrant_is_loaded{false};
+        const auto hc_tok = bus.subscribe("test.health.entered", "test.reentrant",
+            [&](const std::string&, const nlohmann::json&) {
+                reentrant_is_loaded.store(mgr.isLoaded("plugin-health-reentrant"));
+                entered_hc.store(true);
+            });
+
+        std::thread unloader([&]() {
+            while (!entered_hc.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            mgr.unloadPlugin("plugin-health-reentrant");
+        });
+        auto hc_st = mgr.statusOf("plugin-health-reentrant");
+        unloader.join();
+        bus.unsubscribe(hc_tok);
+
+        TEST_CHECK(reentrant_is_loaded.load());
+        TEST_CHECK(hc_st.has_value() && hc_st->healthy);
+        TEST_CHECK(!mgr.isLoaded("plugin-health-reentrant"));
+        TEST_CHECK(installer.removePlugin("plugin-health-reentrant", rm_err));
+    }
+
+    // 13. Subprocess worker duplex unregistered cap.invoke fast-fail (no bounce) & graceful SIGTERM onUnload()
+    {
+        const fs::path guard_src = tmp_root / "plugin-iso-guard-src";
+        fs::create_directories(guard_src / "src", ec);
+        {
+            nlohmann::json mj = {
+                {"schema_version", 1},
+                {"id", "plugin-iso-guard"},
+                {"name", "Iso Guard"},
+                {"version", "0.1.0"},
+                {"abi_version", 1},
+                {"kind", "provider"},
+                {"domain", "core"},
+                {"isolation", "subprocess"},
+                {"worker_transport", "pipe"},
+                {"repository", {{"type", "git"}, {"url", "https://example.invalid/guard.git"}, {"branch", "main"}}},
+                {"build", {{"system", "cmake"}, {"entry_target", "plugin_iso_guard"}, {"output_lib", "libplugin_iso_guard.so"}}},
+                {"provides", {"guard.info.v1"}},
+                {"consumes", nlohmann::json::array()},
+            };
+            std::ofstream ofs(guard_src / "plugin.json");
+            ofs << mj.dump(2) << "\n";
+        }
+        {
+            std::ofstream ofs(guard_src / "CMakeLists.txt");
+            ofs << "cmake_minimum_required(VERSION 3.20)\n"
+                   "project(plugin_iso_guard LANGUAGES CXX)\n"
+                   "set(CMAKE_CXX_STANDARD 17)\n"
+                   "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+                   "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
+                   "find_package(OmniDeskSDK REQUIRED)\n"
+                   "add_library(plugin_iso_guard SHARED src/plugin_main.cpp)\n"
+                   "target_link_libraries(plugin_iso_guard PRIVATE OmniDesk::SDK)\n"
+                   "set_target_properties(plugin_iso_guard PROPERTIES OUTPUT_NAME \"plugin_iso_guard\" PREFIX \"lib\")\n";
+        }
+        {
+            std::ofstream ofs(guard_src / "src" / "plugin_main.cpp");
+            ofs << R"CPP(
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
+#include "omnidesk/sdk.hpp"
+
+class IsoGuardPlugin final : public omnidesk::IPlugin {
+public:
+    bool onLoad(omnidesk::PluginContext& ctx) override {
+        data_dir_ = ctx.dataDir();
+        ctx.registerCapability("guard.info.v1", [this](const nlohmann::json&) -> omnidesk::CapabilityResult {
+            return {true,
+                    {{"pid", static_cast<int>(::getpid())},
+                     {"data_dir", data_dir_}},
+                    "", ""};
+        });
+        return true;
+    }
+    void onUnload() override {
+        if (!data_dir_.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(data_dir_, ec);
+            const auto tmp_p = std::filesystem::path(data_dir_) / "unloaded.marker.tmp";
+            const auto final_p = std::filesystem::path(data_dir_) / "unloaded.marker";
+            {
+                std::ofstream ofs(tmp_p, std::ios::trunc);
+                ofs << static_cast<int>(::getpid()) << "\n";
+            }
+            std::filesystem::rename(tmp_p, final_p, ec);
+        }
+    }
+private:
+    std::string data_dir_;
+};
+
+OMNIDESK_DECLARE_PLUGIN(IsoGuardPlugin, "plugin-iso-guard", "Iso Guard", "0.1.0", "provider", "core")
+)CPP";
+        }
+
+        auto guard_inst = installer.installFromLocal(guard_src.string());
+        if (!guard_inst.ok) {
+            std::cerr << "Install plugin-iso-guard failed: " << guard_inst.error << "\n" << guard_inst.log << "\n";
+            return 1;
+        }
+
+        omnidesk::CapabilityRegistry guard_caps;
+        omnidesk::EntityBus guard_bus;
+        omnidesk::DomainRegistry guard_domains;
+        omnidesk::JobCenter guard_jobs(&guard_bus, 2);
+        omnidesk::WorkerSupervisor guard_workers;
+        omnidesk::pm::PluginManager guard_mgr(
+            installer, guard_caps, guard_bus, guard_domains, cfg, secrets, &guard_jobs, &guard_workers);
+        guard_mgr.setWorkerExecutable(OMNIDESK_TEST_WORKER_EXE);
+
+        std::string guard_err;
+        TEST_CHECK(guard_mgr.loadPlugin("plugin-iso-guard", guard_err));
+
+        // Register a ghost capability on the host routing into plugin:plugin-iso-guard that the worker did NOT register.
+        // Without the bounce guard in cap_bridge->invoke, this would loop worker->host->worker until pool deadlock/timeout.
+        guard_caps.registerStreamingCapability(
+            "guard.ghost.v1",
+            "plugin-iso-guard",
+            omnidesk::makeWorkerStreamCapabilityHandler(
+                guard_workers, "plugin:plugin-iso-guard", "guard.ghost.v1", "cap.invoke"));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        auto ghost_sync = guard_caps.call("guard.ghost.v1", {{"probe", 1}});
+        const auto elapsed_sync = std::chrono::steady_clock::now() - t0;
+        TEST_CHECK(!ghost_sync.ok);
+        TEST_CHECK(ghost_sync.error.find("missing capability") != std::string::npos);
+        TEST_CHECK(elapsed_sync < std::chrono::seconds(2));
+
+        auto ghost_stream = guard_caps.callStream(
+            "guard.ghost.v1", {{"probe", 2}}, [](const omnidesk::StreamChunk&) {});
+        TEST_CHECK(!ghost_stream.ok);
+        TEST_CHECK(ghost_stream.error.find("missing capability") != std::string::npos);
+
+        // Malformed non-req envelope containing "op": "shutdown" (with kind="resp", missing "id") must be ignored
+        auto info1 = guard_caps.call("guard.info.v1");
+        TEST_CHECK(info1.ok);
+        const int guard_pid_1 = info1.data.value("pid", 0);
+        const fs::path unload_marker = fs::path(info1.data.value("data_dir", "")) / "unloaded.marker";
+        TEST_CHECK(guard_pid_1 > 0);
+
+        guard_workers.sendEvent("plugin:plugin-iso-guard", {{"kind", "resp"}, {"op", "shutdown"}});
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        auto info_still_up = guard_caps.call("guard.info.v1");
+        TEST_CHECK(info_still_up.ok && info_still_up.data.value("pid", 0) == guard_pid_1);
+
+        // Graceful onUnload() when WorkerSupervisor stops the worker via SIGTERM
+        fs::remove(unload_marker, ec);
+        TEST_CHECK(!fs::exists(unload_marker));
+        TEST_CHECK(guard_workers.stopWorker("plugin:plugin-iso-guard"));
+        TEST_CHECK(fs::exists(unload_marker));
+
+        // Graceful onUnload() on direct SIGTERM while duplex stdio pipe remains open
+        fs::remove(unload_marker, ec);
+        auto info2 = guard_caps.call("guard.info.v1");
+        TEST_CHECK(info2.ok);
+        const int guard_pid_2 = info2.data.value("pid", 0);
+        TEST_CHECK(guard_pid_2 > 0 && guard_pid_2 != guard_pid_1);
+        TEST_CHECK(::kill(guard_pid_2, SIGTERM) == 0);
+        const auto term_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (!fs::exists(unload_marker) && std::chrono::steady_clock::now() < term_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        TEST_CHECK(fs::exists(unload_marker));
+
+        guard_mgr.unloadAll();
+        guard_workers.stopAll();
+        guard_jobs.shutdown();
+        TEST_CHECK(installer.removePlugin("plugin-iso-guard", rm_err));
+    }
     ::unsetenv("OMNIDESK_STAGING_DIR");
     ::unsetenv("OMNIDESK_DISABLE_GITHUB_API");
     fs::remove_all(tmp_root, ec);

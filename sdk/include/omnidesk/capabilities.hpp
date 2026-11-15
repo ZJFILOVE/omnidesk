@@ -35,7 +35,7 @@ struct CapabilityDescriptor {
     nlohmann::json metadata = nlohmann::json::object();
 };
 
-#define OMNIDESK_CAPABILITY_INTERFACE_REVISION 2u
+#define OMNIDESK_CAPABILITY_INTERFACE_REVISION 3u
 
 /**
  * Central service registry enabling decoupled cross-plugin collaboration.
@@ -48,6 +48,18 @@ public:
                                             const std::string& component,
                                             const std::string& error)>;
 
+    struct RemoteBridge {
+        std::function<bool(const std::string& capability_id)> has;
+        std::function<std::vector<CapabilityDescriptor>(const std::string& capability_id)> providers_for;
+        std::function<std::vector<CapabilityDescriptor>()> list_all;
+        std::function<CapabilityResult(const std::string& plugin_id_filter,
+                                         const std::string& capability_id,
+                                         const nlohmann::json& request,
+                                         const StreamCallback& on_chunk,
+                                         const std::shared_ptr<CancelToken>& cancel,
+                                         bool stream_mode)> invoke;
+    };
+
     CapabilityRegistry();
     ~CapabilityRegistry();
 
@@ -58,6 +70,8 @@ public:
     bool hasInFlight(const std::string& plugin_id) const;
 
     void setFaultHandler(FaultHandler handler);
+    void setRemoteBridge(std::shared_ptr<RemoteBridge> bridge);
+    void notifyRemoteChanged();
 
     bool registerCapability(const std::string& capability_id,
                             const std::string& plugin_id,
@@ -87,6 +101,11 @@ public:
     CapabilityResult callCancellable(const std::string& capability_id,
                                      const nlohmann::json& request,
                                      const std::shared_ptr<CancelToken>& cancel) const;
+
+    CapabilityResult callProviderCancellable(const std::string& plugin_id,
+                                             const std::string& capability_id,
+                                             const nlohmann::json& request,
+                                             const std::shared_ptr<CancelToken>& cancel) const;
 
     CapabilityResult callStream(const std::string& capability_id,
                                 const nlohmann::json& request,
@@ -149,6 +168,7 @@ private:
 
     mutable std::shared_mutex mutex_;
     std::unordered_map<std::string, std::vector<Entry>> entries_;
+    std::shared_ptr<RemoteBridge> remote_bridge_;
     std::mutex listeners_mutex_;
     std::unordered_map<uint64_t, ChangeCallback> listeners_;
     std::shared_ptr<FaultDispatcher> fault_dispatcher_;

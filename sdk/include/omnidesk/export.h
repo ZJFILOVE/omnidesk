@@ -1,7 +1,7 @@
 #pragma once
 
 #if defined(_WIN32)
-#  if defined(OMNIDESK_SDK_BUILD)
+#  if defined(OMNIDESK_SDK_BUILD) || defined(OMNIDESK_BUILDING_SDK)
 #    define OMNIDESK_API __declspec(dllexport)
 #  else
 #    define OMNIDESK_API __declspec(dllimport)

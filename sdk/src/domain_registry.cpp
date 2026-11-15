@@ -1,4 +1,5 @@
 #include "omnidesk/domain_registry.hpp"
+#include "omnidesk/dso_view_lease.hpp"
 #include "shutdown_grace.hpp"
 #include <algorithm>
 #include <atomic>
@@ -73,6 +74,7 @@ struct DomainRegistry::FlightTracker {
 
     void waitAll(int timeout_ms) {
         std::unique_lock lock(mutex);
+        if (stopping) return;
         stopping = true;
         const int grace_ms = detail::resolveShutdownGraceMs(timeout_ms);
         if (grace_ms > 0) {
@@ -94,6 +96,7 @@ namespace {
 class DomainAsyncPool {
 public:
     struct SourceBinding {
+        const DomainRegistry* owner = nullptr;
         std::string plugin_id;
         std::shared_ptr<DomainRegistry::FaultDispatcher> disp;
         std::weak_ptr<DomainRegistry::FlightTracker> weak_tracker;
@@ -105,7 +108,8 @@ public:
         return pool;
     }
 
-    void bindSource(const void* ptr,
+    void bindSource(const DomainRegistry* owner,
+                    const void* ptr,
                     std::string plugin_id,
                     std::shared_ptr<DomainRegistry::FaultDispatcher> disp,
                     std::weak_ptr<DomainRegistry::FlightTracker> weak_tracker,
@@ -113,14 +117,31 @@ public:
         if (!ptr) return;
         std::lock_guard lock(state_->mutex);
         state_->bindings[ptr] = SourceBinding{
-            std::move(plugin_id), std::move(disp), std::move(weak_tracker), std::move(weak_owner)};
+            owner,
+            std::move(plugin_id),
+            std::move(disp),
+            std::move(weak_tracker),
+            std::move(weak_owner)};
     }
 
-    void unbindPlugin(const std::string& plugin_id) {
+    void unbindPlugin(const DomainRegistry* owner, const std::string& plugin_id) {
         if (plugin_id.empty()) return;
         std::lock_guard lock(state_->mutex);
         for (auto it = state_->bindings.begin(); it != state_->bindings.end();) {
-            if (it->second.plugin_id == plugin_id) {
+            if ((owner == nullptr || it->second.owner == owner) &&
+                it->second.plugin_id == plugin_id) {
+                it = state_->bindings.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void unbindOwner(const DomainRegistry* owner) {
+        if (!owner) return;
+        std::lock_guard lock(state_->mutex);
+        for (auto it = state_->bindings.begin(); it != state_->bindings.end();) {
+            if (it->second.owner == owner) {
                 it = state_->bindings.erase(it);
             } else {
                 ++it;
@@ -137,6 +158,7 @@ public:
 
     bool isWorkerThread() const {
         const auto self_id = std::this_thread::get_id();
+        std::lock_guard lock(state_->mutex);
         for (const auto& wid : state_->worker_ids) {
             if (wid == self_id) return true;
         }
@@ -265,15 +287,14 @@ private:
 
     DomainAsyncPool() : state_(std::make_shared<State>()) {
         constexpr size_t kWorkers = 4;
+        std::lock_guard lock(state_->mutex);
         state_->active_workers = kWorkers;
+        state_->worker_ids.reserve(kWorkers);
         workers_.reserve(kWorkers);
         for (size_t i = 0; i < kWorkers; ++i) {
             auto exited = std::make_shared<std::atomic<bool>>(false);
             std::thread t([st = state_, exited]() { workerLoop(st, exited); });
-            {
-                std::lock_guard lock(state_->mutex);
-                state_->worker_ids.push_back(t.get_id());
-            }
+            state_->worker_ids.push_back(t.get_id());
             workers_.push_back(WorkerEntry{std::move(t), std::move(exited)});
         }
     }
@@ -423,9 +444,20 @@ public:
                          [&]() { return inner_->category(); },
                          []() { return std::string("blog"); });
     }
+    std::vector<TextChannel> channels() const override {
+        return guardCall(disp_, tracker_, plugin_id_, "text.channels",
+                         [&]() { return inner_->channels(); },
+                         []() { return std::vector<TextChannel>{}; });
+    }
     std::vector<TextFeedItem> fetchFeed(const std::string& query) override {
         return guardCall(disp_, tracker_, plugin_id_, "text.fetchFeed",
                          [&]() { return inner_->fetchFeed(query); },
+                         []() { return std::vector<TextFeedItem>{}; });
+    }
+    std::vector<TextFeedItem> fetchFeedInChannel(const std::string& channel_id,
+                                                 const std::string& query) override {
+        return guardCall(disp_, tracker_, plugin_id_, "text.fetchFeedInChannel",
+                         [&]() { return inner_->fetchFeedInChannel(channel_id, query); },
                          []() { return std::vector<TextFeedItem>{}; });
     }
     std::shared_ptr<CancelToken> fetchFeedAsync(
@@ -435,6 +467,19 @@ public:
         return guardCall(
             disp_, tracker_, plugin_id_, "text.fetchFeedAsync",
             [&]() { return inner_->fetchFeedAsync(query, std::move(callback), std::move(cancel)); },
+            []() { return CancelToken::create(); });
+    }
+    std::shared_ptr<CancelToken> fetchFeedInChannelAsync(
+        const std::string& channel_id,
+        const std::string& query,
+        std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
+        std::shared_ptr<CancelToken> cancel) override {
+        return guardCall(
+            disp_, tracker_, plugin_id_, "text.fetchFeedInChannelAsync",
+            [&]() {
+                return inner_->fetchFeedInChannelAsync(
+                    channel_id, query, std::move(callback), std::move(cancel));
+            },
             []() { return CancelToken::create(); });
     }
     TextArticle fetchArticle(const std::string& article_id) override {
@@ -512,7 +557,9 @@ ViewFactory guardViewFactory(std::string plugin_id,
     if (!fn) return {};
     return [pid = std::move(plugin_id), component, fn = std::move(fn), disp = std::move(disp),
             tracker = std::move(tracker)]() -> brls::View* {
-        return guardCall(disp, tracker, pid, component, [&]() { return fn(); }, []() -> brls::View* { return nullptr; });
+        brls::View* view = guardCall(
+            disp, tracker, pid, component, [&]() { return fn(); }, []() -> brls::View* { return nullptr; });
+        return DsoViewLeaseRegistry::instance().leaseView(pid, view);
     };
 }
 
@@ -520,7 +567,10 @@ ViewFactory guardViewFactory(std::string plugin_id,
 
 DomainRegistry::DomainRegistry() : flight_tracker_(std::make_shared<FlightTracker>()) {}
 
-DomainRegistry::~DomainRegistry() = default;
+DomainRegistry::~DomainRegistry() {
+    DomainAsyncPool::instance().unbindOwner(this);
+    shutdown(-1);
+}
 
 void DomainRegistry::shutdown(int timeout_ms) {
     std::unordered_set<std::string> pids;
@@ -531,6 +581,11 @@ void DomainRegistry::shutdown(int timeout_ms) {
         for (const auto& item : book_sources_) pids.insert(item.plugin_id);
         for (const auto& item : workspace_tabs_) pids.insert(item.plugin_id);
         for (const auto& item : dock_widgets_) pids.insert(item.plugin_id);
+    }
+    DomainAsyncPool::instance().unbindOwner(this);
+    if (fault_dispatcher_) {
+        std::lock_guard lock(fault_dispatcher_->mutex);
+        fault_dispatcher_->handler = {};
     }
     for (const auto& pid : pids) {
         DomainAsyncPool::instance().cancelPlugin(pid);
@@ -555,7 +610,8 @@ void DomainRegistry::registerMediaSource(const std::string& plugin_id,
     const void* raw_ptr = source.get();
     auto guarded = std::make_shared<GuardedMediaSource>(
         plugin_id, std::move(source), fault_dispatcher_, flight_tracker_);
-    DomainAsyncPool::instance().bindSource(raw_ptr, plugin_id, fault_dispatcher_, flight_tracker_, guarded);
+    DomainAsyncPool::instance().bindSource(
+        this, raw_ptr, plugin_id, fault_dispatcher_, flight_tracker_, guarded);
     {
         std::lock_guard lock(mutex_);
         media_sources_.push_back({plugin_id, std::move(guarded)});
@@ -569,7 +625,8 @@ void DomainRegistry::registerTextSource(const std::string& plugin_id,
     const void* raw_ptr = source.get();
     auto guarded = std::make_shared<GuardedTextSource>(
         plugin_id, std::move(source), fault_dispatcher_, flight_tracker_);
-    DomainAsyncPool::instance().bindSource(raw_ptr, plugin_id, fault_dispatcher_, flight_tracker_, guarded);
+    DomainAsyncPool::instance().bindSource(
+        this, raw_ptr, plugin_id, fault_dispatcher_, flight_tracker_, guarded);
     {
         std::lock_guard lock(mutex_);
         text_sources_.push_back({plugin_id, std::move(guarded)});
@@ -583,7 +640,8 @@ void DomainRegistry::registerBookSource(const std::string& plugin_id,
     const void* raw_ptr = source.get();
     auto guarded = std::make_shared<GuardedBookSource>(
         plugin_id, std::move(source), fault_dispatcher_, flight_tracker_);
-    DomainAsyncPool::instance().bindSource(raw_ptr, plugin_id, fault_dispatcher_, flight_tracker_, guarded);
+    DomainAsyncPool::instance().bindSource(
+        this, raw_ptr, plugin_id, fault_dispatcher_, flight_tracker_, guarded);
     {
         std::lock_guard lock(mutex_);
         book_sources_.push_back({plugin_id, std::move(guarded)});
@@ -637,7 +695,7 @@ void DomainRegistry::unregisterPlugin(const std::string& plugin_id) {
         eraseOwned(workspace_tabs_);
         eraseOwned(dock_widgets_);
     }
-    DomainAsyncPool::instance().unbindPlugin(plugin_id);
+    DomainAsyncPool::instance().unbindPlugin(this, plugin_id);
     DomainAsyncPool::instance().cancelPlugin(plugin_id);
     if (!DomainAsyncPool::instance().isWorkerThread()) {
         if (flight_tracker_) {
@@ -800,6 +858,19 @@ std::shared_ptr<CancelToken> ITextSource::fetchFeedAsync(
         this,
         "text.fetchFeed",
         [this, query]() { return fetchFeed(query); },
+        std::move(callback),
+        std::move(cancel));
+}
+
+std::shared_ptr<CancelToken> ITextSource::fetchFeedInChannelAsync(
+    const std::string& channel_id,
+    const std::string& query,
+    std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
+    std::shared_ptr<CancelToken> cancel) {
+    return submitDomainAsyncFetch<TextFeedItem>(
+        this,
+        "text.fetchFeedInChannel",
+        [this, channel_id, query]() { return fetchFeedInChannel(channel_id, query); },
         std::move(callback),
         std::move(cancel));
 }

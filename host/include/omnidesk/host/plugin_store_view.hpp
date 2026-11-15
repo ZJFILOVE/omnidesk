@@ -22,6 +22,7 @@ public:
     ~PluginStoreView() override;
 
     void refresh();
+    void refreshIfNeeded();
     void promptSearch();
     void openInstallModal(bool local_mode = false);
     void openScaffoldModal();
@@ -38,6 +39,7 @@ private:
     };
 
     void rebuildList();
+    void updateSelectedCardStyling(const std::string& prev_id, const std::string& next_id);
     void renderCatalogOrInstalledList();
     void renderDiagnosticsView();
     void renderDetail(const std::string& plugin_id);
@@ -65,6 +67,8 @@ private:
     std::shared_ptr<LogState> log_state_ = std::make_shared<LogState>();
     bool busy_ = false;
     bool radar_busy_ = false;
+    bool dirty_ = false;
+    std::unordered_map<std::string, brls::Box*> list_cards_;
 
     brls::Label* summary_label_ = nullptr;
     brls::Box* filter_bar_ = nullptr;

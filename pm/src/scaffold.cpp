@@ -1,6 +1,7 @@
 #include "omnidesk/pm/scaffold.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -44,6 +45,40 @@ std::string toClassName(const std::string& id) {
     }
     if (out.size() < 6 || out.substr(out.size() - 6) != "Plugin") {
         out += "Plugin";
+    }
+    return out;
+}
+
+std::string escapeCppString(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char ch : s) {
+        switch (ch) {
+            case '\\':
+                out += "\\\\";
+                break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    char octal[5];
+                    std::snprintf(octal, sizeof(octal), "\\%03o", static_cast<unsigned int>(ch));
+                    out += octal;
+                } else {
+                    out += static_cast<char>(ch);
+                }
+                break;
+        }
     }
     return out;
 }
@@ -92,7 +127,9 @@ ScaffoldResult scaffoldPluginRepo(const ScaffoldOptions& opts) {
     manifest.kind = opts.kind;
     manifest.domain = opts.domain;
     manifest.author = opts.author.empty() ? "OmniDesk Developer" : opts.author;
-    manifest.description = "Standalone decoupled OmniDesk plugin: " + display_name;
+    manifest.description = opts.description.empty()
+                               ? ("Standalone decoupled OmniDesk plugin: " + display_name)
+                               : opts.description;
     manifest.repo_type = "git";
     manifest.repo_url = repo_url;
     manifest.repo_branch = "main";
@@ -161,41 +198,53 @@ ScaffoldResult scaffoldPluginRepo(const ScaffoldOptions& opts) {
     res.created_files.push_back(cmake_file.string());
 
     std::string first_cap = opts.provides.empty() ? (target_name + ".ping.v1") : opts.provides.front();
+    const std::string esc_plugin_id = escapeCppString(opts.plugin_id);
+    const std::string esc_display_name = escapeCppString(display_name);
+    const std::string esc_version = escapeCppString(manifest.version);
+    const std::string esc_author = escapeCppString(manifest.author);
+    const std::string esc_description = escapeCppString(manifest.description);
+    const std::string esc_first_cap = escapeCppString(first_cap);
+    const std::string esc_kind = escapeCppString(toString(opts.kind));
+    const std::string esc_domain = escapeCppString(toString(opts.domain));
+
     std::string cpp_src =
         "#include <omnidesk/sdk.hpp>\n\n"
         "class " + class_name + " final : public omnidesk::IPlugin {\n"
         "public:\n"
         "    bool onLoad(omnidesk::PluginContext& ctx) override {\n"
         "        ctx_ = &ctx;\n"
-        "        ctx.logInfo(\"Loaded " + opts.plugin_id + "\");\n"
-        "        ctx.registerCapability(\"" + first_cap + "\",\n"
+        "        ctx.logInfo(\"Loaded " + esc_plugin_id + "\");\n"
+        "        ctx.registerCapability(\"" + esc_first_cap + "\",\n"
         "            [this](const nlohmann::json& req) -> omnidesk::CapabilityResult {\n"
         "                omnidesk::CapabilityResult res;\n"
         "                res.ok = true;\n"
         "                res.data = {{\"plugin_id\", ctx_->pluginId()}, {\"echo\", req}};\n"
         "                return res;\n"
         "            },\n"
-        "            {{\"name\", \"" + display_name + "\"}, {\"version\", \"" + manifest.version + "\"}});\n"
+        "            {{\"name\", \"" + esc_display_name + "\"}, "
+        "{\"version\", \"" + esc_version + "\"}, "
+        "{\"author\", \"" + esc_author + "\"}, "
+        "{\"description\", \"" + esc_description + "\"}});\n"
         "        return true;\n"
         "    }\n\n"
         "    void onUnload() override {\n"
         "        if (ctx_) {\n"
-        "            ctx_->logInfo(\"Unloading " + opts.plugin_id + "\");\n"
+        "            ctx_->logInfo(\"Unloading " + esc_plugin_id + "\");\n"
         "            ctx_ = nullptr;\n"
         "        }\n"
         "    }\n\n"
         "    nlohmann::json onHealthCheck() const override {\n"
-        "        return {{\"ok\", true}, {\"plugin_id\", \"" + opts.plugin_id + "\"}};\n"
+        "        return {{\"ok\", true}, {\"plugin_id\", \"" + esc_plugin_id + "\"}};\n"
         "    }\n\n"
         "private:\n"
         "    omnidesk::PluginContext* ctx_ = nullptr;\n"
         "};\n\n"
         "OMNIDESK_DECLARE_PLUGIN(" + class_name + ",\n"
-        "                        \"" + opts.plugin_id + "\",\n"
-        "                        \"" + display_name + "\",\n"
-        "                        \"" + manifest.version + "\",\n"
-        "                        \"" + toString(opts.kind) + "\",\n"
-        "                        \"" + toString(opts.domain) + "\")\n";
+        "                        \"" + esc_plugin_id + "\",\n"
+        "                        \"" + esc_display_name + "\",\n"
+        "                        \"" + esc_version + "\",\n"
+        "                        \"" + esc_kind + "\",\n"
+        "                        \"" + esc_domain + "\")\n";
 
     const fs::path cpp_file = root / "src" / "plugin_main.cpp";
     if (!writeTextFile(cpp_file, cpp_src)) {

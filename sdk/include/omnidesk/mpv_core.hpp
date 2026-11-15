@@ -149,6 +149,7 @@ public:
 
     void setChapters(std::vector<ChapterSegment> chapters);
     std::vector<ChapterSegment> chapters() const;
+    bool addSubtitleFile(const std::string& path);
     std::optional<ChapterSegment> activeAdSegment(double position_sec) const;
     bool skipActiveAdSegment();
 

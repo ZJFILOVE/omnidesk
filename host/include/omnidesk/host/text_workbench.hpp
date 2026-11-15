@@ -5,10 +5,12 @@
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include "omnidesk/async.hpp"
+#include "omnidesk/comment_tree_view.hpp"
 #include "omnidesk/types.hpp"
 
 namespace omnidesk::host {
@@ -36,6 +38,7 @@ private:
     };
 
     void rebuildCategoryPills();
+    void rebuildChannelPills();
     void rebuildFeed();
     void rebuildReader();
     void renderCommentNode(brls::Box* parent, const CommentNode& node, int depth);
@@ -44,30 +47,51 @@ private:
     void translateActiveArticle();
     void openActiveInChrome();
     void handoffJournalToBabelDoc();
+    void promptDateFilter();
+    void loadCurrentFeed();
     void finishRefresh();
+    void loadProvenance();
 
     std::function<void(const std::string&)> on_entity_focus_;
     std::function<void()> on_open_marketplace_;
 
     std::string active_category_ = "all";
+    std::string active_channel_id_;
     std::string search_query_;
+    // latest | selected | all; dates apply only to the curator archive.
+    std::string curation_scope_ = "latest";
+    std::string curation_date_;
+    std::unordered_map<std::string, std::string> provenance_dates_;
     BilingualMode bilingual_mode_ = BilingualMode::Parallel;
 
     std::vector<TextFeedItem> feed_items_;
+    std::vector<TextChannel> active_channels_;
+    std::vector<std::pair<std::string, std::string>> cached_recipe_pills_;
+    struct CachedTextFeed {
+        std::vector<TextFeedItem> items;
+        std::vector<TextChannel> channels;
+        std::vector<std::pair<std::string, std::string>> recipes;
+    };
+    std::unordered_map<std::string, CachedTextFeed> feed_cache_;
     TextArticle active_article_;
     std::string active_article_source_id_;
     bool has_article_ = false;
     bool translating_ = false;
-    std::set<std::string> collapsed_comments_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<CancelToken> feed_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> article_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> action_request_ = CancelToken::create();
+    std::shared_ptr<CancelToken> translate_request_;
+    uint64_t recommend_sub_ = 0;
 
     brls::Box* category_bar_ = nullptr;
+    brls::Box* channel_bar_ = nullptr;
+    brls::Button* date_filter_btn_ = nullptr;
     brls::Label* status_label_ = nullptr;
     brls::Box* feed_box_ = nullptr;
     brls::Box* reader_box_ = nullptr;
+    brls::Box* reader_article_box_ = nullptr;
+    CommentTreeView* comment_tree_ = nullptr;
 };
 
 } // namespace omnidesk::host

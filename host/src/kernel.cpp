@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include "omnidesk/image_cache.hpp"
 #include "omnidesk/mpv_core.hpp"
+#include "omnidesk/playback_coordinator.hpp"
 #include "omnidesk/pm/process.hpp"
 #include "omnidesk/ui_theme.hpp"
 
@@ -149,6 +150,9 @@ bool HostKernel::init(const char* argv0) {
     bus_ = std::make_unique<EntityBus>();
     domains_ = std::make_unique<DomainRegistry>();
     jobs_ = std::make_unique<JobCenter>(bus_.get(), 2);
+    ui_tasks_ = std::make_unique<UiTaskRunner>(8);
+    search_tasks_ = std::make_unique<UiTaskRunner>(1);
+    search_index_ = std::make_unique<SearchIndexService>();
     workers_ = std::make_unique<WorkerSupervisor>();
     catalog_ = std::make_unique<pm::MarketplaceCatalog>();
     installer_ = std::make_unique<pm::PluginInstaller>(data_root_, sdk_cmake_dir_, pm_exe);
@@ -158,6 +162,19 @@ bool HostKernel::init(const char* argv0) {
     if (!worker_exe.empty()) {
         plugins_->setWorkerExecutable(worker_exe);
     }
+
+    PlaybackCoordinator::instance().configure(
+        (fs::path(data_root_) / "playback_resume.json").string(),
+        capabilities_.get(),
+        bus_.get(),
+        jobs_.get(),
+        ui_tasks_.get());
+    PlaybackCoordinator::instance().registerCapabilities(*capabilities_);
+
+    if (search_index_->open((fs::path(data_root_) / "search_index.db").string())) {
+        search_index_->registerCapability(*capabilities_, domains_.get(), data_root_, config_root_);
+    }
+    mpris_ = std::make_unique<Mpris2Service>(&PlaybackCoordinator::instance());
 
     workers_->setFaultCallback([this](const WorkerFaultEvent& ev) {
         brls::Logger::warning(
@@ -248,6 +265,30 @@ bool HostKernel::init(const char* argv0) {
     // Load previously installed & enabled .so plugins
     plugins_->loadAllEnabled();
 
+    // Hydrate cross-domain SQLite FTS5 index asynchronously on dedicated search lane
+    if (search_index_ && search_index_->isOpen() && search_tasks_) {
+        auto scheduleHydrate = [this]() {
+            if (!search_tasks_ || !search_index_) return;
+            search_tasks_->submitInLane("search.hydrate", [this](const std::shared_ptr<CancelToken>& c) {
+                if (c && c->isCancelled()) return;
+                if (search_index_ && search_index_->isOpen()) {
+                    search_index_->hydrateEcosystem(
+                        domains_.get(), capabilities_.get(), data_root_, config_root_);
+                }
+            });
+        };
+        scheduleHydrate();
+        search_plugin_sub_ = bus_->subscribe(
+            "plugin.state_changed", "host.search_indexer",
+            [scheduleHydrate](const std::string&, const nlohmann::json&) { scheduleHydrate(); });
+        search_recommend_sub_ = bus_->subscribe(
+            "entity.recommend.updated", "host.search_indexer",
+            [scheduleHydrate](const std::string&, const nlohmann::json&) { scheduleHydrate(); });
+        search_vocab_sub_ = bus_->subscribe(
+            "entity.vocab.add", "host.search_indexer",
+            [scheduleHydrate](const std::string&, const nlohmann::json&) { scheduleHydrate(); });
+    }
+
     // Detect SDK ABI drift across all installed plugins and emit diagnostic event
     const auto abi_statuses = installer_->checkInstalledAbiStatus(false);
     nlohmann::json stale_ids = nlohmann::json::array();
@@ -274,19 +315,67 @@ bool HostKernel::init(const char* argv0) {
         });
     }
 
+    control_server_ = std::make_unique<pm::ControlServer>(
+        *capabilities_, *bus_, plugins_.get(), installer_.get());
+    std::string ctrl_err;
+    if (!control_server_->start(&ctrl_err)) {
+        brls::Logger::warning("[HostKernel] ControlServer failed to start: {}", ctrl_err);
+    }
+
     initialized_ = true;
     return true;
+}
+
+void HostKernel::startDesktopServices() {
+    if (!initialized_) return;
+    if (mpris_ && !mpris_->isRunning()) {
+        mpris_->start();
+    }
+}
+
+void HostKernel::stopBackgroundServices() {
+    if (!initialized_ || background_services_stopped_) return;
+    background_services_stopped_ = true;
+    if (control_server_) {
+        control_server_->stop();
+    }
+    if (mpris_) {
+        mpris_->stop();
+    }
+    if (ui_tasks_) {
+        ui_tasks_->shutdown(250);
+    }
+    if (search_tasks_) {
+        search_tasks_->shutdown(250);
+    }
+    if (workers_) {
+        workers_->stopAll();
+    }
+    if (jobs_) {
+        jobs_->shutdown(250);
+    }
 }
 
 void HostKernel::shutdown() {
     if (!initialized_) {
         return;
     }
-    MPVCore::instance().shutdown();
-    ImageCache::instance().shutdown();
-    if (workers_) {
-        workers_->stopAll();
+    if (control_server_) {
+        control_server_->stop();
+        control_server_.reset();
     }
+    if (bus_) {
+        if (search_plugin_sub_ != 0) bus_->unsubscribe(search_plugin_sub_);
+        if (search_recommend_sub_ != 0) bus_->unsubscribe(search_recommend_sub_);
+        if (search_vocab_sub_ != 0) bus_->unsubscribe(search_vocab_sub_);
+    }
+    search_plugin_sub_ = 0;
+    search_recommend_sub_ = 0;
+    search_vocab_sub_ = 0;
+    if (mpris_) {
+        mpris_->stop();
+    }
+    PlaybackCoordinator::instance().shutdown();
     const int grace_ms = JobCenter::defaultShutdownGraceMs();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(grace_ms);
     auto remainingMs = [&deadline]() -> int {
@@ -294,6 +383,20 @@ void HostKernel::shutdown() {
             deadline - std::chrono::steady_clock::now()).count();
         return rem > 0 ? static_cast<int>(rem) : 0;
     };
+    if (ui_tasks_) {
+        ui_tasks_->shutdown(remainingMs());
+    }
+    if (search_tasks_) {
+        search_tasks_->shutdown(remainingMs());
+    }
+    if (plugins_) {
+        plugins_->unloadAll();
+    }
+    MPVCore::instance().shutdown();
+    ImageCache::instance().shutdown();
+    if (workers_) {
+        workers_->stopAll();
+    }
     if (jobs_) {
         jobs_->shutdown(remainingMs());
     }
@@ -303,12 +406,10 @@ void HostKernel::shutdown() {
     if (domains_) {
         domains_->shutdown(remainingMs());
     }
-    if (plugins_) {
-        plugins_->unloadAll();
-    }
-    if (workers_) {
-        workers_->stopAll();
-    }
+    mpris_.reset();
+    search_index_.reset();
+    search_tasks_.reset();
+    ui_tasks_.reset();
     plugins_.reset();
     installer_.reset();
     catalog_.reset();
@@ -320,6 +421,11 @@ void HostKernel::shutdown() {
     secrets_.reset();
     config_.reset();
     initialized_ = false;
+    background_services_stopped_ = false;
+}
+
+std::string HostKernel::controlSocketPath() const {
+    return control_server_ ? control_server_->socketPath() : std::string{};
 }
 
 bool HostKernel::isDarkTheme() const {

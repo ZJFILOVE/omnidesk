@@ -52,9 +52,20 @@ public:
     virtual ~ITextSource() = default;
     virtual std::string sourceId() const = 0;
     virtual std::string displayName() const = 0;
-    virtual std::string category() const = 0; ///< "blog" | "zhihu" | "linuxdo" | "reddit" | "journal"
+    virtual std::string category() const = 0; ///< "blog" | "zhihu" | "linuxdo" | "shuiyuan" | "v2ex" | "reddit" | "x" | "journal"
+    virtual std::vector<TextChannel> channels() const { return {}; }
     virtual std::vector<TextFeedItem> fetchFeed(const std::string& query = "") = 0;
+    virtual std::vector<TextFeedItem> fetchFeedInChannel(const std::string& channel_id,
+                                                         const std::string& query = "") {
+        (void)channel_id;
+        return fetchFeed(query);
+    }
     virtual std::shared_ptr<CancelToken> fetchFeedAsync(
+        const std::string& query,
+        std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
+        std::shared_ptr<CancelToken> cancel = nullptr);
+    virtual std::shared_ptr<CancelToken> fetchFeedInChannelAsync(
+        const std::string& channel_id,
         const std::string& query,
         std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
         std::shared_ptr<CancelToken> cancel = nullptr);
@@ -99,7 +110,7 @@ struct DockWidgetSpec {
     ViewFactory create_view;
 };
 
-#define OMNIDESK_DOMAIN_INTERFACE_REVISION 2u
+#define OMNIDESK_DOMAIN_INTERFACE_REVISION 3u
 
 /**
  * Registry connecting decoupled .so plugins to the Host Workspace Shell,

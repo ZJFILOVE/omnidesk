@@ -9,6 +9,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -503,6 +504,12 @@ int main() {
         omnidesk::fromJson(omnidesk::toJson(tfi), tfi_out);
         TEST_CHECK(tfi_out.tags.size() == 2 && tfi_out.tags[1] == "ipc" && tfi_out.bilingual_cached);
 
+        omnidesk::TextChannel tch{"hot", "热榜", "50", true};
+        omnidesk::TextChannel tch_out;
+        omnidesk::fromJson(omnidesk::toJson(tch), tch_out);
+        TEST_CHECK(tch_out.id == "hot" && tch_out.name == "热榜" &&
+                   tch_out.badge == "50" && tch_out.requires_auth);
+
         omnidesk::CommentNode child_c{"c2", "bob", "mod", "reply", "回复", "2026-01-01", 2, false, {}};
         omnidesk::CommentNode root_c{"c1", "alice", "op", "root", "主楼", "2026-01-01", 5, true, {child_c}};
         omnidesk::TextArticle art;
@@ -613,8 +620,15 @@ int main() {
             std::string sourceId() const override { return "throw-text"; }
             std::string displayName() const override { return "Throw Text"; }
             std::string category() const override { return "blog"; }
+            std::vector<omnidesk::TextChannel> channels() const override {
+                throw std::runtime_error("channels boom");
+            }
             std::vector<omnidesk::TextFeedItem> fetchFeed(const std::string&) override {
                 throw std::runtime_error("text feed boom");
+            }
+            std::vector<omnidesk::TextFeedItem> fetchFeedInChannel(const std::string&,
+                                                                 const std::string&) override {
+                throw std::runtime_error("channel feed boom");
             }
             omnidesk::TextArticle fetchArticle(const std::string&) override {
                 throw std::runtime_error("article boom");
@@ -649,7 +663,9 @@ int main() {
         TEST_CHECK(m_srcs[0]->fetchLyrics("1").empty());
 
         auto t_srcs = domains.textSources();
-        TEST_CHECK(t_srcs.size() == 1 && t_srcs[0]->fetchFeed("").empty());
+        TEST_CHECK(t_srcs.size() == 1 && t_srcs[0]->channels().empty());
+        TEST_CHECK(t_srcs[0]->fetchFeed("").empty());
+        TEST_CHECK(t_srcs[0]->fetchFeedInChannel("hot", "").empty());
         TEST_CHECK(t_srcs[0]->fetchArticle("1").title.empty());
 
         auto b_srcs = domains.bookSources();
@@ -1146,6 +1162,1258 @@ for line in rx:
         TEST_CHECK(dom_finished.load());
     }
 
-    std::cout << "test_sdk_bus: ALL PASSED (16/16 suites)\n";
+    // 17. RemoteBridge (CapabilityRegistry + EntityBus) & full-duplex WorkerSupervisor + WorkerHostBridge
+    {
+        const fs::path dup_root = fs::temp_directory_path() / ("omnidesk_duplex_test_" + std::to_string(getpid()));
+        fs::remove_all(dup_root, ec);
+        fs::create_directories(dup_root, ec);
+
+        // 17a. CapabilityRegistry RemoteBridge priority & merge
+        {
+            omnidesk::CapabilityRegistry local_caps;
+            local_caps.registerCapability("shared.v1", "plugin-local", [](const nlohmann::json&) {
+                return omnidesk::CapabilityResult{true, {{"from", "local"}}, "", "plugin-local"};
+            }, {}, 100);
+
+            auto rb = std::make_shared<omnidesk::CapabilityRegistry::RemoteBridge>();
+            rb->has = [](const std::string& cid) { return cid == "remote.only.v1" || cid == "shared.v1"; };
+            rb->providers_for = [](const std::string& cid) -> std::vector<omnidesk::CapabilityDescriptor> {
+                if (cid == "shared.v1") {
+                    return {{"shared.v1", "plugin-remote", 250, {}}, {"shared.v1", "plugin-local", 100, {}}};
+                }
+                if (cid == "remote.only.v1") {
+                    return {{"remote.only.v1", "plugin-remote", 150, {}}};
+                }
+                return {};
+            };
+            rb->list_all = []() -> std::vector<omnidesk::CapabilityDescriptor> {
+                return {{"shared.v1", "plugin-remote", 250, {}},
+                        {"shared.v1", "plugin-local", 100, {}},
+                        {"remote.only.v1", "plugin-remote", 150, {}}};
+            };
+            rb->invoke = [](const std::string& pid_filter,
+                            const std::string& cid,
+                            const nlohmann::json&,
+                            const omnidesk::StreamCallback&,
+                            const std::shared_ptr<omnidesk::CancelToken>&,
+                            bool) -> omnidesk::CapabilityResult {
+                return {true, {{"from", "remote"}, {"cid", cid}, {"filter", pid_filter}}, "", "plugin-remote"};
+            };
+            local_caps.setRemoteBridge(rb);
+            TEST_CHECK(local_caps.has("remote.only.v1"));
+            auto provs = local_caps.providersFor("shared.v1");
+            TEST_CHECK(provs.size() == 2 && provs[0].plugin_id == "plugin-remote" && provs[1].plugin_id == "plugin-local");
+            TEST_CHECK(local_caps.listAll().size() == 3);
+            // Higher-priority remote wins default call()
+            auto r_shared = local_caps.call("shared.v1", {});
+            TEST_CHECK(r_shared.ok && r_shared.data["from"] == "remote");
+            // Explicit callProvider("plugin-local", ...) executes locally
+            auto r_loc = local_caps.callProvider("plugin-local", "shared.v1", {});
+            TEST_CHECK(r_loc.ok && r_loc.data["from"] == "local");
+            local_caps.setRemoteBridge(nullptr);
+        }
+
+        // 17b. EntityBus RemoteBridge refcounted subscriptions & echo-free publish
+        {
+            omnidesk::EntityBus eb;
+            int sub_calls = 0;
+            int unsub_calls = 0;
+            int pub_calls = 0;
+            auto bb = std::make_shared<omnidesk::EntityBus::RemoteBridge>();
+            bb->on_subscribe = [&](const std::string& t) { if (t == "t.alpha") ++sub_calls; };
+            bb->on_unsubscribe = [&](const std::string& t) { if (t == "t.alpha") ++unsub_calls; };
+            bb->on_publish = [&](const std::string&, const nlohmann::json&) -> size_t {
+                ++pub_calls;
+                return 3;
+            };
+            eb.setRemoteBridge(bb);
+
+            auto t1 = eb.subscribe("t.alpha", "o1", [](const std::string&, const nlohmann::json&) {});
+            auto t2 = eb.subscribe("t.alpha", "o2", [](const std::string&, const nlohmann::json&) {});
+            TEST_CHECK(sub_calls == 1 && unsub_calls == 0);
+            eb.unsubscribe(t1);
+            TEST_CHECK(unsub_calls == 0);
+            eb.unsubscribeOwner("o2");
+            TEST_CHECK(unsub_calls == 1);
+
+            int local_seen = 0;
+            eb.subscribe("t.beta", "o1", [&](const std::string&, const nlohmann::json&) { ++local_seen; });
+            TEST_CHECK(eb.publish("t.beta", {{"k", 1}}) == 4);
+            TEST_CHECK(local_seen == 1 && pub_calls == 1);
+            TEST_CHECK(eb.publishLocalOnly("t.beta", {{"k", 2}}) == 1);
+            TEST_CHECK(local_seen == 2 && pub_calls == 1);
+            TEST_CHECK(eb.publishExcludingOwner("t.beta", {{"k", 3}}, "o1") == 0);
+            TEST_CHECK(local_seen == 2);
+            eb.setRemoteBridge(nullptr);
+        }
+
+        // 17c. Full-duplex WorkerSupervisor + WorkerHostBridge (pipe & unix_socket):
+        //      concurrent calls, worker->host streaming + cancel, re-entrant calls, and bus events
+        const fs::path dup_script = dup_root / "duplex_worker.py";
+        {
+            std::ofstream script(dup_script);
+            script << R"PY(
+import json, os, socket, sys, threading
+
+sock_fd = os.environ.get("OMNIDESK_WORKER_SOCKET_FD", "")
+sock_path = os.environ.get("OMNIDESK_WORKER_SOCKET", "")
+if sock_fd:
+    fd = int(sock_fd)
+    rx = os.fdopen(fd, "r", encoding="utf-8", closefd=False)
+    tx = os.fdopen(fd, "w", encoding="utf-8", closefd=False)
+elif sock_path:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(sock_path)
+    rx = sock.makefile("r", encoding="utf-8")
+    tx = sock.makefile("w", encoding="utf-8")
+else:
+    rx, tx = sys.stdin, sys.stdout
+
+tx_lock = threading.Lock()
+out_lock = threading.Lock()
+pending_out = {}
+seq = 0
+seen_events = []
+events_lock = threading.Lock()
+
+def send_json(obj):
+    with tx_lock:
+        tx.write(json.dumps(obj) + "\n")
+        tx.flush()
+
+def call_host(op, body, stream=False, on_chunk=None):
+    global seq
+    with out_lock:
+        seq += 1
+        rid = f"w-{seq}"
+        ev = threading.Event()
+        entry = {"ev": ev, "resp": None, "on_chunk": on_chunk}
+        pending_out[rid] = entry
+    msg = dict(body)
+    msg["kind"] = "req"
+    msg["id"] = rid
+    msg["op"] = op
+    if stream:
+        msg["stream"] = True
+    send_json(msg)
+    ev.wait(timeout=10.0)
+    with out_lock:
+        pending_out.pop(rid, None)
+    return entry["resp"] or {"ok": False, "error": "timeout"}
+
+def handle_req(msg):
+    rid = msg.get("id", "")
+    op = msg.get("op", "")
+    if op == "ping":
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": True, "data": {"pong": True}})
+    elif op == "call_host_cap":
+        r = call_host("host.cap.invoke", {"capability_id": "host.echo.v1", "request": {"msg": msg.get("msg", "")}})
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": r.get("ok", False), "data": r.get("data", {})})
+    elif op == "call_host_stream_cancel":
+        chunks = []
+        def on_ch(ch):
+            d = ch.get("delta", "")
+            if d:
+                chunks.append(d)
+                if len(chunks) >= 2:
+                    # cancel outbound host call
+                    pass
+        # Use manual id so we can send cancel after 2 chunks
+        global seq
+        with out_lock:
+            seq += 1
+            hrid = f"w-{seq}"
+            ev = threading.Event()
+            def cancel_on_2(ch):
+                if ch.get("delta"):
+                    chunks.append(ch["delta"])
+                    if len(chunks) == 2:
+                        send_json({"kind": "cancel", "id": hrid})
+            pending_out[hrid] = {"ev": ev, "resp": None, "on_chunk": cancel_on_2}
+        send_json({"kind": "req", "id": hrid, "op": "host.cap.invoke", "capability_id": "host.slow_stream.v1", "stream": True, "request": {}})
+        ev.wait(timeout=5.0)
+        with out_lock:
+            resp = pending_out.pop(hrid, {}).get("resp") or {}
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": True, "data": {"chunks": chunks, "cancelled": resp.get("cancelled", False)}})
+    elif op == "reenter":
+        r = call_host("host.cap.invoke", {"capability_id": "host.reenter.v1", "request": {"v": msg.get("v", 1)}})
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": r.get("ok", False), "data": r.get("data", {})})
+    elif op == "leaf":
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": True, "data": {"leaf_val": msg.get("v", 0) + 10}})
+    elif op == "sub_topic":
+        r = call_host("host.bus.subscribe", {"topic": msg.get("topic", "")})
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": r.get("ok", False), "data": r.get("data", {})})
+    elif op == "pub_topic":
+        r = call_host("host.bus.publish", {"topic": msg.get("topic", ""), "payload": msg.get("payload", {})})
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": r.get("ok", False), "data": r.get("data", {})})
+    elif op == "get_events":
+        with events_lock:
+            evs = list(seen_events)
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": True, "data": {"events": evs}})
+    else:
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": False, "error": "unknown op"})
+
+for line in rx:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    kind = msg.get("kind", "")
+    rid = msg.get("id", "")
+    if kind == "chunk" and rid:
+        with out_lock:
+            entry = pending_out.get(rid)
+        if entry and entry["on_chunk"]:
+            entry["on_chunk"](msg)
+    elif kind == "resp" and rid:
+        with out_lock:
+            entry = pending_out.get(rid)
+        if entry:
+            entry["resp"] = msg
+            entry["ev"].set()
+    elif kind == "event":
+        if msg.get("op") == "host.bus.event":
+            with events_lock:
+                seen_events.append({"topic": msg.get("topic"), "payload": msg.get("payload")})
+    elif kind == "req":
+        threading.Thread(target=handle_req, args=(msg,), daemon=True).start()
+)PY";
+        }
+
+        for (auto transport : {omnidesk::WorkerTransport::StdioPipe, omnidesk::WorkerTransport::UnixSocket}) {
+            omnidesk::CapabilityRegistry host_caps;
+            omnidesk::EntityBus host_bus;
+            omnidesk::WorkerSupervisor sup;
+
+            host_caps.registerCapability("host.echo.v1", "host.test", [](const nlohmann::json& req) {
+                return omnidesk::CapabilityResult{true, {{"echoed", req.value("msg", "")}}, "", "host.test"};
+            });
+            host_caps.registerStreamingCapability("host.slow_stream.v1", "host.test",
+                [](const nlohmann::json&,
+                   const std::shared_ptr<omnidesk::CancelToken>& cancel,
+                   const omnidesk::StreamCallback& on_chunk) {
+                    for (int i = 0; i < 30; ++i) {
+                        if (cancel && cancel->isCancelled()) {
+                            return omnidesk::CapabilityResult{false, {}, "cancelled", "host.test", true};
+                        }
+                        if (on_chunk) on_chunk({"tok" + std::to_string(i), nlohmann::json::object(), "delta", false});
+                        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                    }
+                    return omnidesk::CapabilityResult{true, {}, "", "host.test", false};
+                });
+            host_caps.registerCapability("host.reenter.v1", "host.test", [&](const nlohmann::json& req) {
+                auto res = sup.request("dup-w", {{"op", "leaf"}, {"v", req.value("v", 0)}});
+                return res;
+            });
+
+            omnidesk::WorkerSpec spec;
+            spec.worker_id = "dup-w";
+            spec.plugin_id = "plugin-dup";
+            spec.executable = "python3";
+            spec.args = {"-u", dup_script.string()};
+            spec.transport = transport;
+            spec.duplex = true;
+            TEST_CHECK(sup.registerWorker(spec));
+            auto bridge = omnidesk::attachWorkerHostBridge(sup, "dup-w", "plugin-dup", host_caps, host_bus);
+
+            // Worker -> Host capability call
+            auto r_hc = sup.request("dup-w", {{"op", "call_host_cap"}, {"msg", "hi-host"}});
+            TEST_CHECK(r_hc.ok && r_hc.data["echoed"] == "hi-host");
+
+            // Worker -> Host streaming + mid-stream cancel
+            auto r_sc = sup.request("dup-w", {{"op", "call_host_stream_cancel"}});
+            TEST_CHECK(r_sc.ok && r_sc.data["cancelled"] == true);
+            TEST_CHECK(r_sc.data["chunks"].size() >= 2 && r_sc.data["chunks"].size() < 30);
+
+            // Re-entrant call: Host -> Worker("reenter") -> Host("host.reenter.v1") -> Worker("leaf")
+            auto r_re = sup.request("dup-w", {{"op", "reenter"}, {"v", 32}});
+            TEST_CHECK(r_re.ok && r_re.data["leaf_val"] == 42);
+
+            // Bus forwarding: Host -> Worker and Worker -> Host (no echo back to same worker!)
+            int host_observed = 0;
+            auto h_tok = host_bus.subscribe("dup.topic", "host.observer",
+                [&](const std::string&, const nlohmann::json& p) {
+                    if (p.value("from", "") == "worker") ++host_observed;
+                });
+            TEST_CHECK(sup.request("dup-w", {{"op", "sub_topic"}, {"topic", "dup.topic"}}).ok);
+            TEST_CHECK(sup.request("dup-w", {{"op", "sub_topic"}, {"topic", "*"}}).ok);
+            host_bus.publish("dup.topic", {{"from", "host"}});
+            TEST_CHECK(sup.request("dup-w", {{"op", "pub_topic"}, {"topic", "dup.topic"}, {"payload", {{"from", "worker"}}}}).ok);
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            auto evs = sup.request("dup-w", {{"op", "get_events"}});
+            TEST_CHECK(evs.ok && evs.data["events"].size() == 1);
+            TEST_CHECK(evs.data["events"][0]["payload"]["from"] == "host");
+            TEST_CHECK(host_observed == 1);
+
+            host_bus.unsubscribe(h_tok);
+            bridge->detach();
+            sup.unregisterWorker("dup-w");
+            sup.stopAll();
+        }
+        fs::remove_all(dup_root, ec);
+    }
+
+    // 18. CapabilityRegistry: provider-scoped cancellation (no cross-plugin collateral cancel) & detached-worker safety
+    {
+        omnidesk::CapabilityRegistry reg;
+        std::atomic<bool> b_async_entered{false};
+        std::atomic<bool> b_stream_entered{false};
+        std::atomic<bool> allow_b_finish{false};
+        std::atomic<bool> b_collateral_cancelled{false};
+        std::atomic<int> a_entered{0};
+        std::atomic<int> a_cancelled_inside{0};
+
+        TEST_CHECK(reg.registerStreamingCapability(
+            "cap.b.async.v1", "pluginB",
+            [&](const nlohmann::json&,
+                const std::shared_ptr<omnidesk::CancelToken>& cancel,
+                const omnidesk::StreamCallback&) -> omnidesk::CapabilityResult {
+                b_async_entered.store(true);
+                for (int i = 0; i < 600 && !allow_b_finish.load(); ++i) {
+                    if (cancel && cancel->isCancelled()) {
+                        b_collateral_cancelled.store(true);
+                        return {false, {}, "cancelled", "pluginB", true};
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (cancel && cancel->isCancelled()) {
+                    b_collateral_cancelled.store(true);
+                    return {false, {}, "cancelled", "pluginB", true};
+                }
+                return {true, {{"ok_from", "pluginB"}}, "", "pluginB", false};
+            }));
+
+        TEST_CHECK(reg.registerStreamingCapability(
+            "cap.b.stream.v1", "pluginB",
+            [&](const nlohmann::json&,
+                const std::shared_ptr<omnidesk::CancelToken>& cancel,
+                const omnidesk::StreamCallback& on_chunk) -> omnidesk::CapabilityResult {
+                if (on_chunk) on_chunk({"b-chunk", nlohmann::json::object(), "delta", false});
+                b_stream_entered.store(true);
+                for (int i = 0; i < 600 && !allow_b_finish.load(); ++i) {
+                    if (cancel && cancel->isCancelled()) {
+                        b_collateral_cancelled.store(true);
+                        return {false, {}, "cancelled", "pluginB", true};
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (cancel && cancel->isCancelled()) {
+                    b_collateral_cancelled.store(true);
+                    return {false, {}, "cancelled", "pluginB", true};
+                }
+                return {true, {{"stream_from", "pluginB"}}, "", "pluginB", false};
+            }));
+
+        TEST_CHECK(reg.registerStreamingCapability(
+            "cap.a.v1", "pluginA",
+            [&](const nlohmann::json&,
+                const std::shared_ptr<omnidesk::CancelToken>& cancel,
+                const omnidesk::StreamCallback&) -> omnidesk::CapabilityResult {
+                a_entered.fetch_add(1);
+                for (int i = 0; i < 600; ++i) {
+                    if (cancel && cancel->isCancelled()) {
+                        a_cancelled_inside.fetch_add(1);
+                        return {false, {}, "cancelled", "pluginA", true};
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                return {true, {{"from", "pluginA"}}, "", "pluginA", false};
+            }));
+
+        std::atomic<bool> async_b_done{false};
+        omnidesk::CapabilityResult async_b_res;
+        reg.callAsync("cap.b.async.v1", {}, [&](const omnidesk::CapabilityResult& res) {
+            async_b_res = res;
+            async_b_done.store(true);
+        });
+
+        std::atomic<bool> stream_b_done{false};
+        std::atomic<int> stream_b_chunks{0};
+        omnidesk::CapabilityResult stream_b_res;
+        reg.callStreamAsync(
+            "cap.b.stream.v1",
+            {},
+            [&](const omnidesk::StreamChunk& ch) {
+                if (!ch.delta.empty()) stream_b_chunks.fetch_add(1);
+            },
+            [&](const omnidesk::CapabilityResult& res) {
+                stream_b_res = res;
+                stream_b_done.store(true);
+            });
+
+        std::atomic<bool> async_a_done{false};
+        omnidesk::CapabilityResult async_a_res;
+        reg.callAsync("cap.a.v1", {}, [&](const omnidesk::CapabilityResult& res) {
+            async_a_res = res;
+            async_a_done.store(true);
+        });
+
+        omnidesk::CapabilityResult sync_a_res;
+        auto sync_a_tok = omnidesk::CancelToken::create();
+        std::thread sync_a_thread([&]() {
+            sync_a_res = reg.callCancellable("cap.a.v1", {}, sync_a_tok);
+        });
+
+        for (int i = 0; i < 400; ++i) {
+            if (b_async_entered.load() && b_stream_entered.load() && a_entered.load() == 2) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(b_async_entered.load() && b_stream_entered.load() && a_entered.load() == 2);
+
+        // Unloading pluginA must cancel both sync callCancellable and dynamic callAsync on pluginA,
+        // while leaving pluginB's in-flight callAsync & callStreamAsync completely untouched.
+        reg.unregisterPlugin("pluginA");
+        sync_a_thread.join();
+        for (int i = 0; i < 200 && !async_a_done.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(sync_a_res.cancelled && !sync_a_res.ok);
+        TEST_CHECK(async_a_done.load() && async_a_res.cancelled && !async_a_res.ok);
+        TEST_CHECK(a_cancelled_inside.load() == 2);
+        TEST_CHECK(!reg.hasInFlight("pluginA"));
+        TEST_CHECK(!b_collateral_cancelled.load());
+        TEST_CHECK(!async_b_done.load() && !stream_b_done.load());
+
+        allow_b_finish.store(true);
+        for (int i = 0; i < 200 && (!async_b_done.load() || !stream_b_done.load()); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(async_b_done.load() && async_b_res.ok && !async_b_res.cancelled);
+        TEST_CHECK(stream_b_done.load() && stream_b_res.ok && !stream_b_res.cancelled);
+        TEST_CHECK(stream_b_chunks.load() >= 1);
+        TEST_CHECK(!b_collateral_cancelled.load());
+        reg.shutdown();
+
+        // Detached worker after shutdown(grace) + registry destruction must not UAF `this`
+        std::atomic<bool> det_entered{false};
+        std::atomic<bool> det_exited{false};
+        std::atomic<bool> late_cb_called{false};
+        {
+            omnidesk::CapabilityRegistry short_lived;
+            short_lived.registerCapability("det.cap.v1", "plugin-det",
+                [&](const nlohmann::json&) -> omnidesk::CapabilityResult {
+                    det_entered.store(true);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    det_exited.store(true);
+                    return {true, {{"done", true}}, "", "plugin-det", false};
+                });
+            short_lived.callAsync("det.cap.v1", {}, [&](const omnidesk::CapabilityResult&) {
+                late_cb_called.store(true);
+            });
+            for (int i = 0; i < 200 && !det_entered.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            TEST_CHECK(det_entered.load());
+            short_lived.shutdown(15);
+        }
+        for (int i = 0; i < 200 && !det_exited.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(det_exited.load());
+        TEST_CHECK(!late_cb_called.load());
+    }
+
+    // 19. WorkerHostBridge: host.cap.invoke self-routing ping-pong prevention
+    {
+        const fs::path loop_root = fs::temp_directory_path() / ("omnidesk_selfloop_test_" + std::to_string(getpid()));
+        fs::remove_all(loop_root, ec);
+        fs::create_directories(loop_root, ec);
+        const fs::path worker_py = loop_root / "self_loop_worker.py";
+        {
+            std::ofstream ofs(worker_py);
+            ofs << R"PY(
+import json, os, sys, threading
+
+rx, tx = sys.stdin, sys.stdout
+tx_lock = threading.Lock()
+out_lock = threading.Lock()
+pending = {}
+seq = 0
+self_cap_hits = 0
+hits_lock = threading.Lock()
+
+def send_json(obj):
+    with tx_lock:
+        tx.write(json.dumps(obj) + "\n")
+        tx.flush()
+
+def call_host_cap(target_pid, cap_id, stream=False):
+    global seq
+    chunks = []
+    with out_lock:
+        seq += 1
+        rid = f"s-{seq}"
+        ev = threading.Event()
+        pending[rid] = {"ev": ev, "resp": None, "chunks": chunks}
+    send_json({
+        "kind": "req",
+        "id": rid,
+        "op": "host.cap.invoke",
+        "plugin_id": target_pid,
+        "capability_id": cap_id,
+        "stream": stream,
+        "request": {"ping": 1},
+    })
+    ev.wait(timeout=3.0)
+    with out_lock:
+        entry = pending.pop(rid, None)
+    resp = (entry or {}).get("resp") or {"ok": False, "error": "timeout"}
+    return resp, chunks
+
+def handle_req(msg):
+    global self_cap_hits
+    rid = msg.get("id", "")
+    op = msg.get("op", "")
+    if op == "cap.invoke":
+        with hits_lock:
+            self_cap_hits += 1
+            cur = self_cap_hits
+        if cur <= 2:
+            r, _ = call_host_cap("", msg.get("capability_id", "shared.cap.v1"), False)
+            send_json({"kind": "resp", "id": rid, "done": True, "ok": r.get("ok", False), "error": r.get("error", ""), "data": r.get("data", {})})
+        else:
+            send_json({"kind": "resp", "id": rid, "done": True, "ok": False, "error": "infinite loop detected"})
+    elif op == "test_invoke":
+        r, ch = call_host_cap(msg.get("target_plugin_id", ""), msg.get("capability_id", "shared.cap.v1"), bool(msg.get("stream", False)))
+        with hits_lock:
+            hits = self_cap_hits
+        send_json({
+            "kind": "resp",
+            "id": rid,
+            "done": True,
+            "ok": True,
+            "data": {
+                "inner_ok": r.get("ok", False),
+                "inner_error": r.get("error", ""),
+                "inner_data": r.get("data", {}),
+                "chunks": ch,
+                "self_hits": hits,
+            },
+        })
+    else:
+        send_json({"kind": "resp", "id": rid, "done": True, "ok": False, "error": "unknown op"})
+
+for line in rx:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    kind = msg.get("kind", "")
+    rid = msg.get("id", "")
+    if kind == "chunk" and rid:
+        with out_lock:
+            entry = pending.get(rid)
+        if entry is not None and msg.get("delta"):
+            entry["chunks"].append(msg["delta"])
+    elif kind == "resp" and rid:
+        with out_lock:
+            entry = pending.get(rid)
+        if entry is not None:
+            entry["resp"] = msg
+            entry["ev"].set()
+    elif kind == "req":
+        threading.Thread(target=handle_req, args=(msg,), daemon=True).start()
+)PY";
+        }
+
+        omnidesk::CapabilityRegistry host_caps;
+        omnidesk::EntityBus host_bus;
+        omnidesk::WorkerSupervisor sup;
+
+        omnidesk::WorkerSpec spec;
+        spec.worker_id = "self-w";
+        spec.plugin_id = "plugin-self";
+        spec.executable = "python3";
+        spec.args = {"-u", worker_py.string()};
+        spec.duplex = true;
+        TEST_CHECK(sup.registerWorker(spec));
+        auto bridge = omnidesk::attachWorkerHostBridge(sup, "self-w", "plugin-self", host_caps, host_bus);
+
+        // Register plugin-self on host_caps at highest priority (300) pointing right back into self-w
+        TEST_CHECK(host_caps.registerStreamingCapability(
+            "shared.cap.v1",
+            "plugin-self",
+            omnidesk::makeWorkerStreamCapabilityHandler(sup, "self-w", "shared.cap.v1"),
+            {},
+            300));
+
+        // 19a. Explicit plugin_id == worker's own plugin_id is rejected immediately without calling worker back
+        auto r_explicit = sup.request("self-w", {
+            {"op", "test_invoke"},
+            {"target_plugin_id", "plugin-self"},
+            {"capability_id", "shared.cap.v1"},
+            {"stream", false},
+        });
+        TEST_CHECK(r_explicit.ok);
+        TEST_CHECK(!r_explicit.data["inner_ok"].get<bool>());
+        TEST_CHECK(!r_explicit.data["inner_error"].get<std::string>().empty());
+        TEST_CHECK(r_explicit.data["self_hits"].get<int>() == 0);
+
+        // 19b. Empty plugin_id when ONLY plugin-self is registered fails cleanly without ping-pong
+        auto r_only_self = sup.request("self-w", {
+            {"op", "test_invoke"},
+            {"target_plugin_id", ""},
+            {"capability_id", "shared.cap.v1"},
+            {"stream", false},
+        });
+        TEST_CHECK(r_only_self.ok);
+        TEST_CHECK(!r_only_self.data["inner_ok"].get<bool>());
+        TEST_CHECK(r_only_self.data["inner_error"].get<std::string>() == "capability not available: shared.cap.v1");
+        TEST_CHECK(r_only_self.data["self_hits"].get<int>() == 0);
+
+        // 19c. Empty plugin_id routes to highest-priority OTHER provider even when plugin-self has higher priority
+        TEST_CHECK(host_caps.registerStreamingCapability(
+            "shared.cap.v1",
+            "plugin-fallback",
+            [](const nlohmann::json&,
+               const std::shared_ptr<omnidesk::CancelToken>&,
+               const omnidesk::StreamCallback& on_chunk) -> omnidesk::CapabilityResult {
+                if (on_chunk) on_chunk({"fb-delta", nlohmann::json::object(), "delta", false});
+                return {true, {{"provider", "plugin-fallback"}}, "", "plugin-fallback", false};
+            },
+            {},
+            150));
+        TEST_CHECK(host_caps.registerCapability(
+            "shared.cap.v1",
+            "plugin-lower",
+            [](const nlohmann::json&) -> omnidesk::CapabilityResult {
+                return {true, {{"provider", "plugin-lower"}}, "", "plugin-lower", false};
+            },
+            {},
+            50));
+
+        auto r_routed = sup.request("self-w", {
+            {"op", "test_invoke"},
+            {"target_plugin_id", ""},
+            {"capability_id", "shared.cap.v1"},
+            {"stream", false},
+        });
+        TEST_CHECK(r_routed.ok);
+        TEST_CHECK(r_routed.data["inner_ok"].get<bool>());
+        TEST_CHECK(r_routed.data["inner_data"]["provider"] == "plugin-fallback");
+        TEST_CHECK(r_routed.data["self_hits"].get<int>() == 0);
+
+        auto r_routed_stream = sup.request("self-w", {
+            {"op", "test_invoke"},
+            {"target_plugin_id", ""},
+            {"capability_id", "shared.cap.v1"},
+            {"stream", true},
+        });
+        TEST_CHECK(r_routed_stream.ok);
+        TEST_CHECK(r_routed_stream.data["inner_ok"].get<bool>());
+        TEST_CHECK(r_routed_stream.data["inner_data"]["provider"] == "plugin-fallback");
+        TEST_CHECK(r_routed_stream.data["chunks"].size() == 1 && r_routed_stream.data["chunks"][0] == "fb-delta");
+        TEST_CHECK(r_routed_stream.data["self_hits"].get<int>() == 0);
+
+        bridge->detach();
+        sup.unregisterWorker("self-w");
+        sup.stopAll();
+        fs::remove_all(loop_root, ec);
+    }
+
+    // 20. ConfigStore, SecretVault & ImageCache path traversal rejection + PluginContext::logs() synchronization
+    {
+        const fs::path sec_root = fs::temp_directory_path() / ("omnidesk_cfg_sec_" + std::to_string(getpid()));
+        fs::remove_all(sec_root, ec);
+        fs::create_directories(sec_root, ec);
+
+        omnidesk::ConfigStore cfg(sec_root.string());
+        omnidesk::SecretVault vault(sec_root.string());
+
+        TEST_CHECK(cfg.saveHostConfig({{"window_theme", "nord"}}));
+        TEST_CHECK(vault.setSecret("plugin-legit", "token", "top-secret-value"));
+
+        // BookWorkbench relies on "host-book-vocab"
+        TEST_CHECK(cfg.savePluginConfig("host-book-vocab", {{"cards", nlohmann::json::array({"w1", "w2"})}}));
+        TEST_CHECK(cfg.loadPluginConfig("host-book-vocab")["cards"].size() == 2);
+        TEST_CHECK(vault.setSecret("host-book-vocab", "sync_key", "ok-123"));
+        TEST_CHECK(vault.getSecret("host-book-vocab", "sync_key") == std::optional<std::string>("ok-123"));
+        TEST_CHECK(vault.listKeys("host-book-vocab").size() == 1);
+
+        const std::vector<std::string> bad_ids = {
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "../vault",
+            "../host",
+            "sub/plugin",
+            "sub\\plugin",
+            "plugin..bad",
+            "plugin\nbad",
+            std::string("bad\0id", 6),
+        };
+        for (const auto& bad : bad_ids) {
+            auto loaded = cfg.loadPluginConfig(bad);
+            TEST_CHECK(loaded.is_object() && loaded.empty());
+            TEST_CHECK(!cfg.savePluginConfig(bad, {{"tamper", true}}));
+            TEST_CHECK(!cfg.setPluginValue(bad, "tamper", "yes"));
+            TEST_CHECK(cfg.getPluginValue(bad, "window_theme", "fallback") == "fallback");
+            TEST_CHECK(!cfg.removePluginConfig(bad));
+
+            TEST_CHECK(!vault.setSecret(bad, "k", "v"));
+            TEST_CHECK(!vault.getSecret(bad, "token").has_value());
+            TEST_CHECK(!vault.hasSecret(bad, "token"));
+            TEST_CHECK(!vault.deleteSecret(bad, "token"));
+            TEST_CHECK(!vault.purgePlugin(bad));
+            TEST_CHECK(vault.listKeys(bad).empty());
+        }
+
+        // Verify vault.json and host.json were neither exposed nor modified/deleted
+        TEST_CHECK(cfg.loadHostConfig().value("window_theme", "") == "nord");
+        TEST_CHECK(vault.getSecret("plugin-legit", "token") == std::optional<std::string>("top-secret-value"));
+
+        // ImageCache raw key validation
+        omnidesk::ImageCacheConfig ic_cfg;
+        ic_cfg.cache_dir = (sec_root / "imgcache").string();
+        omnidesk::ImageCache ic(ic_cfg);
+        const uint8_t sample_byte = 0xAB;
+        for (const auto& bad : bad_ids) {
+            TEST_CHECK(!ic.putCachedRawBytes(bad, &sample_byte, 1));
+            TEST_CHECK(!ic.getCachedRawBytes(bad).has_value());
+        }
+        TEST_CHECK(ic.putCachedRawBytes("safe_key-01.v1", &sample_byte, 1));
+        TEST_CHECK(ic.getCachedRawBytes("safe_key-01.v1").has_value());
+        ic.shutdown();
+
+        // PluginContext::logs() thread-safe value copy
+        omnidesk::DomainRegistry tmp_dom;
+        omnidesk::PluginContext pctx(
+            "plugin-legit", sec_root.string(), sec_root.string(), caps, bus, tmp_dom, cfg, vault);
+        std::thread writer([&]() {
+            for (int i = 0; i < 40; ++i) pctx.logInfo("entry-" + std::to_string(i));
+        });
+        size_t max_seen = 0;
+        for (int i = 0; i < 40; ++i) {
+            std::vector<std::string> snap = pctx.logs();
+            if (snap.size() > max_seen) max_seen = snap.size();
+        }
+        writer.join();
+        TEST_CHECK(pctx.logs().size() == 40 && max_seen <= 40);
+
+        fs::remove_all(sec_root, ec);
+    }
+
+    // 21. DomainRegistry: destroying DomainRegistry cleanly unbinds its sources from DomainAsyncPool
+    {
+        class SlowPoolMediaSource final : public omnidesk::IMediaSource {
+        public:
+            std::atomic<bool> started{false};
+            std::atomic<bool> allow_finish{false};
+            std::string sourceId() const override { return "slow-pool-src"; }
+            std::string displayName() const override { return "Slow Pool"; }
+            std::vector<std::string> categories() const override { return {"all"}; }
+            std::vector<omnidesk::MediaItem> fetchItems(const std::string&, const std::string&) override {
+                started.store(true);
+                for (int i = 0; i < 200 && !allow_finish.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                omnidesk::MediaItem item;
+                item.id = "ok-1";
+                return {item};
+            }
+        };
+
+        auto shared_src = std::make_shared<SlowPoolMediaSource>();
+        {
+            omnidesk::DomainRegistry dom1;
+            dom1.registerMediaSource("plugin-unbind-target", shared_src);
+            TEST_CHECK(dom1.mediaSources().size() == 1);
+        }
+        // dom1 is now destroyed without calling unregisterPlugin; shared_src must be unbound from DomainAsyncPool.
+        std::atomic<bool> cb_done{false};
+        std::atomic<bool> cb_cancelled{true};
+        size_t got_count = 0;
+        shared_src->fetchItemsAsync("all", "", [&](std::vector<omnidesk::MediaItem> items, bool cancelled) {
+            got_count = items.size();
+            cb_cancelled.store(cancelled);
+            cb_done.store(true);
+        });
+        for (int i = 0; i < 200 && !shared_src->started.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(shared_src->started.load());
+
+        // Unregistering the same plugin_id on another DomainRegistry must NOT cancel shared_src's unbound call.
+        {
+            omnidesk::DomainRegistry dom2;
+            dom2.unregisterPlugin("plugin-unbind-target");
+        }
+        shared_src->allow_finish.store(true);
+        for (int i = 0; i < 200 && !cb_done.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(cb_done.load());
+        TEST_CHECK(!cb_cancelled.load() && got_count == 1);
+
+        // Verify raw source pointer reuse at the exact same address does not inherit stale FaultDispatcher
+        struct ThrowingPoolMedia final : public omnidesk::IMediaSource {
+            std::string sourceId() const override { return "throw-reuse"; }
+            std::string displayName() const override { return "Throw Reuse"; }
+            std::vector<std::string> categories() const override { return {"all"}; }
+            std::vector<omnidesk::MediaItem> fetchItems(const std::string&, const std::string&) override {
+                throw std::runtime_error("reuse boom");
+            }
+        };
+        alignas(ThrowingPoolMedia) unsigned char reuse_buf[sizeof(ThrowingPoolMedia)];
+        std::atomic<int> stale_faults{0};
+        {
+            std::shared_ptr<ThrowingPoolMedia> first(
+                new (reuse_buf) ThrowingPoolMedia(),
+                [](ThrowingPoolMedia* p) { p->~ThrowingPoolMedia(); });
+            omnidesk::DomainRegistry dom_reuse;
+            dom_reuse.setFaultHandler([&](const std::string&, const std::string&, const std::string&) {
+                stale_faults.fetch_add(1);
+            });
+            dom_reuse.registerMediaSource("plugin-reuse", first);
+        }
+        {
+            std::shared_ptr<ThrowingPoolMedia> second(
+                new (reuse_buf) ThrowingPoolMedia(),
+                [](ThrowingPoolMedia* p) { p->~ThrowingPoolMedia(); });
+            std::atomic<bool> reuse_done{false};
+            second->fetchItemsAsync("all", "", [&](std::vector<omnidesk::MediaItem>, bool) {
+                reuse_done.store(true);
+            });
+            for (int i = 0; i < 200 && !reuse_done.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            TEST_CHECK(reuse_done.load());
+            TEST_CHECK(stale_faults.load() == 0);
+        }
+    }
+
+    // 22. Cross-process & multi-thread FileLock + SecretVault non-clobbering concurrency
+    {
+        const std::string lock_dir =
+            (fs::temp_directory_path() / ("omnidesk_lock_test_" + std::to_string(::getpid()))).string();
+        fs::remove_all(lock_dir);
+        fs::create_directories(lock_dir);
+
+        omnidesk::SecretVault vault(lock_dir);
+        std::vector<std::thread> writers;
+        for (int t = 0; t < 8; ++t) {
+            writers.emplace_back([&vault, t]() {
+                for (int k = 0; k < 4; ++k) {
+                    TEST_CHECK(vault.setSecret("plugin-flock", "k_" + std::to_string(t * 4 + k), "val_" + std::to_string(t)));
+                }
+            });
+        }
+        for (auto& w : writers) w.join();
+        for (int i = 0; i < 32; ++i) {
+            auto got = vault.getSecret("plugin-flock", "k_" + std::to_string(i));
+            TEST_CHECK(got.has_value());
+        }
+
+        // Cross-process FileLock + SecretVault write test
+        pid_t child = ::fork();
+        TEST_CHECK(child >= 0);
+        if (child == 0) {
+            omnidesk::SecretVault child_vault(lock_dir);
+            for (int i = 0; i < 10; ++i) {
+                child_vault.setSecret("plugin-proc", "child_" + std::to_string(i), "cval");
+            }
+            _exit(0);
+        } else {
+            for (int i = 0; i < 10; ++i) {
+                TEST_CHECK(vault.setSecret("plugin-proc", "parent_" + std::to_string(i), "pval"));
+            }
+            int status = 0;
+            ::waitpid(child, &status, 0);
+            TEST_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+            for (int i = 0; i < 10; ++i) {
+                TEST_CHECK(vault.getSecret("plugin-proc", "child_" + std::to_string(i)) == "cval");
+                TEST_CHECK(vault.getSecret("plugin-proc", "parent_" + std::to_string(i)) == "pval");
+            }
+        }
+
+        // Cross-process exclusive FileLock mutual exclusion
+        const std::string target_file = lock_dir + "/shared.dat";
+        omnidesk::FileLock parent_lock(target_file + ".lock", omnidesk::FileLock::Mode::Exclusive);
+        TEST_CHECK(parent_lock.lock());
+        pid_t contender = ::fork();
+        TEST_CHECK(contender >= 0);
+        if (contender == 0) {
+            omnidesk::FileLock child_lock(target_file + ".lock", omnidesk::FileLock::Mode::Exclusive);
+            bool acquired = child_lock.tryLock();
+            _exit(acquired ? 2 : 0);
+        }
+        int cstatus = 0;
+        ::waitpid(contender, &cstatus, 0);
+        TEST_CHECK(WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0);
+        parent_lock.unlock();
+        fs::remove_all(lock_dir);
+    }
+
+    // 23. UiTaskRunner dual-tier non-blocking alongside saturated JobCenter & lane superseding
+    {
+        omnidesk::EntityBus dual_bus;
+        omnidesk::JobCenter heavy_jobs(&dual_bus, 1);
+        omnidesk::UiTaskRunner ui_runner(2);
+
+        std::atomic<bool> heavy_started{false};
+        std::atomic<bool> release_heavy{false};
+        heavy_jobs.submit({"Long ASR Job", "plugin-asr", "asr", {}},
+            [&](omnidesk::JobHandle&, std::string&) {
+                heavy_started.store(true);
+                while (!release_heavy.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                return true;
+            });
+        for (int i = 0; i < 100 && !heavy_started.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(heavy_started.load());
+
+        // UiTaskRunner must execute immediately even while heavy JobCenter is completely saturated
+        std::atomic<bool> fast_done{false};
+        auto t0 = std::chrono::steady_clock::now();
+        ui_runner.submit([&](const std::shared_ptr<omnidesk::CancelToken>&) {
+            fast_done.store(true);
+        });
+        for (int i = 0; i < 100 && !fast_done.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(fast_done.load());
+        TEST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(500));
+
+        // Lane superseding cancels older token in same lane
+        std::atomic<bool> first_entered{false};
+        std::atomic<bool> first_cancelled{false};
+        std::atomic<bool> second_done{false};
+        auto t1 = ui_runner.submitInLane("feed", [&](const std::shared_ptr<omnidesk::CancelToken>& c) {
+            first_entered.store(true);
+            for (int i = 0; i < 100 && !c->isCancelled(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            first_cancelled.store(c->isCancelled());
+        });
+        for (int i = 0; i < 100 && !first_entered.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        auto t2 = ui_runner.submitInLane("feed", [&](const std::shared_ptr<omnidesk::CancelToken>& c) {
+            TEST_CHECK(!c->isCancelled());
+            second_done.store(true);
+        });
+        TEST_CHECK(t1 && t1->isCancelled());
+        for (int i = 0; i < 200 && !second_done.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(first_cancelled.load());
+        TEST_CHECK(second_done.load());
+
+        // runForUi with custom dispatcher
+        std::atomic<int> ui_applied{0};
+        ui_runner.setUiDispatcher([](std::function<void()> fn) { fn(); });
+        auto ui_alive = std::make_shared<std::atomic<bool>>(true);
+        ui_runner.runForUi("detail", ui_alive,
+            [](const std::shared_ptr<omnidesk::CancelToken>&) { return 42; },
+            [&](int val) { ui_applied.store(val); });
+        for (int i = 0; i < 100 && ui_applied.load() == 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_CHECK(ui_applied.load() == 42);
+
+        release_heavy.store(true);
+        ui_runner.shutdown(1000);
+        heavy_jobs.shutdown(1000);
+    }
+
+    // 24. DsoViewLeaseRegistry lifecycle, revocation & zero-lease callbacks
+    {
+        auto& leases = omnidesk::DsoViewLeaseRegistry::instance();
+        const std::string pid = "plugin-lease-test";
+        leases.beginPluginSession(pid);
+        TEST_CHECK(!leases.isRevoking(pid));
+        TEST_CHECK(!leases.hasActiveLeases(pid));
+
+        auto l1 = leases.acquireLease(pid);
+        auto l2 = leases.acquireLease(pid);
+        TEST_CHECK(l1 != nullptr && l2 != nullptr);
+        TEST_CHECK(leases.hasActiveLeases(pid));
+        TEST_CHECK(leases.activeLeaseCount(pid) == 2);
+
+        std::atomic<bool> drained{false};
+        leases.onAllLeasesReleased(pid, [&]() { drained.store(true); });
+
+        l1.reset();
+        TEST_CHECK(leases.activeLeaseCount(pid) == 1);
+        TEST_CHECK(!drained.load());
+
+        leases.revokePlugin(pid, 0);
+        TEST_CHECK(leases.isRevoking(pid));
+        TEST_CHECK(leases.acquireLease(pid) == nullptr);
+
+        l2.reset();
+        TEST_CHECK(!leases.hasActiveLeases(pid));
+        TEST_CHECK(drained.load());
+        leases.beginPluginSession(pid);
+    }
+
+    // 25. PlaybackCoordinator session arbitration, breakpoint resume, SponsorBlock/SubHunter & MPRIS2 snapshot
+    {
+        const std::string pb_dir =
+            (fs::temp_directory_path() / ("omnidesk_pb_test_" + std::to_string(::getpid()))).string();
+        fs::remove_all(pb_dir);
+        fs::create_directories(pb_dir);
+        const std::string resume_file = pb_dir + "/playback_resume.json";
+
+        omnidesk::CapabilityRegistry pb_caps;
+        omnidesk::EntityBus pb_bus;
+        omnidesk::JobCenter pb_jobs(&pb_bus, 1);
+        omnidesk::UiTaskRunner pb_ui(2);
+        omnidesk::MPVCore test_mpv;
+
+        std::atomic<bool> timeline_called{false};
+        pb_caps.registerCapability("player.timeline.v1", "plugin-sponsorblock",
+            [&](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+                timeline_called.store(true);
+                if (req.value("action", "") == "fetch_segments") {
+                    return {true, {
+                        {"chapters", nlohmann::json::array({
+                            {{"start_sec", 0.0}, {"end_sec", 10.0}, {"label", "Intro"}, {"kind", "content"}},
+                            {{"start_sec", 10.0}, {"end_sec", 25.0}, {"label", "Sponsor"}, {"kind", "sponsor"}},
+                        })}
+                    }, "", "plugin-sponsorblock", false};
+                }
+                return {true, {}, "", "plugin-sponsorblock", false};
+            });
+        pb_caps.registerCapability("subtitle.fetch.v1", "plugin-sub-hunter",
+            [](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+                const std::string act = req.value("action", "");
+                if (act == "search") {
+                    return {true, {{"candidates", nlohmann::json::array({{{"provider", "assrt"}, {"id", "sub1"}}})}}, "", "plugin-sub-hunter", false};
+                }
+                if (act == "download") {
+                    return {true, {{"files", nlohmann::json::array({{{"path", "/tmp/test_sub.srt"}, {"cue_count", 12}}})}}, "", "plugin-sub-hunter", false};
+                }
+                return {true, {}, "", "plugin-sub-hunter", false};
+            });
+
+        auto& coord = omnidesk::PlaybackCoordinator::instance();
+        coord.configure(resume_file, &pb_caps, &pb_bus, &pb_jobs, &pb_ui, &test_mpv);
+        coord.registerCapabilities(pb_caps);
+        TEST_CHECK(pb_caps.has("playback.session.v1"));
+
+        omnidesk::PlaybackTrack m1;
+        m1.item = {"track-1", "plugin-music", "Clair de Lune", "Debussy", "music", "Music", "", "https://example.com/m1.flac", "FLAC", 300.0, 0.0, 0, true};
+        m1.album = "Suite Bergamasque";
+        omnidesk::PlaybackTrack m2;
+        m2.item = {"track-2", "plugin-music", "Arabesque", "Debussy", "music", "Music", "", "https://example.com/m2.flac", "FLAC", 240.0, 0.0, 0, false};
+
+        uint64_t music_lease = coord.playMusicQueue("plugin-music", {m1, m2}, 0);
+        TEST_CHECK(music_lease != 0);
+        coord.seekAbsolute(45.0);
+        auto st_music = coord.state();
+        TEST_CHECK(st_music.active_role == omnidesk::PlaybackRole::BackgroundMusic);
+        TEST_CHECK(st_music.music_queue.size() == 2);
+
+        // Verify MPRIS2 snapshot mapping
+        auto mpris_snap = omnidesk::Mpris2Service::snapshotFromSession(st_music);
+        TEST_CHECK(mpris_snap.playback_status == "Playing");
+        TEST_CHECK(mpris_snap.title == "Clair de Lune");
+        TEST_CHECK(mpris_snap.artists.size() == 1 && mpris_snap.artists[0] == "Debussy");
+        TEST_CHECK(mpris_snap.album == "Suite Bergamasque");
+        TEST_CHECK(mpris_snap.can_go_next);
+
+        // ForegroundVideo preempts BackgroundMusic and saves exact breakpoint 45.0s
+        omnidesk::PlaybackTrack v1;
+        v1.item = {"BV1test", "plugin-bilibili", "Kernel Talk", "TechLab", "video", "Bilibili", "", "https://example.com/v1.mp4", "4K", 600.0, 0.0, 0, false};
+        v1.auto_enrich_timeline = true;
+        uint64_t vid_lease = coord.play(omnidesk::PlaybackRole::ForegroundVideo, "host.media_workbench", v1);
+        TEST_CHECK(vid_lease != 0);
+
+        for (int i = 0; i < 100 && !timeline_called.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST_CHECK(timeline_called.load());
+        // Wait briefly for timeline update to land in session
+        for (int i = 0; i < 100 && coord.state().active_track.chapters.empty(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        auto st_vid = coord.state();
+        TEST_CHECK(st_vid.active_role == omnidesk::PlaybackRole::ForegroundVideo);
+        TEST_CHECK(st_vid.has_suspended_music);
+        TEST_CHECK(st_vid.suspended_music_track.item.id == "track-1");
+        TEST_CHECK(st_vid.suspended_music_position_sec >= 44.5);
+        TEST_CHECK(st_vid.active_track.chapters.size() == 2);
+
+        // SponsorBlock skip inside [10.0, 25.0)
+        coord.seekAbsolute(15.0);
+        TEST_CHECK(coord.skipActiveSponsor());
+        TEST_CHECK(coord.state().mpv.position_sec >= 25.0);
+
+        // SubHunter subtitle attachment
+        coord.attachSubtitlesAsync(true);
+        for (int i = 0; i < 100 && !coord.state().subtitles_attached; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST_CHECK(coord.state().subtitles_attached);
+
+        // Releasing video lease restores BackgroundMusic at saved breakpoint
+        TEST_CHECK(coord.releaseLease(vid_lease, true));
+        auto st_resumed = coord.state();
+        TEST_CHECK(st_resumed.active_role == omnidesk::PlaybackRole::BackgroundMusic);
+        TEST_CHECK(st_resumed.active_track.item.id == "track-1");
+        TEST_CHECK(st_resumed.active_track.options.start_seconds >= 44.5);
+
+        // Verify breakpoint persistence across shutdown + re-configure
+        coord.saveResumePosition("BV1test", "Kernel Talk", 123.5, 600.0);
+        coord.shutdown();
+        coord.configure(resume_file, &pb_caps, &pb_bus, &pb_jobs, &pb_ui, &test_mpv);
+        TEST_CHECK(coord.getResumePosition("BV1test") > 123.0);
+        coord.shutdown();
+        test_mpv.shutdown();
+        pb_ui.shutdown(1000);
+        pb_jobs.shutdown(1000);
+        fs::remove_all(pb_dir);
+    }
+
+    // 26. CommentTreeView tree flattening / OP / collapse & SelectionActionPopover token extraction
+    {
+        omnidesk::CommentNode c1{"c1", "alice", "", "Root comment", "", "1m", 10, false, {}};
+        omnidesk::CommentNode c1_1{"c1-1", "bob", "", "Nested reply", "", "1m", 5, true, {}};
+        omnidesk::CommentNode c1_1_1{"c1-1-1", "alice", "", "Deep hidden reply", "", "1m", 2, false, {}};
+        c1_1.replies.push_back(c1_1_1);
+        c1.replies.push_back(c1_1);
+        omnidesk::CommentNode c2{"c2", "carol", "OP", "Second root", "", "2m", 1, false, {}};
+
+        std::set<std::string> collapsed{"c1-1"};
+        auto flat = omnidesk::CommentTreeView::flattenTree({c1, c2}, collapsed, "alice");
+        TEST_CHECK(flat.size() == 3);
+        TEST_CHECK(flat[0].node_id == "c1" && flat[0].depth == 0 && flat[0].is_op);
+        TEST_CHECK(flat[1].node_id == "c1-1" && flat[1].depth == 1 && !flat[1].is_op && flat[1].collapsed && flat[1].hidden_descendants == 1);
+        TEST_CHECK(flat[2].node_id == "c2" && flat[2].depth == 0 && flat[2].is_op);
+
+        auto tokens = omnidesk::SelectionActionPopover::extractSelectableTokens(
+            "Ephemeral staging containers avoid degradation and Degradation.", 6);
+        TEST_CHECK(tokens.size() == 5);
+        TEST_CHECK(tokens[0] == "Ephemeral");
+    }
+
+    // 27. SearchIndexService SQLite FTS5 cross-domain indexing & search.index.v1 RPC
+    {
+        const std::string srch_dir =
+            (fs::temp_directory_path() / ("omnidesk_search_test_" + std::to_string(::getpid()))).string();
+        fs::remove_all(srch_dir);
+        fs::create_directories(srch_dir);
+
+        struct SearchMockBookSource final : public omnidesk::IBookSource {
+            std::string sourceId() const override { return "plugin-ebook"; }
+            std::string displayName() const override { return "eBook"; }
+            std::vector<omnidesk::BookItem> listBooks(const std::string&, const std::string&) override {
+                return {{"b1", "plugin-ebook", "Designing Data-Intensive Applications 书架", "Martin Kleppmann",
+                         "epub", "/books/ddia.epub", "", 10, 400, 2.5, true, 5, false}};
+            }
+            omnidesk::BookSpread fetchSpread(const std::string& id, int page) override {
+                return {id, "Ch1", page, 400, {}};
+            }
+            std::vector<omnidesk::VocabCard> listVocab() override {
+                return {{"ephemeral", "ephemeral", "/ɪˈfɛmərəl/", "epi + hemera", "短暂的",
+                         "Ephemeral staging containers", "DDIA", 1, 0, 2.5}};
+            }
+        };
+        struct SearchMockTextSource final : public omnidesk::ITextSource {
+            std::string sourceId() const override { return "plugin-ai-curator"; }
+            std::string displayName() const override { return "AI Curator"; }
+            std::string category() const override { return "obsidian"; }
+            std::vector<omnidesk::TextFeedItem> fetchFeed(const std::string&) override {
+                return {{"obs-1", "plugin-ai-curator", "Obsidian 往期精选", "obsidian",
+                         "神经网络与微内核精选", "深度解析", "curator", "2026-10-01",
+                         "https://example.com", "", {}, {"obsidian", "精选"}, 3, 10, true}};
+            }
+            omnidesk::TextArticle fetchArticle(const std::string& id) override {
+                omnidesk::TextArticle a;
+                a.id = id;
+                return a;
+            }
+        };
+        struct SearchMockCuratedMedia final : public omnidesk::IMediaSource {
+            std::string sourceId() const override { return "plugin-ai-curator"; }
+            std::string displayName() const override { return "Curated Media"; }
+            std::vector<std::string> categories() const override { return {"all"}; }
+            std::vector<omnidesk::MediaItem> fetchItems(const std::string&, const std::string&) override {
+                omnidesk::MediaItem item;
+                item.id = "archived-song";
+                item.source_id = sourceId();
+                item.title = "Archived Queue Regression";
+                item.creator = "Archive Artist";
+                item.kind = "music";
+                item.play_url = "https://example.com/song";
+                item.extra = {{"business_date", "2026-09-04"}, {"curation_mode", "daily_immutable"}};
+                return {item};
+            }
+        };
+        omnidesk::DomainRegistry s_dom;
+        omnidesk::CapabilityRegistry s_caps;
+        s_dom.registerMediaSource("plugin-ai-curator", std::make_shared<SearchMockCuratedMedia>());
+        s_dom.registerBookSource("plugin-ebook", std::make_shared<SearchMockBookSource>());
+        s_dom.registerTextSource("plugin-ai-curator", std::make_shared<SearchMockTextSource>());
+        s_dom.registerMediaSource("plugin-music", std::make_shared<DummyMediaSource>());
+        s_dom.registerWorkspaceTab({"tab-custom", "plugin-music", "Apple Music 乐评", omnidesk::ContentDomain::Media, "Music", []() -> brls::View* { return nullptr; }});
+        s_caps.registerCapability("media.clip_jump.v1", "plugin-fnos-nas",
+            [](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+                const std::string q = req.value("query", "");
+                if (q.find("ephemeral") != std::string::npos || q.find("台词") != std::string::npos) {
+                    return {true, {{"clips", nlohmann::json::array({
+                        {{"series", "Severance"}, {"episode", "S01E01"}, {"start_sec", 88.0}, {"end_sec", 94.0},
+                         {"line_en", "Everything here is ephemeral."}, {"line_zh", "这里的一切都是短暂的台词示例。"},
+                         {"play_url", "file:///nas/severance.mkv"}}
+                    })}}, "", "plugin-fnos-nas", false};
+                }
+                return {true, {{"clips", nlohmann::json::array()}}, "", "plugin-fnos-nas", false};
+            });
+
+        omnidesk::SearchIndexService idx;
+        TEST_CHECK(idx.open(srch_dir + "/search_index.db"));
+        const size_t hydrated = idx.hydrateEcosystem(&s_dom, &s_caps, srch_dir, srch_dir);
+        TEST_CHECK(hydrated >= 10);
+        idx.registerCapability(s_caps, &s_dom, srch_dir, srch_dir);
+        TEST_CHECK(s_caps.has("search.index.v1"));
+
+        // Archive navigation retains metadata needed to select its date-scoped queue.
+        auto archived = s_caps.call("search.index.v1", {
+            {"action", "query"}, {"q", "Archived Queue Regression"}, {"kind", "music_review"},
+        });
+        TEST_CHECK(archived.ok && archived.data["hits"].size() == 1);
+        const auto& archive_payload = archived.data["hits"][0]["payload"];
+        TEST_CHECK(archive_payload.value("target", "") == "media");
+        TEST_CHECK(archive_payload.value("creator", "") == "Archive Artist");
+        TEST_CHECK(archive_payload["extra"].value("business_date", "") == "2026-09-04");
+        TEST_CHECK(archive_payload["extra"].value("curation_mode", "") == "daily_immutable");
+
+        // English 3+ char FTS5 trigram query
+        auto r_vocab = s_caps.call("search.index.v1", {{"action", "query"}, {"q", "ephemeral"}});
+        TEST_CHECK(r_vocab.ok);
+        TEST_CHECK(r_vocab.data["total"].get<size_t>() >= 2); // vocab + live nas_clip
+
+        // CJK 3+ char FTS5 trigram query
+        auto r_cjk3 = s_caps.call("search.index.v1", {{"action", "query"}, {"q", "插件市"}});
+        TEST_CHECK(r_cjk3.ok && r_cjk3.data["total"].get<size_t>() >= 1);
+
+        // CJK 1-char & 2-char fallback query
+        auto r_cjk2 = s_caps.call("search.index.v1", {{"action", "query"}, {"q", "乐评"}});
+        TEST_CHECK(r_cjk2.ok && r_cjk2.data["total"].get<size_t>() >= 1);
+        auto r_cjk1 = s_caps.call("search.index.v1", {{"action", "query"}, {"q", "书"}});
+        TEST_CHECK(r_cjk1.ok && r_cjk1.data["total"].get<size_t>() >= 1);
+
+        // Custom upsert + remove + stats
+        auto r_up = s_caps.call("search.index.v1", {
+            {"action", "upsert"},
+            {"doc", {{"doc_id", "custom:1"}, {"kind", "music_review"}, {"domain", "media"}, {"title", "Bill Evans Waltz for Debby"}, {"body", "深夜写C++爵士乐评"}}},
+        });
+        TEST_CHECK(r_up.ok && r_up.data["upserted"].get<size_t>() == 1);
+        auto r_evans = s_caps.call("search.index.v1", {{"action", "query"}, {"q", "爵士乐评"}, {"kind", "music_review"}});
+        TEST_CHECK(r_evans.ok && r_evans.data["total"].get<size_t>() >= 1);
+
+        auto r_stats = s_caps.call("search.index.v1", {{"action", "stats"}});
+        TEST_CHECK(r_stats.ok && r_stats.data["total_docs"].get<size_t>() >= hydrated);
+
+        idx.close();
+        fs::remove_all(srch_dir);
+    }
+
+    std::cout << "test_sdk_bus: ALL PASSED (27/27 suites)\n";
     return 0;
 }

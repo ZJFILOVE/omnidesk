@@ -198,6 +198,7 @@ bool fetchTextResource(const std::string& url, std::string& body, std::string& e
         headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 2500L);
@@ -253,6 +254,7 @@ bool downloadBinaryResource(const std::string& url,
     }
 
     long http_code = 0;
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 4000L);
@@ -324,6 +326,7 @@ std::string extractSha256Hex(const std::string& text) {
 bool isSafeArchiveEntry(const std::string& entry) {
     if (entry.empty()) return false;
     if (entry.front() == '/') return false;
+    if (entry.find('\0') != std::string::npos) return false;
     std::stringstream ss(entry);
     std::string part;
     while (std::getline(ss, part, '/')) {
@@ -332,21 +335,97 @@ bool isSafeArchiveEntry(const std::string& entry) {
     return true;
 }
 
+bool isPathWithinDir(const fs::path& target, const fs::path& base_dir, bool allow_equal) {
+    std::error_code ec;
+    const fs::path canon_base = fs::weakly_canonical(base_dir, ec);
+    if (ec || canon_base.empty()) return false;
+    const fs::path canon_target = fs::weakly_canonical(target, ec);
+    if (ec || canon_target.empty()) return false;
+
+    auto b_it = canon_base.begin();
+    auto t_it = canon_target.begin();
+    for (; b_it != canon_base.end() && t_it != canon_target.end(); ++b_it, ++t_it) {
+        if (*b_it != *t_it) {
+            return false;
+        }
+    }
+    if (b_it != canon_base.end()) {
+        return false;
+    }
+    if (t_it == canon_target.end()) {
+        return allow_equal;
+    }
+    return true;
+}
+
+bool validateExtractedTree(const fs::path& unpack_dir, std::string& error) {
+    std::error_code ec;
+    const fs::file_status root_st = fs::symlink_status(unpack_dir, ec);
+    if (ec || fs::is_symlink(root_st) || !fs::is_directory(root_st)) {
+        error = "Unpack directory is invalid or a symlink: " + unpack_dir.string();
+        return false;
+    }
+
+    for (fs::recursive_directory_iterator it(unpack_dir, fs::directory_options::none, ec), end;
+         it != end;
+         it.increment(ec)) {
+        if (ec) {
+            error = "Failed inspecting unpacked archive directory: " + ec.message();
+            return false;
+        }
+        const fs::path p = it->path();
+        const fs::file_status st = fs::symlink_status(p, ec);
+        if (ec) {
+            error = "Failed statting unpacked archive entry: " + p.string();
+            return false;
+        }
+        if (fs::is_symlink(st)) {
+            error = "Symlink entry rejected in unpacked .tar.zst archive: " + p.string();
+            return false;
+        }
+        if (!fs::is_regular_file(st) && !fs::is_directory(st)) {
+            error = "Unsupported special file rejected in unpacked .tar.zst archive: " + p.string();
+            return false;
+        }
+        struct stat sb {};
+        if (::lstat(p.c_str(), &sb) != 0) {
+            error = "lstat failed on unpacked .tar.zst entry: " + p.string();
+            return false;
+        }
+        if (S_ISREG(sb.st_mode) && sb.st_nlink > 1) {
+            error = "Hardlink entry rejected in unpacked .tar.zst archive: " + p.string();
+            return false;
+        }
+        if (!isPathWithinDir(p, unpack_dir, false)) {
+            error = "Unpacked .tar.zst entry escapes staging directory: " + p.string();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "Failed walking unpacked archive directory: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
 bool validateTarZstEntries(const std::string& tar_bin,
                            const fs::path& archive_path,
                            bool use_explicit_zstd_prog,
                            std::string& error) {
-    std::vector<std::string> argv = {tar_bin};
-    if (use_explicit_zstd_prog) {
-        argv.push_back("-I");
-        argv.push_back("zstd -dc");
-    } else {
-        argv.push_back("--zstd");
-    }
-    argv.push_back("-tf");
-    argv.push_back(archive_path.string());
+    auto makeArgv = [&](const char* list_flag) {
+        std::vector<std::string> argv = {tar_bin};
+        if (use_explicit_zstd_prog) {
+            argv.push_back("-I");
+            argv.push_back("zstd -dc");
+        } else {
+            argv.push_back("--zstd");
+        }
+        argv.push_back(list_flag);
+        argv.push_back(archive_path.string());
+        return argv;
+    };
 
-    auto res = runProcess(argv, "", {}, 30000);
+    auto res = runProcess(makeArgv("-tf"), "", {{"LC_ALL", "C"}}, 30000);
     if (res.exit_code != 0) {
         error = "Invalid or corrupt .tar.zst archive: " +
                 (res.output.empty() ? res.error : res.output);
@@ -368,24 +447,57 @@ bool validateTarZstEntries(const std::string& tar_bin,
         error = "Empty .tar.zst archive";
         return false;
     }
+
+    auto vres = runProcess(makeArgv("-tvf"), "", {{"LC_ALL", "C"}}, 30000);
+    if (vres.exit_code != 0) {
+        error = "Invalid or corrupt .tar.zst archive: " +
+                (vres.output.empty() ? vres.error : vres.output);
+        return false;
+    }
+    std::istringstream viss(vres.output);
+    size_t verbose_count = 0;
+    while (std::getline(viss, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.empty()) continue;
+        const char type_ch = line.front();
+        if (type_ch != '-' && type_ch != 'd') {
+            if (type_ch == 'l' || type_ch == 'h') {
+                error = "Symlink or hardlink entry rejected inside .tar.zst archive: " + line;
+            } else {
+                error = "Unsupported non-regular entry type ('" + std::string(1, type_ch) +
+                        "') inside .tar.zst archive: " + line;
+            }
+            return false;
+        }
+        ++verbose_count;
+    }
+    if (verbose_count != count) {
+        error = "Inconsistent entry listing inside .tar.zst archive";
+        return false;
+    }
     return true;
 }
 
 fs::path locateExtractedPackageRoot(const fs::path& unpack_dir) {
-    if (fs::exists(unpack_dir / "plugin.json")) {
+    std::error_code ec;
+    const auto root_manifest = fs::symlink_status(unpack_dir / "plugin.json", ec);
+    if (!ec && !fs::is_symlink(root_manifest) && fs::is_regular_file(root_manifest)) {
         return unpack_dir;
     }
-    std::error_code ec;
     fs::path single_dir;
     int entries = 0;
     for (const auto& entry : fs::directory_iterator(unpack_dir, ec)) {
         ++entries;
-        if (entry.is_directory(ec)) {
+        const auto st = fs::symlink_status(entry.path(), ec);
+        if (!ec && !fs::is_symlink(st) && fs::is_directory(st)) {
             single_dir = entry.path();
         }
     }
-    if (entries == 1 && !single_dir.empty() && fs::exists(single_dir / "plugin.json")) {
-        return single_dir;
+    if (entries == 1 && !single_dir.empty()) {
+        const auto sub_manifest = fs::symlink_status(single_dir / "plugin.json", ec);
+        if (!ec && !fs::is_symlink(sub_manifest) && fs::is_regular_file(sub_manifest)) {
+            return single_dir;
+        }
     }
     return unpack_dir;
 }
@@ -1004,6 +1116,8 @@ InstallResult PluginInstaller::installFromPrebuilt(const ReleaseArtifactSpec& re
     } else {
         extract_argv.push_back("--zstd");
     }
+    extract_argv.push_back("--no-same-owner");
+    extract_argv.push_back("--no-same-permissions");
     extract_argv.push_back("-xf");
     extract_argv.push_back(archive_path.string());
     extract_argv.push_back("-C");
@@ -1016,8 +1130,22 @@ InstallResult PluginInstaller::installFromPrebuilt(const ReleaseArtifactSpec& re
         return out;
     }
 
+    std::string tree_err;
+    if (!validateExtractedTree(unpack_dir, tree_err)) {
+        out.error = tree_err;
+        return out;
+    }
+
     const fs::path pkg_root = locateExtractedPackageRoot(unpack_dir);
     const fs::path manifest_path = pkg_root / "plugin.json";
+    const fs::path readme_path = pkg_root / "README.md";
+    if (!isPathWithinDir(pkg_root, unpack_dir, true) ||
+        !isPathWithinDir(manifest_path, unpack_dir, false) ||
+        !isPathWithinDir(readme_path, unpack_dir, false)) {
+        out.error = "Prebuilt .tar.zst package paths escape unpack directory";
+        return out;
+    }
+
     PluginManifest manifest;
     std::string manifest_err;
     if (!parseManifestFile(manifest_path.string(), manifest, manifest_err)) {
@@ -1030,17 +1158,27 @@ InstallResult PluginInstaller::installFromPrebuilt(const ReleaseArtifactSpec& re
         out.error = "Prebuilt .tar.zst contains no plugin .so binary";
         return out;
     }
+    if (!isPathWithinDir(built_so, unpack_dir, false)) {
+        out.error = "Prebuilt .tar.zst plugin binary escapes unpack directory";
+        return out;
+    }
+
+    const auto readme_st = fs::symlink_status(readme_path, ec);
+    if (!ec && fs::is_symlink(readme_st)) {
+        out.error = "Symlink README.md rejected inside prebuilt .tar.zst";
+        return out;
+    }
+    const bool has_safe_readme = !ec && !fs::is_symlink(readme_st) && fs::is_regular_file(readme_st);
 
     const std::string eff_source =
         !source_url.empty() ? source_url : (!manifest.repo_url.empty() ? manifest.repo_url : release.archive_url);
     const std::string eff_branch =
         !branch.empty() ? branch : (!manifest.repo_branch.empty() ? manifest.repo_branch : "main");
     const std::string eff_commit = !commit_sha.empty() ? commit_sha : release.tag;
-    const fs::path readme_path = pkg_root / "README.md";
 
     InstallResult res = activatePluginArtifact(
         manifest, built_so, manifest_path.string(),
-        fs::exists(readme_path) ? readme_path.string() : "",
+        has_safe_readme ? readme_path.string() : "",
         eff_source, eff_branch, eff_commit, false,
         "prebuilt-tar-zst", release.tag, cb);
     res.log = out.log + res.log;
@@ -1382,6 +1520,30 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
         return out;
     }
 
+    if (install_source == "prebuilt-tar-zst") {
+        std::error_code st_ec;
+        const auto so_st = fs::symlink_status(built_so_path, st_ec);
+        if (st_ec || fs::is_symlink(so_st) || !fs::is_regular_file(so_st)) {
+            fs::remove_all(stage_final, ec);
+            out.error = "Refusing to activate symlink or non-regular prebuilt plugin binary";
+            return out;
+        }
+        const auto mf_st = fs::symlink_status(manifest_path, st_ec);
+        if (st_ec || fs::is_symlink(mf_st) || !fs::is_regular_file(mf_st)) {
+            fs::remove_all(stage_final, ec);
+            out.error = "Refusing to activate symlink or non-regular prebuilt plugin.json";
+            return out;
+        }
+        if (!readme_path.empty()) {
+            const auto rm_st = fs::symlink_status(readme_path, st_ec);
+            if (st_ec || fs::is_symlink(rm_st) || !fs::is_regular_file(rm_st)) {
+                fs::remove_all(stage_final, ec);
+                out.error = "Refusing to activate symlink or non-regular prebuilt README.md";
+                return out;
+            }
+        }
+    }
+
     const fs::path so_filename = fs::path(built_so_path).filename();
     const fs::path dest_so = stage_final / "lib" / so_filename;
     fs::copy_file(built_so_path, dest_so, fs::copy_options::overwrite_existing, ec);
@@ -1397,11 +1559,15 @@ InstallResult PluginInstaller::activatePluginArtifact(const PluginManifest& mani
     const fs::path src_root = fs::path(manifest_path).parent_path();
     if (fs::exists(src_root / "workers")) {
         fs::copy(src_root / "workers", stage_final / "workers",
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing |
+                     fs::copy_options::skip_symlinks,
+                 ec);
     }
     if (fs::exists(src_root / "resources")) {
         fs::copy(src_root / "resources", stage_final / "resources",
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing |
+                     fs::copy_options::skip_symlinks,
+                 ec);
     }
 
     // 3. Snapshot previous active version into backups/<id>/<stamp> if present
@@ -1930,15 +2096,53 @@ bool PluginInstaller::saveLockFile(const nlohmann::json& j) const {
 }
 
 nlohmann::json PluginInstaller::loadStateFile() const {
-    nlohmann::json j = readJsonOrObject(stateFilePath());
+    const std::string path = stateFilePath();
+    std::error_code ec;
+    const auto mtime = fs::last_write_time(path, ec);
+    const uintmax_t sz = ec ? 0 : fs::file_size(path, ec);
+
+    std::lock_guard<std::mutex> lock(state_cache_mutex_);
+    if (!ec && state_cache_valid_ && mtime == state_cache_mtime_ && sz == state_cache_size_) {
+        return state_cache_json_;
+    }
+
+    nlohmann::json j = readJsonOrObject(path);
     if (!j.contains("plugins") || !j["plugins"].is_object()) {
         j["plugins"] = nlohmann::json::object();
+    }
+    if (!ec) {
+        state_cache_json_ = j;
+        state_cache_mtime_ = mtime;
+        state_cache_size_ = sz;
+        state_cache_valid_ = true;
+    } else {
+        state_cache_valid_ = false;
     }
     return j;
 }
 
 bool PluginInstaller::saveStateFile(const nlohmann::json& j) const {
-    return writeJsonAtomic(stateFilePath(), j);
+    const std::string path = stateFilePath();
+    std::lock_guard<std::mutex> lock(state_cache_mutex_);
+    if (!writeJsonAtomic(path, j)) {
+        state_cache_valid_ = false;
+        return false;
+    }
+    std::error_code ec;
+    const auto mtime = fs::last_write_time(path, ec);
+    const uintmax_t sz = ec ? 0 : fs::file_size(path, ec);
+    if (!ec) {
+        state_cache_json_ = j;
+        if (!state_cache_json_.contains("plugins") || !state_cache_json_["plugins"].is_object()) {
+            state_cache_json_["plugins"] = nlohmann::json::object();
+        }
+        state_cache_mtime_ = mtime;
+        state_cache_size_ = sz;
+        state_cache_valid_ = true;
+    } else {
+        state_cache_valid_ = false;
+    }
+    return true;
 }
 
 } // namespace omnidesk::pm

@@ -126,6 +126,7 @@ bool MarketplaceCatalog::mergeRemoteUrl(const std::string& url, std::string& err
 
     std::string body;
     long http_code = 0;
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 10000L);

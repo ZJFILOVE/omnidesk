@@ -25,16 +25,16 @@ export OMNIDESK_DISABLE_GITHUB_API=1
 export OMNIDESK_SDK_CMAKE_DIR="${BUILD_DIR}/sdk-cmake"
 export OMNIDESK_CATALOG_PATH="${BUILD_DIR}/resources/marketplace/catalog.json"
 
-echo "[1/6] Running CTest unit & integration suite..."
+echo "[1/7] Running CTest unit & integration suite..."
 ctest --test-dir "${BUILD_DIR}" --output-on-failure
 
-echo "[2/6] Checking omnidesk-pm catalog & GitHub marketplace resolution..."
+echo "[2/7] Checking omnidesk-pm catalog & GitHub marketplace resolution..."
 "${PM_BIN}" catalog --domain core | grep -q "plugin-magpie-agent"
 "${PM_BIN}" catalog --domain media | grep -q "plugin-fnos-nas"
 "${PM_BIN}" catalog --domain text | grep -q "plugin-linuxdo"
 "${PM_BIN}" catalog --domain book | grep -q "plugin-pdf-babeldoc"
 
-echo "[3/6] Installing local out-of-tree sample plugin via CLI & testing config/secrets..."
+echo "[3/7] Installing local out-of-tree sample plugin via CLI & testing config/secrets..."
 "${PM_BIN}" install "$(pwd)/tests/test_plugin_sample"
 "${PM_BIN}" list | grep -q "plugin-sample-echo"
 "${PM_BIN}" config plugin-sample-echo set greeting "HiOmniDesk"
@@ -43,7 +43,7 @@ echo "[3/6] Installing local out-of-tree sample plugin via CLI & testing config/
 "${PM_BIN}" verify plugin-sample-echo
 "${PM_BIN}" radar >/dev/null
 
-echo "[4/6] Testing scaffolded repo -> local install -> disable -> rollback -> remove..."
+echo "[4/7] Testing scaffolded repo -> local install -> disable -> rollback -> remove..."
 "${PM_BIN}" init "${TMP_HOME}/my-plugin" --id plugin-cli-e2e --domain text --kind workspace --provides text.source.v1 --no-git
 "${PM_BIN}" install "${TMP_HOME}/my-plugin"
 "${PM_BIN}" verify plugin-cli-e2e
@@ -51,11 +51,12 @@ echo "[4/6] Testing scaffolded repo -> local install -> disable -> rollback -> r
 "${PM_BIN}" enable plugin-cli-e2e
 "${PM_BIN}" remove plugin-cli-e2e
 
-echo "[5/6] Testing headless host kernel boot with installed .so plugins loaded..."
-"${HOST_BIN}" --headless-check | grep -q "installed_plugins: 1"
-"${HOST_BIN}" --headless-check | grep -q "capabilities: 1"
+echo "[5/7] Testing headless host kernel boot with installed .so plugins loaded..."
+HC_OUT="$("${HOST_BIN}" --headless-check)"
+echo "${HC_OUT}" | grep -q "installed_plugins: 1"
+echo "${HC_OUT}" | grep -Eq "capabilities: ([3-9]|[1-9][0-9]+)"
 
-echo "[6/6] Running live GUI smoke test if graphical display is active..."
+echo "[6/7] Running live GUI smoke test if graphical display is active..."
 probe_sdl_video() {
     python3 -c '
 import ctypes
@@ -79,6 +80,19 @@ elif SDL_VIDEODRIVER=offscreen probe_sdl_video; then
     echo "Offscreen OpenGL GUI smoke windows rendered & exited cleanly across all 4 workbenches (no-UDEV/sandbox fallback verified)!"
 else
     echo "No SDL2 video driver available; skipping GUI window test."
+fi
+
+echo "[7/7] Optional real-archive curation integration..."
+if [[ "${OMNIDESK_RUN_CURATION_INTEGRATION:-0}" == "1" ]]; then
+    python3 tests/test_curation_integration.py \
+        --host-build "${BUILD_DIR}" \
+        --curator-build "${OMNIDESK_CURATOR_BUILD:-/tmp/build-plugin-ai-curator}" \
+        --music-build "${OMNIDESK_MUSIC_BUILD:-/tmp/build-plugin-music}" \
+        --magpie-build "${OMNIDESK_MAGPIE_BUILD:-/tmp/build-plugin-magpie-agent}" \
+        --obsidian-vault "${OMNIDESK_OBSIDIAN_VAULT:-${HOME}/.local/share/omnidesk/curation/repos/obsidian-vault}" \
+        --music-daily "${OMNIDESK_MUSIC_DAILY:-${HOME}/.local/share/omnidesk/curation/repos/music-daily}"
+else
+    echo "Skipping real-archive integration; set OMNIDESK_RUN_CURATION_INTEGRATION=1 to enable."
 fi
 
 echo "ALL OMNIDESK E2E CHECKS PASSED!"

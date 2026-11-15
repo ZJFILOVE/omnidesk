@@ -180,7 +180,7 @@ OMNIDESK_DECLARE_PLUGIN(
 - 排队、写入管道/Socket、等待响应都支持超时或取消；超时和响应协议错误计入故障与熔断。单帧及累计流式文本上限为 8 MiB，stderr 最多保留 100 段、每段 4096 字节；停止 Worker 会清理同进程组子进程。启动连接最多等待 5 秒，停止还受 `stop_grace_ms` 约束。
 - 自动重启不自动重放失败的插件能力调用，避免下载、写笔记等副作用重复执行。只有明确幂等的自定义 Worker 才启用 `retry_on_crash`；已向调用者交付部分流式结果后不重试。卸载/注销后，正在执行的请求不能重新拉起 Worker。
 
-需要 NanoVG/Borealis 自定义视图时，保留受信任的进程内 UI 薄层，用 `registerWorker`、`registerWorkerCapability`、`registerWorkerMediaSource` / `registerWorkerTextSource` / `registerWorkerBookSource` 将抓取和解析交给独立 Worker。整插件 `subprocess` 模式支持能力与领域数据源，会拒绝 UI 注册；它的 CapabilityRegistry 和 EntityBus 仅限 Worker 内部，目前不转发跨插件宿主能力调用或宿主事件订阅。
+需要 NanoVG/Borealis 自定义视图时，保留受信任的进程内 UI 薄层，用 `registerWorker`、`registerWorkerCapability`、`registerWorkerMediaSource` / `registerWorkerTextSource` / `registerWorkerBookSource` 将抓取和解析交给独立 Worker。整插件 `subprocess` 模式支持能力与领域数据源，会拒绝 UI 注册；借助 `--duplex` 全双工复用信道（`WorkerHostBridge` + Worker 端 `RemoteBridge`），Worker 内部的 `CapabilityRegistry`（`has` / `providersFor` / `listAll` / 同步与流式 `call*` / 取消传播）与 `EntityBus`（`subscribe` / `unsubscribe` / `publish` 无回声广播与宿主事件推送）均已透明向宿主转发跨插件能力调用和宿主事件订阅（包含 `onLoad` 期间调用及可重入嵌套调用）。
 
 宿主文章列表、正文、书库、书页及媒体歌词/章节的数据请求在后台执行，只有结果应用和视图构建回到 UI 线程。新请求替换旧请求、视图销毁后，旧结果不会覆盖界面。进程内异常屏障只能捕获 C++ 异常，不能隔离段错误、死锁或 `dlopen` 静态初始化崩溃；进程隔离也不等于权限沙箱或无限期稳定的 C++ ABI。
 
@@ -241,21 +241,27 @@ public:
 | :--- | :--- | :--- | :--- |
 | `llm.router.v1` | `plugin-magpie-agent` | 宿主 `AiCompanionDock`、设置中心 | 读取 Magpie 状态/Harness/模型/配额，并将用户所选路由反向写入专属路由组 |
 | `ai.agent.v1` | `plugin-magpie-agent` | 宿主 `AiCompanionDock`、三大工作台 | 带领域上下文与预设动作（总结/问答/词源/拆句）的智能伴读对话入口 |
+| `ai.curation.v1` | `plugin-magpie-agent` | 宿主 `AiCompanionDock`、三大工作台、`omnidesk-pm rpc` | 内驻 AI Agent 策展编排器：基于统一 Skill 执行按需可重复交互推荐（`curate_interactive`）或每日不重复管线（`run_daily_pipeline`）并自动联动反写 |
 | `llm.chat.v1` | `plugin-magpie-agent` | 全域工作区插件 | 通用 OpenAI 兼容多轮/单轮文本推理与 JSON Schema 结构化输出 |
 | `llm.translate.v1` | `plugin-magpie-agent` | 字幕/网页/期刊/PDF/EPUB 插件 | 支持上下文窗口与术语锁定（Glossary）的单段/批量双语翻译 |
+| `recommend.feed.v1` | `plugin-ai-curator` | 三大工作台、`plugin-magpie-agent`、外部入站 Agent | 自动克隆同步 `ZJFILOVE/obsidian-vault` 与 `ZJFILOVE/music-daily` 回灌全量历史推荐，并提供 `daily_immutable`（每日不重复）与 `interactive_ephemeral`（按需可重复）双模前端反写存储 |
+| `media.playlist.v1` | `plugin-music` | `plugin-ai-curator`、`plugin-magpie-agent`、外部入站 Agent | Apple Music 国区曲库可播预检、经 QA 门禁同步固定累计歌单 `p.YJXV7dEIeb3GzZX`（`ChatGPT Daily 5`），以及受硬隔离保护的可重复灵感歌单 / `MPVCore` 播放队列写回 |
 | `speech.asr.v1` | `plugin-asr-funasr` | `plugin-bilibili` / `youtube` / `MediaWorkbench` | 本地 Vulkan/CPU FunASR SenseVoiceSmall Q8 离线语音识别、音轨探测与断点分块转写 |
 | `player.timeline.v1` | `plugin-sponsorblock` | `MediaWorkbench` / `plugin-bilibili` / `plugin-youtube` | 基于 B 站 (`bsbsb.top`) 与 YouTube (`sponsor.ajay.app`) K-匿名哈希前缀查询空降/章节片段并合并进播放器时间轴 |
+| `subtitle.fetch.v1` | `plugin-sub-hunter` | `MediaWorkbench` / `plugin-fnos-nas` / `plugin-youtube` | SubHD 浏览器抓取、ASSRT API 检索下载（`status`/`probe`/`derive_query`/`search`/`download`）、16 MB 安全解压与多编码 UTF-8 转换 |
+| `subtitle.sync.v1` | `plugin-sub-hunter` | `MediaWorkbench` / `plugin-fnos-nas` | `ffsubsync` 音轨 VAD / 参考轴自动对齐（`status`/`probe`/`shift`/`sync`）与内置线性偏移/倍率缩放 |
 | `nas.connection.v1` | `plugin-fnos-nas` | 音乐、PDF、EPUB、搜书插件 | 探测飞牛连接状态、列出受管媒体库/书库挂载根与受保护原子写回 |
-| `media.source.v1` | `plugin-bilibili` / `youtube` / `fnos-nas` / `music-lyrics` | `MediaWorkbench` | 通过 `IMediaSource` 向影视音乐工作台注入视频流、番剧、NAS 原盘与无损曲库 |
+| `media.source.v1` | `plugin-bilibili` / `youtube` / `fnos-nas` / `plugin-music` / `plugin-ai-curator` | `MediaWorkbench` | 通过 `IMediaSource` 向影视音乐工作台注入视频流、番剧、NAS 原盘、Apple Music 无损曲库及 AI 推荐流 |
 | `media.local_match.v1` | `plugin-fnos-nas` | `plugin-bilibili` / `plugin-arr-imdb` | 根据片名 / IMDb / TMDB / 剧集季集号查询飞牛 NAS 是否已有本地高码率片源 |
-| `media.clip_jump.v1` | `plugin-fnos-nas` | `BookWorkbench` / `plugin-epub-companion` | 在本地美剧/电影双语字幕库检索英文单词或词组，返回匹配对白与一键跳播原片时间戳 |
-| `web.embed.v1` / `web.extract.v1` / `web.cookies.v1` | `plugin-chrome-web` | `plugin-journals` / `plugin-feed-recipe` / `zhihu` | 拉起托管无边框 Chrome `--app` 阅读窗、提取挑战后正文 DOM，或为配方引擎安全提供指定域名真实登录态 Cookie |
+| `media.clip_jump.v1` | `plugin-fnos-nas` | `BookWorkbench` / `plugin-ebook` | 在本地美剧/电影双语字幕库检索英文单词或词组，返回匹配对白与一键跳播原片时间戳 |
+| `web.embed.v1` / `web.extract.v1` / `web.cookies.v1` / `web.fetch.v1` | `plugin-chrome-web` | `plugin-journals` / `plugin-feed-recipe` / `plugin-blog` / `zhihu` / `linuxdo` / `shuiyuan` / `v2ex` / `reddit` / `x` | 拉起托管无边框 Chrome `--app` 登录/阅读窗、提取挑战后正文 DOM、同步指定域名真实登录态 Cookie，或代表插件在 Chrome 上下文执行同源 `fetch` |
 | `feed.recipe.v1` | `plugin-feed-recipe` | `TextWorkbench`、配方工坊与设置面板 | 管理与热重载 20 行 JSON/Lua 声明式站点配方，联合 Chrome Cookie 过验证、双语对照翻译与折叠评论树 |
-| `text.source.v1` | `plugin-feed-recipe` / `zhihu` / `linuxdo` / `reddit` / `journals` | `TextWorkbench` | 通过 `ITextSource` 提供文章流、公式代码块段落与嵌套评论树 |
-| `book.source.v1` | `plugin-pdf-babeldoc` / `plugin-epub-companion` | `BookWorkbench` | 通过 `IBookSource` 提供书架、双语分页 `BookSpread` 与 `VocabCard` |
+| `blog.subscription.v1` | `plugin-blog` | `TextWorkbench`、博主订阅页、`AiCompanionDock` | 管理用户自助收藏的个人博客（增删改查/刷新），支持像挑 UP 主一样点进单个博客拉取文章流（含 Chrome SPA/付费墙抽取） |
+| `text.source.v1` | `plugin-feed-recipe` / `plugin-blog` / `zhihu` / `linuxdo` / `shuiyuan` / `v2ex` / `reddit` / `x` / `journals` / `plugin-ai-curator` | `TextWorkbench` | 通过 `ITextSource` 提供文章流、公式代码块段落、嵌套评论树与 AI 多栏目导读（`category == "multi"`） |
+| `book.source.v1` | `plugin-pdf-babeldoc` / `plugin-ebook` / `plugin-ai-curator` | `BookWorkbench` | 通过 `IBookSource` 提供书架、双语分页 `BookSpread` 与 `VocabCard` |
 | `book.bilingual_pdf.v1` | `plugin-pdf-babeldoc` | `plugin-journals` / `plugin-zlib` / `plugin-annas-archive` | 提交本地 PDF 生成 BabelDOC 双栏对照文档并回流书架 |
-| `book.sync.v1` | `plugin-fnos-nas` | `plugin-epub-companion` / `plugin-zlib` / `plugin-annas-archive` | 跨设备同步阅读进度、句段精读笔记与电子书资产至飞牛 NAS |
-| `vocab.sm2.v1` | `plugin-epub-companion` | `TextWorkbench` / `MediaWorkbench` | 划词入库、词根词源缓存查询与 SM-2 间隔重复打分更新 |
+| `book.sync.v1` | `plugin-fnos-nas` | `plugin-ebook` / `plugin-zlib` / `plugin-annas-archive` | 跨设备同步阅读进度、句段精读笔记与电子书资产至飞牛 NAS |
+| `vocab.sm2.v1` | `plugin-ebook` | `TextWorkbench` / `MediaWorkbench` / `plugin-ai-curator` | 划词入库、词根词源缓存查询与 SM-2 间隔重复打分更新 |
 
 ### 4.3 `EntityBus` 标准事件主题与载荷规范
 
@@ -263,6 +269,9 @@ public:
 | :--- | :--- | :--- |
 | `"asr.job.progress"` | `plugin-asr-funasr` 完成长音视频单个切片转写并保存断点后 | `{"job_id": "...", "media_path": "...", "completed_chunks": 2, "total_chunks": 5, "progress": 0.4}` |
 | `"asr.job.completed"` | `plugin-asr-funasr` 完成整片转写与 `.srt` 合并写入后 | `{"job_id": "...", "media_path": "...", "output_srt_path": "...", "cue_count": 148}` |
+| `"entity.recommend.updated"` | `plugin-ai-curator` 完成双仓历史归档回灌、每日精选发布或按需可重复推荐反写后 | `{"mode": "daily_immutable \| interactive_ephemeral", "set_id": "...", "operation_id": "...", "domains": ["media", "text"], "written_count": 5, "auto_focus": true}` |
+| `"entity.music.playlist_synced"` | `plugin-music` 完成 Apple Music 歌单写回并通过读回校验后 | `{"mode": "daily_immutable \| interactive_ephemeral", "playlist_id": "p.YJXV7dEIeb3GzZX", "playlist_name": "ChatGPT Daily 5", "added_count": 5, "verified_count": 5}` |
+| `"curation.job.progress"` | 内驻 `ai.curation.v1` 在后台执行克隆回灌、检索核验或歌单同步期间回报阶段进度 | `{"job_id": "...", "mode": "interactive_ephemeral", "stage": "searching \| verifying \| writing_feed \| syncing_playlist \| done", "message": "..."}` |
 | `"entity.media.open"` | 从任意插件（如原版书台词检索、选片页）请求打开视频/音频片段 | `{"item_id": "...", "source_id": "fnos-nas", "title": "...", "kind": "nas", "play_url": "file:///...", "start_sec": 842.5, "end_sec": 856.0}` |
 | `"entity.text.open"` | 打开指定帖子、专栏文章或 DOI 期刊论文 | `{"article_id": "...", "source_id": "journals", "url": "https://...", "doi": "10.1038/..."}` |
 | `"entity.book.open"` | 下载或排版完成后在书本工作台打开 PDF / EPUB 并定位页码 | `{"book_id": "...", "file_path": "/path/to/paper.dual.pdf", "format": "pdf", "page": 1}` |
@@ -610,7 +619,7 @@ public:
 
 ### 7.2 情景一：影视与音乐工作台（`ContentDomain::Media` · `IMediaSource`）
 
-面向 **Bilibili（`plugin-bilibili`）、飞牛影院（`plugin-fnos-nas`）、YouTube（`plugin-youtube`）与无损音乐双语歌词（`plugin-music-lyrics`）**：
+面向 **Bilibili（`plugin-bilibili`）、飞牛影院（`plugin-fnos-nas`）、YouTube（`plugin-youtube`）与 Apple Music 无损双语歌词（`plugin-music`）**：
 
 - **插件数据接口**：实现 `omnidesk::IMediaSource` 并调用 `ctx.registerMediaSource(source)`：
   - `categories()`：返回栏目列表（如 `{"推荐", "动态", "热门", "追番", "直播"}` 或 `{"电影", "剧集", "无损音乐"}`）。
@@ -625,14 +634,15 @@ public:
 
 ### 7.3 情景二：文字、社区与科学期刊工作台（`ContentDomain::Text` · `ITextSource`）
 
-面向 **独立 Blog、知乎（`plugin-zhihu`）、Linux.do（`plugin-linuxdo`）、Reddit（`plugin-reddit`）以及科学期刊网站（arXiv / Nature / Science / PubMed，`plugin-journals` + `plugin-chrome-web`）**：
+面向 **独立 Blog（`plugin-blog`）、知乎（`plugin-zhihu`）、Linux.do（`plugin-linuxdo`）、交大水源社区（`plugin-shuiyuan`）、V2EX（`plugin-v2ex`）、Reddit（`plugin-reddit`）、X（`plugin-x`）以及科学期刊网站（arXiv / Nature / Science / PubMed，`plugin-journals` + `plugin-chrome-web`）**：
 
 - **插件数据接口**：实现 `omnidesk::ITextSource` 并调用 `ctx.registerTextSource(source)`：
-  - `category()`：标识垂直类型 `"blog" | "zhihu" | "linuxdo" | "reddit" | "journal"`。
-  - `fetchFeed(query)`：返回 `std::vector<TextFeedItem>`（含 `source_name`、`author`、`score`、`comment_count`、`tags`、`bilingual_cached`）。
+  - `category()`：标识垂直类型 `"blog" | "zhihu" | "linuxdo" | "shuiyuan" | "v2ex" | "reddit" | "x" | "journal"`。
+  - `channels()`：返回该来源内部的动态子栏目 `std::vector<TextChannel>`（`id`、`name`、`badge`、`requires_auth`），如知乎的 `热榜/推荐/关注/收藏夹`、Discourse 的 `最新/热门/板块`、或个人博客里每位收藏博主本身作为一个栏目（`subprocess` Worker 通过 `op = "text.channels"` 透传）。
+  - `fetchFeed(query)` / `fetchFeedInChannel(channel_id, query)`：返回 `std::vector<TextFeedItem>`（含 `source_name`、`author`、`score`、`comment_count`、`tags`、`bilingual_cached`）；当用户选中第二行子栏目 Pill 时，宿主自动调用 `fetchFeedInChannel(channel_id, query)`（Worker 通过 `op = "text.fetch_feed"` 携带 `channel_id`）。
   - `fetchArticle(article_id)`：返回完整 `TextArticle`，其正文拆分为有序 `std::vector<TextParagraph>`（`kind`: `"heading" | "paragraph" | "quote" | "code" | "formula"`，分别保存 `original` 与 `translated`），评论区为递归树结构 `std::vector<CommentNode>`。
 - **专属 UI 排版规则（`TextWorkbench`）**：
-  1. **顶部多源过滤与三态双语切换栏**：左侧按 `全部 | Blog | 知乎 | Linux.do | Reddit | 科学期刊` 快速筛选；右侧提供 **`双语对照（Parallel）| 仅译文 | 仅原文`** 一键切换。
+  1. **顶部两级来源与子栏目过滤 + 三态双语切换栏**：第一行按 `全部 | 知乎 | 个人博客 | Linux.do | 交大水源 | V2EX | Reddit | X | 科学期刊 | 配方源` 快速筛选；选中具体来源且其返回 `channels()` 时，第二行自动展开该来源的动态子栏目 Pill；阅读区顶部提供 **`双语对照（Parallel）| 仅译文 | 仅原文`** 一键切换。
   2. **分体裁自适应阅读器**：
      - **Blog / 知乎长文**：舒适纸感行宽与 `1.55` 行距，`code` 段落使用软底色等宽卡片，`quote` 段落带左边框导引。
      - **Linux.do / Reddit 社区帖**：正文下方直接挂载原生可折叠嵌套 **`CommentTreeView`**（按深度缩进并绘制纵向层级线，显示 `role_badge` 如 `OP` / `Mod` 与点赞 `score`，点击或按回车可折叠/展开任意楼中楼子树，支持单条外语高赞回复即点即译）。
@@ -640,7 +650,7 @@ public:
 
 ### 7.4 情景三：书本与文档伴读工作台（`ContentDomain::Book` · `IBookSource`）
 
-面向 **PDF 双语排版（`plugin-pdf-babeldoc`）与 EPUB / MOBI / AZW3 / TXT 原版书伴读（`plugin-epub-companion`）**：
+面向 **PDF 双语排版（`plugin-pdf-babeldoc`）与 EPUB / MOBI / AZW3 / TXT 原版书伴读（`plugin-ebook`）**：
 
 - **插件数据接口**：实现 `omnidesk::IBookSource` 并调用 `ctx.registerBookSource(source)`：
   - `listBooks(format_filter, query)`：返回 `std::vector<BookItem>`（`format`: `"pdf" | "epub" | "mobi" | "azw3" | "txt"`、`current_page` / `total_pages`、`bilingual_ready`、`vocab_count`、`nas_synced`）。
@@ -654,6 +664,24 @@ public:
      - **原片对白跳播（`triggerClipJump`）**：当检测到 `plugin-fnos-nas` 提供了 `media.clip_jump.v1` 时，一键检索该词在飞牛美剧库中的真实对白并跳播对应片段；
      - **一键收入生词本**：发布 `"entity.vocab.add"` 或写入 `vocab.sm2.v1`。
   4. **SM-2 闪卡复习台（`VocabReview`）**：正面展示单词与原书真实语境原句，翻面揭晓词根词源与释义，按记忆熟练度（`重来 / 模糊 / 熟悉 / 轻松`）更新下次复习间隔。
+
+---
+
+## 八（零）、Web 社区插件统一登录、Cookie 同步与反爬代理规范
+
+面向 **知乎（`plugin-zhihu`）、交大水源社区（`plugin-shuiyuan`）、Linux.do（`plugin-linuxdo`）、V2EX（`plugin-v2ex`）、Reddit（`plugin-reddit`）、X（`plugin-x`）与个人博客订阅（`plugin-blog`）** 等需要浏览器登录、SPA 动态渲染或对抗 Cloudflare / 前端动态签名的插件，统一复用 `plugin-chrome-web` 底座，不再按站点各自堆砌 Go 或独立浏览器运行时。
+
+- **完整三层登录架构、多源 Cookie 优先级、Chrome 同源 `web.fetch.v1` 代理契约及逐站适配清单**：见独立规范文档 [`docs/WEB_AUTH_AND_SESSION_PROTOCOL.md`](WEB_AUTH_AND_SESSION_PROTOCOL.md)。
+- **参考实现**：交互窗登录参考 `apple-music-online` 与 `web.embed.v1`；Cookie 同步与 `SecretVault`/`cookies.txt` 回退参考 `omnidesk-plugin-youtube`（`src/auth.cpp`）与 `omnidesk-plugin-feed-recipe`（`src/cookie_bridge.cpp`）；原生扫码持久化参考 `omnidesk-plugin-bilibili`（`src/auth.cpp`）。
+
+---
+
+## 八（一）、AI Agent 进驻、双仓历史推荐回灌与双模前端/歌单反写规范
+
+面向 **内驻策展大脑（`plugin-magpie-agent` · `ai.curation.v1`）**、**外部入站编码/定时 Agent（`control.sock` · `omnidesk-pm rpc`）**、**跨三域前端反写中心（`plugin-ai-curator` · `recommend.feed.v1`）** 以及 **Apple Music 歌单写回（`plugin-music` · `media.playlist.v1`）**：
+
+- **宿主入站控制网关、双仓（`ZJFILOVE/obsidian-vault` + `ZJFILOVE/music-daily`）自动克隆与历史推荐全量回灌、`daily_immutable`（每日不重复）与 `interactive_ephemeral`（按需可重复、零账本污染）隔离防火墙、以及 Apple Music `p.YJXV7dEIeb3GzZX` 门禁同步完整规范**：见独立规范文档 [`docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md`](AI_AGENT_RECOMMENDATION_PROTOCOL.md)。
+- **统一 Agent Skill 入口（供内驻 Agent 与外部 Antigravity / Codex / Claude Code 共用）**：见 [`.agents/skills/omnidesk-curation-writeback/SKILL.md`](../.agents/skills/omnidesk-curation-writeback/SKILL.md)。
 
 ---
 

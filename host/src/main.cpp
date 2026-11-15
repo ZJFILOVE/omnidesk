@@ -1,10 +1,12 @@
 #include <borealis.hpp>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
 #include "omnidesk/host/kernel.hpp"
 #include "omnidesk/host/shell_activity.hpp"
+#include "omnidesk/dso_view_lease.hpp"
 #include "omnidesk/ui_theme.hpp"
 
 namespace fs = std::filesystem;
@@ -35,6 +37,23 @@ void printHelp() {
         "  omnidesk [--domain store|media|text|book] [--headless-check] [--smoke-ms <ms>]\n";
 }
 
+bool parseSmokeMs(const std::string& raw, int& out_ms) {
+    if (raw.empty() || std::isspace(static_cast<unsigned char>(raw.front()))) {
+        return false;
+    }
+    try {
+        size_t consumed = 0;
+        const int parsed = std::stoi(raw, &consumed, 10);
+        if (consumed != raw.size() || parsed < 0) {
+            return false;
+        }
+        out_ms = parsed;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -49,8 +68,16 @@ int main(int argc, char** argv) {
             return 0;
         } else if (a == "--headless-check") {
             headless_check = true;
-        } else if (a == "--smoke-ms" && i + 1 < argc) {
-            smoke_ms = std::stoi(argv[++i]);
+        } else if (a == "--smoke-ms") {
+            if (i + 1 >= argc || !parseSmokeMs(argv[++i], smoke_ms)) {
+                std::cerr << "Invalid --smoke-ms value: expected a non-negative integer in milliseconds\n";
+                return 1;
+            }
+        } else if (a.rfind("--smoke-ms=", 0) == 0) {
+            if (!parseSmokeMs(a.substr(std::string("--smoke-ms=").size()), smoke_ms)) {
+                std::cerr << "Invalid --smoke-ms value: expected a non-negative integer in milliseconds\n";
+                return 1;
+            }
         } else if (a == "--domain" && i + 1 < argc) {
             std::string d = argv[++i];
             if (d == "media") initial_ws = omnidesk::host::WorkspaceId::Media;
@@ -99,6 +126,13 @@ int main(int argc, char** argv) {
 
     brls::Application::createWindow("OmniDesk");
     brls::Application::setGlobalQuit(false);
+    brls::Application::setAutomaticDeactivation(false);
+    brls::Application::setDeactivatedFPS(60);
+    omnidesk::DsoViewLeaseRegistry::instance().markUiThread();
+    kernel.startDesktopServices();
+    brls::Application::getExitEvent()->subscribe([]() {
+        omnidesk::host::HostKernel::instance().stopBackgroundServices();
+    });
 
     auto* shell = new omnidesk::host::WorkspaceShellActivity(initial_ws);
     brls::Application::pushActivity(shell);

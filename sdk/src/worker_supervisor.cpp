@@ -1,6 +1,7 @@
 #include <omnidesk/worker_supervisor.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
+#include <queue>
 #include <sstream>
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -15,6 +17,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "shutdown_grace.hpp"
 
 namespace omnidesk {
 
@@ -107,7 +110,176 @@ std::atomic<uint64_t> g_socket_seq{1};
 
 }  // namespace
 
-WorkerSupervisor::WorkerSupervisor() {
+struct WorkerSupervisor::PendingOutbound {
+    std::mutex mutex;
+    std::condition_variable cv;
+    StreamCallback on_chunk;
+    std::shared_ptr<CancelToken> cancel;
+    bool done = false;
+    bool failed = false;
+    bool delivered_chunk = false;
+    bool saw_done_chunk = false;
+    std::string accumulated;
+    std::string error;
+    CapabilityResult result;
+};
+
+struct WorkerSupervisor::InboundExecutor {
+    struct Task {
+        std::string worker_id;
+        std::function<void()> fn;
+    };
+
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::condition_variable done_cv;
+        std::queue<Task> queue;
+        std::vector<std::thread::id> worker_ids;
+        std::unordered_map<std::string, size_t> in_flight_by_worker;
+        size_t active_workers = 0;
+        bool stopping = false;
+    };
+
+    struct WorkerEntry {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> exited;
+    };
+
+    explicit InboundExecutor(size_t num_threads = 12) {
+        state->active_workers = num_threads;
+        workers.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
+            auto exited = std::make_shared<std::atomic<bool>>(false);
+            std::thread t([st = state, exited]() { loop(st, exited); });
+            {
+                std::lock_guard lock(state->mutex);
+                state->worker_ids.push_back(t.get_id());
+            }
+            workers.push_back(WorkerEntry{std::move(t), std::move(exited)});
+        }
+    }
+
+    ~InboundExecutor() {
+        shutdown(200);
+    }
+
+    void submit(const std::string& worker_id, std::function<void()> fn) {
+        std::lock_guard lock(state->mutex);
+        if (state->stopping) return;
+        ++state->in_flight_by_worker[worker_id];
+        state->queue.push(Task{worker_id, std::move(fn)});
+        state->cv.notify_one();
+    }
+
+    bool isExecutorThread() const {
+        const auto self_id = std::this_thread::get_id();
+        std::lock_guard lock(state->mutex);
+        for (const auto& wid : state->worker_ids) {
+            if (wid == self_id) return true;
+        }
+        return false;
+    }
+
+    void waitForWorker(const std::string& worker_id, int64_t timeout_ms) {
+        if (isExecutorThread()) return;
+        std::unique_lock lock(state->mutex);
+        if (state->stopping) return;
+        const int64_t wait_ms = std::max<int64_t>(0, timeout_ms);
+        state->done_cv.wait_for(lock, std::chrono::milliseconds(wait_ms), [&]() {
+            auto it = state->in_flight_by_worker.find(worker_id);
+            return it == state->in_flight_by_worker.end() || it->second == 0;
+        });
+    }
+
+    void shutdown(int timeout_ms) {
+        std::queue<Task> dropped;
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->stopping) return;
+            state->stopping = true;
+            std::swap(dropped, state->queue);
+        }
+        while (!dropped.empty()) {
+            auto it_w = dropped.front().worker_id;
+            dropped.pop();
+            std::lock_guard lock(state->mutex);
+            auto it = state->in_flight_by_worker.find(it_w);
+            if (it != state->in_flight_by_worker.end() && it->second > 0) {
+                --it->second;
+                if (it->second == 0) state->in_flight_by_worker.erase(it);
+            }
+        }
+        state->cv.notify_all();
+        const int grace_ms = detail::resolveShutdownGraceMs(timeout_ms);
+        const auto self_id = std::this_thread::get_id();
+        {
+            std::unique_lock lock(state->mutex);
+            if (grace_ms > 0) {
+                state->done_cv.wait_for(lock, std::chrono::milliseconds(grace_ms), [this]() {
+                    return state->active_workers == 0;
+                });
+            }
+        }
+        for (auto& w : workers) {
+            if (!w.thread.joinable()) continue;
+            if (w.thread.get_id() == self_id || !w.exited->load(std::memory_order_acquire)) {
+                w.thread.detach();
+            } else {
+                w.thread.join();
+            }
+        }
+        workers.clear();
+    }
+
+    static void loop(std::shared_ptr<State> st, std::shared_ptr<std::atomic<bool>> exited) {
+        struct ExitGuard {
+            std::shared_ptr<State> st_ptr;
+            std::shared_ptr<std::atomic<bool>> ex_ptr;
+            ~ExitGuard() {
+                {
+                    std::lock_guard lock(st_ptr->mutex);
+                    if (st_ptr->active_workers > 0) --st_ptr->active_workers;
+                    st_ptr->done_cv.notify_all();
+                }
+                ex_ptr->store(true, std::memory_order_release);
+            }
+        } exit_guard{st, exited};
+
+        while (true) {
+            Task task;
+            {
+                std::unique_lock lock(st->mutex);
+                st->cv.wait(lock, [&st]() { return st->stopping || !st->queue.empty(); });
+                if (st->stopping && st->queue.empty()) return;
+                task = std::move(st->queue.front());
+                st->queue.pop();
+            }
+            try {
+                if (task.fn) task.fn();
+            } catch (...) {
+            }
+            task.fn = {};
+            {
+                std::lock_guard lock(st->mutex);
+                auto it = st->in_flight_by_worker.find(task.worker_id);
+                if (it != st->in_flight_by_worker.end() && it->second > 0) {
+                    --it->second;
+                    if (it->second == 0) {
+                        st->in_flight_by_worker.erase(it);
+                        st->done_cv.notify_all();
+                    }
+                }
+            }
+        }
+    }
+
+    std::shared_ptr<State> state = std::make_shared<State>();
+    std::vector<WorkerEntry> workers;
+};
+
+WorkerSupervisor::WorkerSupervisor()
+    : inbound_executor_(std::make_unique<InboundExecutor>(12)) {
     watchdog_thread_ = std::thread([this]() { watchdogLoop(); });
 }
 
@@ -118,9 +290,42 @@ WorkerSupervisor::~WorkerSupervisor() {
     }
     watchdog_cv_.notify_all();
     stopAll();
+    if (inbound_executor_) {
+        inbound_executor_->shutdown(300);
+    }
     if (watchdog_thread_.joinable()) {
         watchdog_thread_.join();
     }
+}
+
+void WorkerSupervisor::setWorkerCallbacks(const std::string& worker_id,
+                                        InboundRequestHandler on_request,
+                                        InboundEventHandler on_event,
+                                        WorkerExitHandler on_exit) {
+    auto rt = findRuntime(worker_id);
+    if (!rt) return;
+    std::lock_guard lk(rt->state_mutex);
+    rt->inbound_req_handler = std::move(on_request);
+    rt->inbound_evt_handler = std::move(on_event);
+    rt->exit_handler = std::move(on_exit);
+}
+
+bool WorkerSupervisor::sendEvent(const std::string& worker_id, const nlohmann::json& event) {
+    auto rt = findRuntime(worker_id);
+    if (!rt || !rt->spec.duplex) return false;
+    {
+        std::lock_guard lk(rt->state_mutex);
+        if (rt->pid <= 0 || rt->stopping_child || rt->retired || rt->stdin_fd < 0) {
+            return false;
+        }
+    }
+    nlohmann::json wire = event.is_object() ? event : nlohmann::json::object();
+    if (!wire.contains("kind")) wire["kind"] = "event";
+    const std::string line = wire.dump() + "\n";
+    if (line.size() > max_frame_bytes) return false;
+    bool timed_out = false;
+    bool cancelled = false;
+    return writeLineDuplex(*rt, line, nullptr, steadyNowMs() + 100, timed_out, cancelled);
 }
 
 void WorkerSupervisor::setFaultCallback(FaultCallback cb) {
@@ -272,6 +477,7 @@ bool WorkerSupervisor::reapExitedLocked(WorkerRuntime& rt,
     if (res == dead_pid) kill(-dead_pid, SIGKILL);
     rt.pid = -1;
     closeIoFdsLocked(rt);
+    rt.pending_exit_notify = true;
 
     const bool crashed = !rt.stopping_child && (force_unexpected || sig != 0 || exit_code != 0);
     if (crashed) {
@@ -304,10 +510,11 @@ bool WorkerSupervisor::reapExitedLocked(WorkerRuntime& rt,
     return true;
 }
 
-bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
+bool WorkerSupervisor::spawnLocked(const std::shared_ptr<WorkerRuntime>& rt_ptr,
                                    std::unique_lock<std::mutex>& lk,
                                    std::string* error,
                                    WorkerFaultEvent* crash_out) {
+    WorkerRuntime& rt = *rt_ptr;
     ignoreSigpipeOnce();
     rt.lifecycle_cv.wait(lk, [&rt]() { return !rt.stopping_child; });
     if (rt.retired) {
@@ -317,12 +524,22 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
 
     bool crashed_prior = false;
     WorkerFaultEvent local_crash;
-    reapExitedLocked(rt, &crashed_prior, &local_crash, false);
+    bool reaped_prior = reapExitedLocked(rt, &crashed_prior, &local_crash, false);
+    bool need_exit_notify = rt.pending_exit_notify;
     if (crashed_prior && crash_out) {
         *crash_out = local_crash;
     }
     if (rt.pid > 0) return true;
     if (rt.quarantined) {
+        if (need_exit_notify && rt.exit_handler) {
+            rt.pending_exit_notify = false;
+            auto exit_cb = rt.exit_handler;
+            const std::string wid = rt.spec.worker_id;
+            const std::string pid_str = rt.spec.plugin_id;
+            lk.unlock();
+            try { exit_cb(wid, pid_str); } catch (...) {}
+            lk.lock();
+        }
         if (error) {
             *error = "worker quarantined after repeated crashes (" + rt.last_error + ")";
         }
@@ -331,16 +548,29 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
 
     closeIoFdsLocked(rt);
     closeFd(rt.stderr_fd);
-    if (rt.stderr_thread.joinable()) {
+    if (rt.reader_thread.joinable() || rt.stderr_thread.joinable() || (need_exit_notify && rt.exit_handler)) {
         rt.stopping_child = true;
+        std::thread reader_join = std::move(rt.reader_thread);
         std::thread err_join = std::move(rt.stderr_thread);
+        auto exit_cb = need_exit_notify ? rt.exit_handler : WorkerExitHandler{};
+        if (need_exit_notify) rt.pending_exit_notify = false;
+        const std::string wid = rt.spec.worker_id;
+        const std::string pid_str = rt.spec.plugin_id;
         lk.unlock();
-        err_join.join();
+        if (reader_join.joinable()) reader_join.join();
+        if (err_join.joinable()) err_join.join();
+        if (exit_cb) {
+            try { exit_cb(wid, pid_str); } catch (...) {}
+        }
         lk.lock();
         rt.stopping_child = false;
         rt.lifecycle_cv.notify_all();
         reapExitedLocked(rt, nullptr, nullptr, false);
         if (rt.pid > 0) return true;
+        if (rt.retired) {
+            if (error) *error = "worker unregistered";
+            return false;
+        }
         closeIoFdsLocked(rt);
         closeFd(rt.stderr_fd);
     }
@@ -547,6 +777,8 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
     rt.last_active_ms = steadyNowMs();
     rt.pending_auto_restart = false;
     ++rt.restart_count;
+    rt.stdout_buf.clear();
+    rt.io_generation = rt.restart_count;
 
     if (crashed_prior && crash_out) {
         crash_out->auto_restarted = true;
@@ -555,7 +787,8 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
     }
 
     int err_fd = rt.stderr_fd;
-    rt.stderr_thread = std::thread([&rt, err_fd]() {
+    rt.stderr_thread = std::thread([rt_ptr, err_fd]() {
+        WorkerRuntime& rt = *rt_ptr;
         char buf[1024];
         std::string line;
         while (true) {
@@ -591,18 +824,32 @@ bool WorkerSupervisor::spawnLocked(WorkerRuntime& rt,
         }
     });
 
+    if (rt.spec.duplex) {
+        const uint64_t gen = rt.io_generation;
+        {
+            std::lock_guard olk(rt.outbound_mutex);
+            rt.reader_active = true;
+        }
+        rt.reader_thread = std::thread([this, rt_ptr, gen]() {
+            readerLoopDuplex(rt_ptr, gen);
+        });
+    }
+
     return true;
 }
 
 void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
     int pid = -1;
     int64_t grace_ms = 1200;
+    bool is_duplex = false;
+    std::string wid;
+    std::string pid_str;
     {
         std::unique_lock<std::mutex> lk(rt.state_mutex);
         rt.lifecycle_cv.wait(lk, [&rt]() { return !rt.stopping_child; });
         ++rt.stop_generation;
         if (rt.pid <= 0 && rt.stdin_fd < 0 && rt.stdout_fd < 0 && rt.stderr_fd < 0 &&
-            !rt.stderr_thread.joinable()) {
+            !rt.stderr_thread.joinable() && !rt.reader_thread.joinable()) {
             if (!rt.active_socket_path.empty()) {
                 ::unlink(rt.active_socket_path.c_str());
                 rt.active_socket_path.clear();
@@ -612,6 +859,27 @@ void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
         rt.stopping_child = true;
         pid = rt.pid;
         grace_ms = std::max<int64_t>(50, rt.spec.stop_grace_ms);
+        is_duplex = rt.spec.duplex;
+        wid = rt.spec.worker_id;
+        pid_str = rt.spec.plugin_id;
+        if (!is_duplex) {
+            if (rt.shared_io_fd) {
+                if (rt.stdin_fd >= 0) ::shutdown(rt.stdin_fd, SHUT_WR);
+            } else {
+                closeFd(rt.stdin_fd);
+            }
+        }
+    }
+
+    if (is_duplex) {
+        {
+            std::lock_guard ilk(rt.inbound_mutex);
+            for (auto& [_, tok] : rt.active_inbound) {
+                if (tok) tok->cancel();
+            }
+        }
+        std::unique_lock<std::timed_mutex> wlk(rt.write_mutex, std::chrono::milliseconds(100));
+        std::lock_guard lk(rt.state_mutex);
         if (rt.shared_io_fd) {
             if (rt.stdin_fd >= 0) ::shutdown(rt.stdin_fd, SHUT_WR);
         } else {
@@ -664,6 +932,7 @@ void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
 
     if (pid > 0) kill(-pid, SIGKILL);
     std::thread err_join;
+    std::thread reader_join;
     {
         std::lock_guard lk(rt.state_mutex);
         if (pid > 0) {
@@ -675,20 +944,35 @@ void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
             rt.pid = -1;
         }
         rt.pending_auto_restart = false;
+        if (rt.reader_thread.joinable()) {
+            reader_join = std::move(rt.reader_thread);
+        }
         closeIoFdsLocked(rt);
         if (rt.stderr_thread.joinable()) {
             err_join = std::move(rt.stderr_thread);
         }
     }
+    if (reader_join.joinable()) {
+        reader_join.join();
+    }
     if (err_join.joinable()) {
         err_join.join();
     }
+    if (is_duplex && inbound_executor_) {
+        inbound_executor_->waitForWorker(wid, grace_ms);
+    }
+    WorkerExitHandler exit_cb;
     {
         std::lock_guard lk(rt.state_mutex);
         closeFd(rt.stderr_fd);
         rt.stopping_child = false;
+        rt.pending_exit_notify = false;
+        exit_cb = rt.exit_handler;
     }
     rt.lifecycle_cv.notify_all();
+    if (exit_cb) {
+        try { exit_cb(wid, pid_str); } catch (...) {}
+    }
 }
 
 bool WorkerSupervisor::ensureRunning(const std::string& worker_id, std::string* error) {
@@ -701,7 +985,7 @@ bool WorkerSupervisor::ensureRunning(const std::string& worker_id, std::string* 
     bool ok = false;
     {
         std::unique_lock<std::mutex> lk(rt->state_mutex);
-        ok = spawnLocked(*rt, lk, error, &crash_evt);
+        ok = spawnLocked(rt, lk, error, &crash_evt);
     }
     if (!crash_evt.worker_id.empty()) {
         notifyFault(crash_evt);
@@ -764,16 +1048,20 @@ size_t WorkerSupervisor::evictIdleNow() {
         bool should_stop = false;
         WorkerFaultEvent crash_evt;
         bool crashed_now = false;
+        bool reaped_now = false;
+        WorkerExitHandler exit_cb;
+        std::string wid;
+        std::string pid_str;
         {
             std::unique_lock<std::mutex> lk(rt->state_mutex);
             if (rt->in_flight > 0 || rt->retired) continue;
-            reapExitedLocked(*rt, &crashed_now, &crash_evt, false);
+            reaped_now = reapExitedLocked(*rt, &crashed_now, &crash_evt, false);
             if ((crashed_now || rt->pending_auto_restart) && !shutting_down &&
                 rt->spec.auto_restart && !rt->quarantined && !rt->stopping_child &&
                 rt->in_flight == 0) {
                 rt->pending_auto_restart = false;
                 std::string err;
-                const bool respawn_ok = spawnLocked(*rt, lk, &err);
+                const bool respawn_ok = spawnLocked(rt, lk, &err);
                 if (crashed_now) {
                     crash_evt.auto_restarted = true;
                     crash_evt.restart_succeeded = respawn_ok;
@@ -782,12 +1070,20 @@ size_t WorkerSupervisor::evictIdleNow() {
                         crash_evt.error += "; respawn failed: " + err;
                     }
                 }
+            } else if (reaped_now || rt->pending_exit_notify) {
+                rt->pending_exit_notify = false;
+                exit_cb = rt->exit_handler;
+                wid = rt->spec.worker_id;
+                pid_str = rt->spec.plugin_id;
             }
             if (!rt->stopping_child && rt->pid > 0 && rt->in_flight == 0 &&
                 rt->spec.idle_timeout_ms > 0 &&
                 (now - rt->last_active_ms) >= rt->spec.idle_timeout_ms) {
                 should_stop = true;
             }
+        }
+        if (exit_cb) {
+            try { exit_cb(wid, pid_str); } catch (...) {}
         }
         if (crashed_now) {
             faults.push_back(std::move(crash_evt));
@@ -942,6 +1238,601 @@ bool WorkerSupervisor::readLineInterruptible(WorkerRuntime& rt,
     }
 }
 
+bool WorkerSupervisor::writeLineDuplex(WorkerRuntime& rt,
+                                       const std::string& line,
+                                       const std::shared_ptr<CancelToken>& cancel,
+                                       int64_t deadline_ms,
+                                       bool& timed_out,
+                                       bool& cancelled) {
+    timed_out = false;
+    cancelled = false;
+    std::unique_lock<std::timed_mutex> wlk(rt.write_mutex, std::defer_lock);
+    while (!wlk.try_lock_for(std::chrono::milliseconds(20))) {
+        if (cancel && cancel->isCancelled()) {
+            cancelled = true;
+            return false;
+        }
+        {
+            std::lock_guard lk(rt.state_mutex);
+            if (rt.stopping_child || rt.retired || rt.stdin_fd < 0) return false;
+        }
+        if (steadyNowMs() >= deadline_ms) {
+            timed_out = true;
+            return false;
+        }
+    }
+
+    size_t sent = 0;
+    while (sent < line.size()) {
+        if (cancel && cancel->isCancelled()) {
+            cancelled = true;
+            return false;
+        }
+        const int64_t remaining = deadline_ms - steadyNowMs();
+        if (remaining <= 0) {
+            timed_out = true;
+            return false;
+        }
+        int descriptor = -1;
+        ssize_t written = -1;
+        {
+            std::lock_guard lock(rt.state_mutex);
+            descriptor = rt.stdin_fd;
+            if (descriptor < 0 || rt.stopping_child || rt.retired) return false;
+            written = write(descriptor, line.data() + sent, line.size() - sent);
+        }
+        if (written > 0) {
+            sent += static_cast<size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        if (written >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return false;
+        struct pollfd poll_descriptor{descriptor, POLLOUT, 0};
+        int ready = poll(&poll_descriptor, 1, static_cast<int>(std::min<int64_t>(remaining, 25)));
+        if (ready < 0 && errno != EINTR) return false;
+    }
+    return true;
+}
+
+void WorkerSupervisor::readerLoopDuplex(std::shared_ptr<WorkerRuntime> rt, uint64_t gen) {
+    auto failAllPending = [&](const std::string& reason) {
+        std::unordered_map<std::string, std::shared_ptr<PendingOutbound>> drained;
+        {
+            std::lock_guard olk(rt->outbound_mutex);
+            rt->reader_active = false;
+            std::swap(drained, rt->pending_outbound);
+        }
+        for (auto& [_, p] : drained) {
+            std::lock_guard plk(p->mutex);
+            if (!p->done && !p->failed) {
+                p->failed = true;
+                p->error = reason;
+            }
+            p->cv.notify_all();
+        }
+        std::lock_guard ilk(rt->inbound_mutex);
+        for (auto& [_, tok] : rt->active_inbound) {
+            if (tok) tok->cancel();
+        }
+    };
+
+    std::string fail_reason = "worker closed stream unexpectedly before returning final response";
+    while (true) {
+        int fd = -1;
+        {
+            std::lock_guard lk(rt->state_mutex);
+            if (rt->stopping_child || rt->retired || rt->io_generation != gen) {
+                fail_reason = "worker stopped";
+                break;
+            }
+            fd = rt->stdout_fd;
+        }
+        if (fd < 0) break;
+
+        auto nl = rt->stdout_buf.find('\n');
+        if (nl == std::string::npos) {
+            if (rt->stdout_buf.size() >= max_frame_bytes) {
+                fail_reason = "worker response exceeds 8 MiB frame limit";
+                break;
+            }
+            struct pollfd pfd{fd, POLLIN, 0};
+            int pr = poll(&pfd, 1, 50);
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (pr == 0) continue;
+            if (pfd.revents & POLLNVAL) break;
+
+            char buf[4096];
+            ssize_t n = -1;
+            {
+                std::lock_guard lk(rt->state_mutex);
+                if (fd != rt->stdout_fd || rt->stopping_child || rt->retired || rt->io_generation != gen) {
+                    fail_reason = "worker stopped";
+                    break;
+                }
+                n = read(fd, buf, sizeof(buf));
+            }
+            if (n > 0) {
+                rt->stdout_buf.append(buf, static_cast<size_t>(n));
+                continue;
+            }
+            if (n == 0) {
+                if (rt->stdout_buf.empty()) break;
+                nl = rt->stdout_buf.size();
+            } else {
+                if (errno == EINTR || errno == EAGAIN) continue;
+                break;
+            }
+        }
+
+        std::string line = rt->stdout_buf.substr(0, nl);
+        if (nl < rt->stdout_buf.size()) {
+            rt->stdout_buf.erase(0, nl + 1);
+        } else {
+            rt->stdout_buf.clear();
+        }
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        nlohmann::json obj = nlohmann::json::parse(line, nullptr, false);
+        if (obj.is_discarded() || !obj.is_object()) {
+            continue;
+        }
+
+        const std::string kind = obj.value("kind", "");
+        const std::string id = obj.value("id", "");
+
+        if (kind == "chunk" && !id.empty()) {
+            std::shared_ptr<PendingOutbound> pending;
+            {
+                std::lock_guard olk(rt->outbound_mutex);
+                auto it = rt->pending_outbound.find(id);
+                if (it != rt->pending_outbound.end()) pending = it->second;
+            }
+            if (!pending) continue;
+            if ((obj.contains("type") && !obj["type"].is_string()) ||
+                (obj.contains("event") && !obj["event"].is_string())) {
+                std::lock_guard plk(pending->mutex);
+                pending->failed = true;
+                pending->error = "invalid worker chunk envelope";
+                pending->cv.notify_all();
+                continue;
+            }
+            std::string delta = extractJsonDelta(obj);
+            StreamCallback cb;
+            {
+                std::lock_guard plk(pending->mutex);
+                if (!delta.empty()) {
+                    pending->accumulated += delta;
+                    if (pending->accumulated.size() > max_frame_bytes) {
+                        pending->failed = true;
+                        pending->error = "worker stream exceeds 8 MiB limit";
+                        pending->cv.notify_all();
+                        continue;
+                    }
+                }
+                cb = pending->on_chunk;
+                if (cb) pending->delivered_chunk = true;
+            }
+            if (cb) {
+                StreamChunk chunk;
+                chunk.delta = std::move(delta);
+                chunk.data = obj.contains("data") ? obj["data"] : obj;
+                chunk.event = obj.value("event", obj.value("type", "delta"));
+                chunk.done = false;
+                try { cb(chunk); } catch (...) {}
+            }
+            continue;
+        }
+
+        if (kind == "resp" && !id.empty()) {
+            std::shared_ptr<PendingOutbound> pending;
+            {
+                std::lock_guard olk(rt->outbound_mutex);
+                auto it = rt->pending_outbound.find(id);
+                if (it != rt->pending_outbound.end()) {
+                    pending = std::move(it->second);
+                    rt->pending_outbound.erase(it);
+                }
+            }
+            if (!pending) continue;
+            if ((obj.contains("ok") && !obj["ok"].is_boolean()) ||
+                (obj.contains("error") && !obj["error"].is_string()) ||
+                (obj.contains("cancelled") && !obj["cancelled"].is_boolean())) {
+                std::lock_guard plk(pending->mutex);
+                pending->failed = true;
+                pending->error = "invalid worker response envelope";
+                pending->cv.notify_all();
+                continue;
+            }
+            const bool ok = obj.contains("ok") ? obj["ok"].get<bool>() : obj.value("error", "").empty();
+            const bool was_cancelled = obj.value("cancelled", false);
+            nlohmann::json final_data = obj.contains("data") ? obj["data"] : obj;
+            StreamCallback cb;
+            CapabilityResult res;
+            {
+                std::lock_guard plk(pending->mutex);
+                if (final_data.is_object() && !pending->accumulated.empty() &&
+                    !final_data.contains("text") && !final_data.contains("answer")) {
+                    final_data["text"] = pending->accumulated;
+                }
+                res.ok = ok;
+                res.data = std::move(final_data);
+                res.error = obj.value("error", ok ? "" : (was_cancelled ? "cancelled" : "worker returned error"));
+                res.cancelled = was_cancelled;
+                res.provider_plugin_id = obj.value("provider_plugin_id", rt->spec.plugin_id);
+                if (res.provider_plugin_id.empty()) res.provider_plugin_id = rt->spec.plugin_id;
+                cb = pending->on_chunk;
+                pending->result = res;
+                pending->done = true;
+                if (cb) pending->saw_done_chunk = true;
+            }
+            if (cb) {
+                StreamChunk end_chunk;
+                end_chunk.data = res.data;
+                end_chunk.event = res.cancelled ? "cancelled" : (res.ok ? "done" : "error");
+                end_chunk.done = true;
+                try { cb(end_chunk); } catch (...) {}
+            }
+            pending->cv.notify_all();
+            continue;
+        }
+
+        if (kind == "cancel" && !id.empty()) {
+            std::shared_ptr<CancelToken> tok;
+            {
+                std::lock_guard ilk(rt->inbound_mutex);
+                auto it = rt->active_inbound.find(id);
+                if (it != rt->active_inbound.end()) tok = it->second;
+            }
+            if (tok) tok->cancel();
+            continue;
+        }
+
+        if (kind == "event") {
+            InboundEventHandler evt_handler;
+            std::string wid, pid_str;
+            {
+                std::lock_guard lk(rt->state_mutex);
+                evt_handler = rt->inbound_evt_handler;
+                wid = rt->spec.worker_id;
+                pid_str = rt->spec.plugin_id;
+            }
+            if (evt_handler && inbound_executor_) {
+                inbound_executor_->submit(wid, [evt_handler = std::move(evt_handler), wid, pid_str, obj = std::move(obj)]() {
+                    evt_handler(wid, pid_str, obj);
+                });
+            }
+            continue;
+        }
+
+        if (kind == "req" && !id.empty()) {
+            InboundRequestHandler req_handler;
+            std::string wid, pid_str;
+            {
+                std::lock_guard lk(rt->state_mutex);
+                req_handler = rt->inbound_req_handler;
+                wid = rt->spec.worker_id;
+                pid_str = rt->spec.plugin_id;
+            }
+            auto cancel_tok = CancelToken::create();
+            {
+                std::lock_guard ilk(rt->inbound_mutex);
+                rt->active_inbound[id] = cancel_tok;
+            }
+            if (!inbound_executor_) {
+                std::lock_guard ilk(rt->inbound_mutex);
+                rt->active_inbound.erase(id);
+                continue;
+            }
+            const bool wants_stream = obj.value("stream", false);
+            inbound_executor_->submit(wid, [this, rt, gen, id, wid, pid_str, obj = std::move(obj),
+                                            cancel_tok, req_handler = std::move(req_handler), wants_stream]() {
+                auto canSend = [&]() -> bool {
+                    std::lock_guard lk(rt->state_mutex);
+                    return !rt->stopping_child && !rt->retired && rt->io_generation == gen && rt->stdin_fd >= 0;
+                };
+                CapabilityResult res;
+                if (!req_handler) {
+                    res = {false, nlohmann::json::object(), "no inbound host handler registered", "", false};
+                } else {
+                    StreamCallback stream_cb;
+                    if (wants_stream) {
+                        stream_cb = [this, &rt, &id, &canSend](const StreamChunk& chunk) {
+                            if (chunk.done || !canSend()) return;
+                            nlohmann::json cwire = {
+                                {"kind", "chunk"},
+                                {"id", id},
+                                {"type", "delta"},
+                                {"done", false},
+                                {"event", chunk.event.empty() ? "delta" : chunk.event},
+                                {"delta", chunk.delta},
+                                {"data", chunk.data},
+                            };
+                            bool to = false, ca = false;
+                            writeLineDuplex(*rt, cwire.dump() + "\n", nullptr, steadyNowMs() + 1000, to, ca);
+                        };
+                    }
+                    try {
+                        res = req_handler(wid, pid_str, obj, cancel_tok, stream_cb);
+                    } catch (const std::exception& e) {
+                        res = {false, nlohmann::json::object(), e.what(), "", false};
+                    } catch (...) {
+                        res = {false, nlohmann::json::object(), "host inbound handler exception", "", false};
+                    }
+                }
+                {
+                    std::lock_guard ilk(rt->inbound_mutex);
+                    rt->active_inbound.erase(id);
+                }
+                if (canSend()) {
+                    nlohmann::json rwire = {
+                        {"kind", "resp"},
+                        {"id", id},
+                        {"done", true},
+                        {"ok", res.ok},
+                        {"data", res.data.is_null() ? nlohmann::json::object() : res.data},
+                        {"error", res.error},
+                        {"cancelled", res.cancelled},
+                        {"provider_plugin_id", res.provider_plugin_id},
+                    };
+                    bool to = false, ca = false;
+                    writeLineDuplex(*rt, rwire.dump() + "\n", nullptr, steadyNowMs() + 2000, to, ca);
+                }
+            });
+            continue;
+        }
+    }
+
+    failAllPending(fail_reason);
+}
+
+CapabilityResult WorkerSupervisor::streamRequestDuplex(const std::shared_ptr<WorkerRuntime>& rt,
+                                                       const nlohmann::json& payload,
+                                                       const StreamCallback& on_chunk,
+                                                       const std::shared_ptr<CancelToken>& cancel,
+                                                       int64_t timeout_ms) {
+    const int64_t deadline = steadyNowMs() + std::max<int64_t>(100, timeout_ms);
+    struct FlightGuard {
+        WorkerRuntime& rt;
+        ~FlightGuard() {
+            std::lock_guard lk(rt.state_mutex);
+            if (rt.in_flight > 0) --rt.in_flight;
+            rt.last_active_ms = steadyNowMs();
+        }
+    };
+
+    const int max_attempts = rt->spec.retry_on_crash ? 2 : 1;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        uint64_t gen = 0;
+        uint64_t stop_generation = 0;
+        WorkerFaultEvent pre_crash;
+        bool spawn_ok = false;
+        std::string spawn_err;
+        {
+            std::unique_lock<std::mutex> lk(rt->state_mutex);
+            spawn_ok = spawnLocked(rt, lk, &spawn_err, &pre_crash);
+            if (spawn_ok) {
+                ++rt->in_flight;
+                rt->last_active_ms = steadyNowMs();
+                gen = rt->io_generation;
+                stop_generation = rt->stop_generation;
+            }
+        }
+        if (!pre_crash.worker_id.empty()) {
+            notifyFault(pre_crash);
+        }
+        if (!spawn_ok) {
+            return {false, nlohmann::json::object(), spawn_err, rt->spec.plugin_id, false};
+        }
+
+        FlightGuard guard{*rt};
+        const std::string req_id = "h-" + std::to_string(rt->next_req_seq.fetch_add(1));
+        nlohmann::json wire = payload.is_object() ? payload : nlohmann::json::object();
+        wire["kind"] = "req";
+        wire["id"] = req_id;
+        if (on_chunk && !wire.contains("stream")) {
+            wire["stream"] = true;
+        }
+        const std::string line = wire.dump() + "\n";
+        if (line.size() > max_frame_bytes) {
+            return {false, nlohmann::json::object(), "worker request exceeds 8 MiB frame limit",
+                    rt->spec.plugin_id, false};
+        }
+
+        auto pending = std::make_shared<PendingOutbound>();
+        pending->on_chunk = on_chunk;
+        pending->cancel = cancel;
+        bool reader_dead = false;
+        {
+            std::lock_guard olk(rt->outbound_mutex);
+            if (!rt->reader_active) {
+                reader_dead = true;
+            } else {
+                rt->pending_outbound[req_id] = pending;
+            }
+        }
+
+        auto handleUnexpectedCrashDuplex = [&](const std::string& fallback_reason,
+                                               bool& out_restarted_ok) -> CapabilityResult {
+            out_restarted_ok = false;
+            {
+                std::lock_guard lock(rt->state_mutex);
+                if (rt->retired || rt->stop_generation != stop_generation) {
+                    return {false, nlohmann::json::object(), "worker stopped", rt->spec.plugin_id, false};
+                }
+                if (rt->handled_crash_for_gen >= gen) {
+                    return {false, nlohmann::json::object(),
+                            rt->last_error.empty() ? fallback_reason : rt->last_error,
+                            rt->spec.plugin_id, false};
+                }
+                rt->handled_crash_for_gen = gen;
+            }
+
+            bool crashed = false;
+            WorkerFaultEvent evt;
+            const int64_t wait_end = steadyNowMs() + 100;
+            while (steadyNowMs() < wait_end) {
+                {
+                    std::lock_guard lk(rt->state_mutex);
+                    if (reapExitedLocked(*rt, &crashed, &evt, true) || rt->pid <= 0) {
+                        break;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            if (!crashed) {
+                bool alive = false;
+                int failed_pid = -1;
+                {
+                    std::lock_guard lk(rt->state_mutex);
+                    alive = (rt->pid > 0);
+                    failed_pid = rt->pid;
+                }
+                if (alive) {
+                    stopRuntime(*rt);
+                }
+                std::lock_guard lk(rt->state_mutex);
+                recordFailureLocked(*rt, failed_pid, fallback_reason, evt);
+            } else {
+                WorkerExitHandler exit_cb;
+                std::string wid, pid_str;
+                {
+                    std::lock_guard lk(rt->state_mutex);
+                    rt->pending_exit_notify = false;
+                    exit_cb = rt->exit_handler;
+                    wid = rt->spec.worker_id;
+                    pid_str = rt->spec.plugin_id;
+                }
+                if (exit_cb) {
+                    try { exit_cb(wid, pid_str); } catch (...) {}
+                }
+            }
+
+            bool shutting_down = false;
+            {
+                std::lock_guard lock(mutex_);
+                shutting_down = shutting_down_;
+            }
+            if (!shutting_down && rt->spec.auto_restart && !rt->quarantined) {
+                std::unique_lock<std::mutex> lk(rt->state_mutex);
+                std::string respawn_err;
+                out_restarted_ok = spawnLocked(rt, lk, &respawn_err);
+                evt.auto_restarted = true;
+                evt.restart_succeeded = out_restarted_ok;
+                evt.restart_count = rt->restart_count;
+                if (!out_restarted_ok && !respawn_err.empty()) {
+                    evt.error += "; respawn failed: " + respawn_err;
+                }
+            }
+            notifyFault(evt);
+            return {false, nlohmann::json::object(), evt.error, rt->spec.plugin_id, false};
+        };
+
+        if (reader_dead) {
+            bool restarted_ok = false;
+            CapabilityResult err_res = handleUnexpectedCrashDuplex(
+                "worker reader closed before request was sent", restarted_ok);
+            if (attempt + 1 < max_attempts && restarted_ok) {
+                continue;
+            }
+            return err_res;
+        }
+
+        bool write_timed_out = false;
+        bool write_cancelled = false;
+        if (!writeLineDuplex(*rt, line, cancel, deadline, write_timed_out, write_cancelled)) {
+            {
+                std::lock_guard olk(rt->outbound_mutex);
+                rt->pending_outbound.erase(req_id);
+            }
+            if (write_cancelled) {
+                stopRuntime(*rt);
+                return {false, nlohmann::json::object(), "cancelled", rt->spec.plugin_id, true};
+            }
+            bool restarted_ok = false;
+            CapabilityResult err_res = handleUnexpectedCrashDuplex(
+                write_timed_out ? "worker request timed out writing request" : "failed to write request to worker",
+                restarted_ok);
+            if (!write_timed_out && attempt + 1 < max_attempts && restarted_ok) {
+                continue;
+            }
+            return err_res;
+        }
+
+        bool sent_cancel = false;
+        int64_t cancel_deadline_ms = 0;
+        bool wait_done = false;
+        bool wait_failed = false;
+        bool wait_delivered_chunk = false;
+        std::string wait_error;
+        CapabilityResult wait_result;
+        {
+            std::unique_lock<std::mutex> plk(pending->mutex);
+            while (!pending->done && !pending->failed) {
+                if (cancel && cancel->isCancelled()) {
+                    if (!sent_cancel) {
+                        sent_cancel = true;
+                        cancel_deadline_ms = std::min(deadline, steadyNowMs() + 500);
+                        plk.unlock();
+                        bool cto = false, cca = false;
+                        const std::string cline =
+                            nlohmann::json{{"kind", "cancel"}, {"id", req_id}}.dump() + "\n";
+                        writeLineDuplex(*rt, cline, nullptr, steadyNowMs() + 100, cto, cca);
+                        plk.lock();
+                        continue;
+                    }
+                    if (steadyNowMs() >= cancel_deadline_ms) {
+                        break;
+                    }
+                }
+                const int64_t now = steadyNowMs();
+                const int64_t target = sent_cancel ? cancel_deadline_ms : deadline;
+                if (now >= target) break;
+                const int64_t slice = std::min<int64_t>(target - now, 25);
+                pending->cv.wait_for(plk, std::chrono::milliseconds(slice));
+            }
+            wait_done = pending->done;
+            wait_failed = pending->failed;
+            wait_delivered_chunk = pending->delivered_chunk;
+            wait_error = pending->error;
+            wait_result = pending->result;
+        }
+
+        {
+            std::lock_guard olk(rt->outbound_mutex);
+            rt->pending_outbound.erase(req_id);
+        }
+
+        if (wait_done) {
+            std::lock_guard lk(rt->state_mutex);
+            ++rt->requests_served;
+            return wait_result;
+        }
+        if (cancel && cancel->isCancelled()) {
+            stopRuntime(*rt);
+            return {false, nlohmann::json::object(), "cancelled", rt->spec.plugin_id, true};
+        }
+        if (wait_failed) {
+            bool restarted_ok = false;
+            CapabilityResult err_res = handleUnexpectedCrashDuplex(
+                wait_error.empty() ? "worker closed stream unexpectedly before returning final response"
+                                   : wait_error,
+                restarted_ok);
+            if (!wait_delivered_chunk && attempt + 1 < max_attempts && restarted_ok) {
+                continue;
+            }
+            return err_res;
+        }
+        bool restarted_ok = false;
+        return handleUnexpectedCrashDuplex("worker request timed out", restarted_ok);
+    }
+
+    return {false, nlohmann::json::object(), "worker retry exhausted", rt->spec.plugin_id, false};
+}
+
 CapabilityResult WorkerSupervisor::request(const std::string& worker_id,
                                            const nlohmann::json& payload,
                                            const std::shared_ptr<CancelToken>& cancel,
@@ -961,6 +1852,10 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
     auto rt = findRuntime(worker_id);
     if (!rt) {
         return {false, nlohmann::json::object(), "worker not registered: " + worker_id, "", false};
+    }
+
+    if (rt->spec.duplex) {
+        return streamRequestDuplex(rt, payload, on_chunk, cancel, timeout_ms);
     }
 
     const int64_t deadline = steadyNowMs() + std::max<int64_t>(100, timeout_ms);
@@ -999,7 +1894,7 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
         std::string spawn_err;
         {
             std::unique_lock<std::mutex> lk(rt->state_mutex);
-            spawn_ok = spawnLocked(*rt, lk, &spawn_err, &pre_crash);
+            spawn_ok = spawnLocked(rt, lk, &spawn_err, &pre_crash);
             if (spawn_ok) {
                 ++rt->in_flight;
                 rt->last_active_ms = steadyNowMs();
@@ -1065,7 +1960,7 @@ CapabilityResult WorkerSupervisor::streamRequest(const std::string& worker_id,
             if (!shutting_down && rt->spec.auto_restart && !rt->quarantined) {
                 std::unique_lock<std::mutex> lk(rt->state_mutex);
                 std::string respawn_err;
-                out_restarted_ok = spawnLocked(*rt, lk, &respawn_err);
+                out_restarted_ok = spawnLocked(rt, lk, &respawn_err);
                 evt.auto_restarted = true;
                 evt.restart_succeeded = out_restarted_ok;
                 evt.restart_count = rt->restart_count;

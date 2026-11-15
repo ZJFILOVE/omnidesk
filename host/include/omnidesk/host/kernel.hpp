@@ -7,9 +7,13 @@
 #include "omnidesk/domain_registry.hpp"
 #include "omnidesk/entity_bus.hpp"
 #include "omnidesk/job_center.hpp"
+#include "omnidesk/mpris2.hpp"
 #include "omnidesk/pm/catalog.hpp"
+#include "omnidesk/pm/control_bridge.hpp"
 #include "omnidesk/pm/installer.hpp"
 #include "omnidesk/pm/manager.hpp"
+#include "omnidesk/search_index.hpp"
+#include "omnidesk/ui_task_runner.hpp"
 #include "omnidesk/worker_supervisor.hpp"
 
 namespace omnidesk::host {
@@ -23,6 +27,8 @@ public:
     static HostKernel& instance();
 
     bool init(const char* argv0);
+    void startDesktopServices();
+    void stopBackgroundServices();
     void shutdown();
 
     bool isInitialized() const { return initialized_; }
@@ -33,6 +39,7 @@ public:
     const std::string& sdkCmakeDir() const { return sdk_cmake_dir_; }
     const std::string& resourcesDir() const { return resources_dir_; }
     const std::string& catalogPath() const { return catalog_path_; }
+    std::string controlSocketPath() const;
 
     ConfigStore& config() { return *config_; }
     SecretVault& secrets() { return *secrets_; }
@@ -40,6 +47,9 @@ public:
     EntityBus& bus() { return *bus_; }
     DomainRegistry& domains() { return *domains_; }
     JobCenter& jobs() { return *jobs_; }
+    UiTaskRunner& uiTasks() { return *ui_tasks_; }
+    SearchIndexService& searchIndex() { return *search_index_; }
+    Mpris2Service& mpris() { return *mpris_; }
     WorkerSupervisor& workers() { return *workers_; }
     pm::MarketplaceCatalog& catalog() { return *catalog_; }
     pm::PluginInstaller& installer() { return *installer_; }
@@ -56,6 +66,7 @@ private:
     ~HostKernel() = default;
 
     bool initialized_ = false;
+    bool background_services_stopped_ = false;
     std::string exe_path_;
     std::string data_root_;
     std::string config_root_;
@@ -69,10 +80,18 @@ private:
     std::unique_ptr<EntityBus> bus_;
     std::unique_ptr<DomainRegistry> domains_;
     std::unique_ptr<JobCenter> jobs_;
+    std::unique_ptr<UiTaskRunner> ui_tasks_;
+    std::unique_ptr<UiTaskRunner> search_tasks_;
+    std::unique_ptr<SearchIndexService> search_index_;
+    std::unique_ptr<Mpris2Service> mpris_;
     std::unique_ptr<WorkerSupervisor> workers_;
     std::unique_ptr<pm::MarketplaceCatalog> catalog_;
     std::unique_ptr<pm::PluginInstaller> installer_;
     std::unique_ptr<pm::PluginManager> plugins_;
+    std::unique_ptr<pm::ControlServer> control_server_;
+    uint64_t search_plugin_sub_ = 0;
+    uint64_t search_recommend_sub_ = 0;
+    uint64_t search_vocab_sub_ = 0;
 };
 
 } // namespace omnidesk::host

@@ -16,6 +16,9 @@ extern "C" {
  */
 #define OMNIDESK_PLUGIN_ABI_VERSION 1u
 #define OMNIDESK_SDK_VERSION_STRING "0.1.0"
+#ifndef OMNIDESK_PLUGIN_INTERFACE_REVISION
+#define OMNIDESK_PLUGIN_INTERFACE_REVISION 2u
+#endif
 
 /**
  * Pure C POD handshake struct inspected immediately after dlopen()

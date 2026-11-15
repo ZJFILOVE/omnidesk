@@ -63,11 +63,19 @@ struct CapabilityRegistry::AsyncExecutor {
         std::vector<std::thread::id> worker_ids;
         std::unordered_map<uint64_t, std::shared_ptr<CancelToken>> active_tokens;
         std::unordered_map<uint64_t, std::string> active_plugins;
+        std::unordered_map<std::string, std::unordered_map<uint64_t, std::shared_ptr<CancelToken>>>
+            in_flight_tokens_by_plugin;
         std::unordered_map<std::string, size_t> in_flight_by_plugin;
+        std::unordered_map<std::string, size_t> cancelling_plugins;
         size_t active_workers = 0;
         uint64_t next_id = 1;
         bool stopping = false;
         std::atomic<bool> owner_alive{true};
+
+        mutable std::shared_mutex registry_mutex;
+        std::unordered_map<std::string, std::vector<Entry>> entries;
+        std::shared_ptr<RemoteBridge> remote_bridge;
+        std::shared_ptr<FaultDispatcher> fault_dispatcher;
     };
 
     struct WorkerEntry {
@@ -75,16 +83,102 @@ struct CapabilityRegistry::AsyncExecutor {
         std::shared_ptr<std::atomic<bool>> exited;
     };
 
-    explicit AsyncExecutor(size_t num_threads = 4) {
+    struct FlightGuard {
+        std::shared_ptr<State> st;
+        std::string plugin;
+        uint64_t flight_id = 0;
+
+        FlightGuard() = default;
+        FlightGuard(std::shared_ptr<State> s,
+                    std::string pid,
+                    const std::shared_ptr<CancelToken>& tok)
+            : st(std::move(s)), plugin(std::move(pid)) {
+            if (!st || plugin.empty()) {
+                st.reset();
+                plugin.clear();
+                return;
+            }
+            bool cancel_now = false;
+            {
+                std::lock_guard lock(st->mutex);
+                flight_id = st->next_id++;
+                ++st->in_flight_by_plugin[plugin];
+                if (tok) {
+                    st->in_flight_tokens_by_plugin[plugin][flight_id] = tok;
+                }
+                if (st->stopping ||
+                    st->cancelling_plugins.find(plugin) != st->cancelling_plugins.end()) {
+                    cancel_now = true;
+                }
+            }
+            if (cancel_now && tok) {
+                tok->cancel();
+            }
+        }
+
+        FlightGuard(const FlightGuard&) = delete;
+        FlightGuard& operator=(const FlightGuard&) = delete;
+
+        FlightGuard(FlightGuard&& other) noexcept
+            : st(std::move(other.st)),
+              plugin(std::move(other.plugin)),
+              flight_id(other.flight_id) {
+            other.flight_id = 0;
+            other.plugin.clear();
+        }
+
+        FlightGuard& operator=(FlightGuard&& other) noexcept {
+            if (this != &other) {
+                release();
+                st = std::move(other.st);
+                plugin = std::move(other.plugin);
+                flight_id = other.flight_id;
+                other.flight_id = 0;
+                other.plugin.clear();
+            }
+            return *this;
+        }
+
+        void release() {
+            if (!st || plugin.empty() || flight_id == 0) return;
+            {
+                std::lock_guard lock(st->mutex);
+                auto tok_it = st->in_flight_tokens_by_plugin.find(plugin);
+                if (tok_it != st->in_flight_tokens_by_plugin.end()) {
+                    tok_it->second.erase(flight_id);
+                    if (tok_it->second.empty()) {
+                        st->in_flight_tokens_by_plugin.erase(tok_it);
+                    }
+                }
+                auto cnt_it = st->in_flight_by_plugin.find(plugin);
+                if (cnt_it != st->in_flight_by_plugin.end() && cnt_it->second > 0) {
+                    --cnt_it->second;
+                    if (cnt_it->second == 0) {
+                        st->in_flight_by_plugin.erase(cnt_it);
+                        st->done_cv.notify_all();
+                    }
+                }
+            }
+            st.reset();
+            plugin.clear();
+            flight_id = 0;
+        }
+
+        ~FlightGuard() {
+            release();
+        }
+    };
+
+    explicit AsyncExecutor(std::shared_ptr<FaultDispatcher> fault_disp, size_t num_threads = 4) {
+        state->fault_dispatcher = std::move(fault_disp);
+        std::lock_guard lock(state->mutex);
         state->active_workers = num_threads;
+        state->worker_ids.reserve(num_threads);
         workers.reserve(num_threads);
         for (size_t i = 0; i < num_threads; ++i) {
             auto exited = std::make_shared<std::atomic<bool>>(false);
             std::thread t([st = state, exited]() { loop(st, exited); });
-            {
-                std::lock_guard lock(state->mutex);
-                state->worker_ids.push_back(t.get_id());
-            }
+            state->worker_ids.push_back(t.get_id());
             workers.push_back(WorkerEntry{std::move(t), std::move(exited)});
         }
     }
@@ -103,6 +197,11 @@ struct CapabilityRegistry::AsyncExecutor {
             state->owner_alive.store(false, std::memory_order_release);
             for (const auto& [_, tok] : state->active_tokens) {
                 if (tok) to_cancel.push_back(tok);
+            }
+            for (const auto& [_, tok_map] : state->in_flight_tokens_by_plugin) {
+                for (const auto& [__, tok] : tok_map) {
+                    if (tok) to_cancel.push_back(tok);
+                }
             }
             while (!state->queue.empty()) {
                 dropped.push_back(std::move(state->queue.front()));
@@ -141,6 +240,7 @@ struct CapabilityRegistry::AsyncExecutor {
 
     bool isWorkerThread() const {
         const auto self_id = std::this_thread::get_id();
+        std::lock_guard lock(state->mutex);
         for (const auto& wid : state->worker_ids) {
             if (wid == self_id) return true;
         }
@@ -163,18 +263,44 @@ struct CapabilityRegistry::AsyncExecutor {
     }
 
     void cancelAndWaitPlugin(const std::string& plugin_id, int timeout_ms = -1) {
+        if (plugin_id.empty()) return;
+
         std::vector<std::shared_ptr<CancelToken>> to_cancel;
         {
             std::lock_guard lock(state->mutex);
+            ++state->cancelling_plugins[plugin_id];
             for (const auto& [id, pid] : state->active_plugins) {
-                if (pid.empty() || pid == plugin_id) {
+                if (pid == plugin_id) {
                     auto it = state->active_tokens.find(id);
                     if (it != state->active_tokens.end() && it->second) {
                         to_cancel.push_back(it->second);
                     }
                 }
             }
+            auto f_it = state->in_flight_tokens_by_plugin.find(plugin_id);
+            if (f_it != state->in_flight_tokens_by_plugin.end()) {
+                for (const auto& [_, tok] : f_it->second) {
+                    if (tok) to_cancel.push_back(tok);
+                }
+            }
         }
+
+        struct CancellingGuard {
+            std::shared_ptr<State> st;
+            std::string pid;
+            ~CancellingGuard() {
+                std::lock_guard lock(st->mutex);
+                auto it = st->cancelling_plugins.find(pid);
+                if (it != st->cancelling_plugins.end()) {
+                    if (it->second <= 1) {
+                        st->cancelling_plugins.erase(it);
+                    } else {
+                        --it->second;
+                    }
+                }
+            }
+        } cancelling_guard{state, plugin_id};
+
         for (auto& tok : to_cancel) tok->cancel();
         if (isWorkerThread()) return;
 
@@ -184,7 +310,7 @@ struct CapabilityRegistry::AsyncExecutor {
         if (grace_ms > 0) {
             state->done_cv.wait_for(lock, std::chrono::milliseconds(grace_ms), [this, &plugin_id]() {
                 auto it = state->in_flight_by_plugin.find(plugin_id);
-                return it == state->in_flight_by_plugin.end() || it->second == 0;
+                return state->stopping || it == state->in_flight_by_plugin.end() || it->second == 0;
             });
         }
     }
@@ -196,23 +322,190 @@ struct CapabilityRegistry::AsyncExecutor {
         return it != state->in_flight_by_plugin.end() && it->second > 0;
     }
 
-    static void trackPluginStart(const std::shared_ptr<State>& st, const std::string& plugin_id) {
-        if (!st || plugin_id.empty()) return;
-        std::lock_guard lock(st->mutex);
-        ++st->in_flight_by_plugin[plugin_id];
-    }
+    static CapabilityResult invoke(const std::shared_ptr<State>& st,
+                                   const std::string& plugin_id_filter,
+                                   const std::string& capability_id,
+                                   const nlohmann::json& request,
+                                   const StreamCallback& on_chunk,
+                                   const std::shared_ptr<CancelToken>& cancel,
+                                   bool stream_mode) {
+        if (!st) {
+            return {false, nlohmann::json::object(), "capability registry unavailable", "", false};
+        }
+        if (cancel && cancel->isCancelled()) {
+            return {false, nlohmann::json::object(), "cancelled", plugin_id_filter, true};
+        }
 
-    static void trackPluginEnd(const std::shared_ptr<State>& st, const std::string& plugin_id) {
-        if (!st || plugin_id.empty()) return;
-        std::lock_guard lock(st->mutex);
-        auto it = st->in_flight_by_plugin.find(plugin_id);
-        if (it != st->in_flight_by_plugin.end() && it->second > 0) {
-            --it->second;
-            if (it->second == 0) {
-                st->in_flight_by_plugin.erase(it);
-                st->done_cv.notify_all();
+        std::shared_ptr<CancelToken> eff_cancel = cancel ? cancel : CancelToken::create();
+
+        CapabilityHandler sync_fn;
+        CapabilityStreamHandler stream_fn;
+        std::string pid;
+        int local_priority = 0;
+        std::shared_ptr<RemoteBridge> bridge;
+        std::shared_ptr<FaultDispatcher> fault_disp;
+        FlightGuard flight_guard;
+        {
+            std::shared_lock lock(st->registry_mutex);
+            bridge = st->remote_bridge;
+            fault_disp = st->fault_dispatcher;
+            auto it = st->entries.find(capability_id);
+            if (it != st->entries.end() && !it->second.empty()) {
+                for (const auto& e : it->second) {
+                    if (plugin_id_filter.empty() || e.desc.plugin_id == plugin_id_filter) {
+                        sync_fn = e.handler;
+                        stream_fn = e.stream_handler;
+                        pid = e.desc.plugin_id;
+                        local_priority = e.desc.priority;
+                        flight_guard = FlightGuard(st, pid, eff_cancel);
+                        break;
+                    }
+                }
             }
         }
+
+        if (bridge && bridge->invoke) {
+            bool use_remote = (!sync_fn && !stream_fn);
+            if (!use_remote && plugin_id_filter.empty() && bridge->providers_for) {
+                try {
+                    auto remote_providers = bridge->providers_for(capability_id);
+                    if (!remote_providers.empty() &&
+                        remote_providers[0].plugin_id != pid &&
+                        remote_providers[0].priority > local_priority) {
+                        use_remote = true;
+                    }
+                } catch (...) {
+                }
+            }
+            if (use_remote) {
+                flight_guard.release();
+                try {
+                    return bridge->invoke(
+                        plugin_id_filter, capability_id, request, on_chunk, eff_cancel, stream_mode);
+                } catch (const std::exception& e) {
+                    return {false, nlohmann::json::object(),
+                            std::string("remote capability bridge threw: ") + e.what(),
+                            plugin_id_filter, false};
+                } catch (...) {
+                    return {false, nlohmann::json::object(),
+                            "remote capability bridge threw unknown exception",
+                            plugin_id_filter, false};
+                }
+            }
+        }
+
+        if (!sync_fn && !stream_fn) {
+            std::string err = plugin_id_filter.empty()
+                                  ? ("capability not available: " + capability_id)
+                                  : ("provider '" + plugin_id_filter + "' missing capability '" +
+                                     capability_id + "'");
+            return {false, nlohmann::json::object(), std::move(err), "", false};
+        }
+
+        if (eff_cancel->isCancelled()) {
+            return {false, nlohmann::json::object(), "cancelled", pid, true};
+        }
+
+        CapabilityResult res;
+        auto safeChunk = [&](const StreamChunk& chunk) {
+            if (!on_chunk) return;
+            try {
+                on_chunk(chunk);
+            } catch (...) {
+            }
+        };
+
+        if (stream_fn && (stream_mode || cancel != nullptr)) {
+            bool saw_done = false;
+            StreamCallback wrapped = [&](const StreamChunk& chunk) {
+                if (chunk.done) saw_done = true;
+                if (on_chunk && (!eff_cancel->isCancelled() || chunk.done)) {
+                    safeChunk(chunk);
+                }
+            };
+            try {
+                res = stream_fn(request, eff_cancel, stream_mode ? wrapped : StreamCallback{});
+            } catch (const std::exception& e) {
+                res.ok = false;
+                res.error = std::string("plugin capability threw exception: ") + e.what();
+                if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+            } catch (...) {
+                res.ok = false;
+                res.error = "plugin capability threw unknown exception";
+                if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+            }
+            if (eff_cancel->isCancelled()) {
+                res.cancelled = true;
+                res.ok = false;
+                if (res.error.empty()) res.error = "cancelled";
+            }
+            if (stream_mode && !saw_done && on_chunk) {
+                StreamChunk terminal;
+                terminal.done = true;
+                terminal.data = res.data;
+                terminal.event = res.cancelled ? "cancelled" : (res.ok ? "done" : "error");
+                safeChunk(terminal);
+            }
+        } else if (stream_fn) {
+            std::string accumulated;
+            try {
+                res = stream_fn(request, eff_cancel, [&](const StreamChunk& chunk) {
+                    accumulated += chunk.delta;
+                });
+                if (!accumulated.empty() && res.data.is_object() &&
+                    !res.data.contains("answer") && !res.data.contains("text")) {
+                    res.data["text"] = accumulated;
+                }
+            } catch (const std::exception& e) {
+                res.ok = false;
+                res.error = std::string("plugin capability threw exception: ") + e.what();
+                if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+            } catch (...) {
+                res.ok = false;
+                res.error = "plugin capability threw unknown exception";
+                if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+            }
+            if (eff_cancel->isCancelled()) {
+                res.cancelled = true;
+                res.ok = false;
+                if (res.error.empty()) res.error = "cancelled";
+            }
+        } else {
+            try {
+                res = sync_fn(request);
+            } catch (const std::exception& e) {
+                res.ok = false;
+                res.error = std::string("plugin capability threw exception: ") + e.what();
+                if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+            } catch (...) {
+                res.ok = false;
+                res.error = "plugin capability threw unknown exception";
+                if (fault_disp) fault_disp->report(pid, capability_id, res.error);
+            }
+            if (eff_cancel->isCancelled()) {
+                res.cancelled = true;
+                res.ok = false;
+                if (res.error.empty()) res.error = "cancelled";
+            } else if (stream_mode && on_chunk) {
+                std::string txt = extractTextFallback(res.data);
+                if (!txt.empty()) {
+                    StreamChunk c;
+                    c.delta = std::move(txt);
+                    c.data = res.data;
+                    c.event = "delta";
+                    c.done = false;
+                    safeChunk(c);
+                }
+                StreamChunk terminal;
+                terminal.done = true;
+                terminal.data = res.data;
+                terminal.event = res.ok ? "done" : "error";
+                safeChunk(terminal);
+            }
+        }
+
+        if (res.provider_plugin_id.empty()) res.provider_plugin_id = pid;
+        return res;
     }
 
     static void loop(std::shared_ptr<State> st, std::shared_ptr<std::atomic<bool>> exited) {
@@ -257,13 +550,17 @@ struct CapabilityRegistry::AsyncExecutor {
 
 CapabilityRegistry::CapabilityRegistry()
     : fault_dispatcher_(std::make_shared<FaultDispatcher>()),
-      executor_(std::make_unique<AsyncExecutor>(4)) {}
+      executor_(std::make_unique<AsyncExecutor>(fault_dispatcher_, 4)) {}
 
 CapabilityRegistry::~CapabilityRegistry() {
     shutdown(-1);
 }
 
 void CapabilityRegistry::shutdown(int timeout_ms) {
+    if (executor_ && executor_->state) {
+        std::unique_lock lock(executor_->state->registry_mutex);
+        executor_->state->remote_bridge.reset();
+    }
     if (fault_dispatcher_) {
         std::lock_guard lock(fault_dispatcher_->mutex);
         fault_dispatcher_->handler = {};
@@ -271,6 +568,18 @@ void CapabilityRegistry::shutdown(int timeout_ms) {
     if (executor_) {
         executor_->shutdown(timeout_ms);
     }
+}
+
+void CapabilityRegistry::setRemoteBridge(std::shared_ptr<RemoteBridge> bridge) {
+    if (executor_ && executor_->state) {
+        std::unique_lock lock(executor_->state->registry_mutex);
+        executor_->state->remote_bridge = std::move(bridge);
+    }
+    notifyChanged();
+}
+
+void CapabilityRegistry::notifyRemoteChanged() {
+    notifyChanged();
 }
 
 bool CapabilityRegistry::hasInFlight(const std::string& plugin_id) const {
@@ -286,8 +595,8 @@ bool CapabilityRegistry::registerCapability(const std::string& capability_id,
         return false;
     }
     {
-        std::unique_lock lock(mutex_);
-        auto& list = entries_[capability_id];
+        std::unique_lock lock(executor_->state->registry_mutex);
+        auto& list = executor_->state->entries[capability_id];
         list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry& e) {
             return e.desc.plugin_id == plugin_id;
         }), list.end());
@@ -331,8 +640,8 @@ bool CapabilityRegistry::registerStreamingCapability(const std::string& capabili
     };
 
     {
-        std::unique_lock lock(mutex_);
-        auto& list = entries_[capability_id];
+        std::unique_lock lock(executor_->state->registry_mutex);
+        auto& list = executor_->state->entries[capability_id];
         list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry& e) {
             return e.desc.plugin_id == plugin_id;
         }), list.end());
@@ -353,17 +662,19 @@ bool CapabilityRegistry::registerStreamingCapability(const std::string& capabili
 }
 
 void CapabilityRegistry::unregisterPlugin(const std::string& plugin_id) {
+    if (plugin_id.empty()) return;
     bool changed = false;
     {
-        std::unique_lock lock(mutex_);
-        for (auto it = entries_.begin(); it != entries_.end();) {
+        std::unique_lock lock(executor_->state->registry_mutex);
+        auto& entries = executor_->state->entries;
+        for (auto it = entries.begin(); it != entries.end();) {
             auto& list = it->second;
             size_t before = list.size();
             list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry& e) {
                 return e.desc.plugin_id == plugin_id;
             }), list.end());
             if (list.size() != before) changed = true;
-            if (list.empty()) it = entries_.erase(it);
+            if (list.empty()) it = entries.erase(it);
             else ++it;
         }
     }
@@ -377,16 +688,17 @@ bool CapabilityRegistry::unregisterCapability(const std::string& capability_id,
                                               const std::string& plugin_id) {
     bool changed = false;
     {
-        std::unique_lock lock(mutex_);
-        auto it = entries_.find(capability_id);
-        if (it != entries_.end()) {
+        std::unique_lock lock(executor_->state->registry_mutex);
+        auto& entries = executor_->state->entries;
+        auto it = entries.find(capability_id);
+        if (it != entries.end()) {
             auto& list = it->second;
             size_t before = list.size();
             list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry& e) {
                 return e.desc.plugin_id == plugin_id;
             }), list.end());
             changed = list.size() != before;
-            if (list.empty()) entries_.erase(it);
+            if (list.empty()) entries.erase(it);
         }
     }
     if (changed) notifyChanged();
@@ -394,27 +706,82 @@ bool CapabilityRegistry::unregisterCapability(const std::string& capability_id,
 }
 
 bool CapabilityRegistry::has(const std::string& capability_id) const {
-    std::shared_lock lock(mutex_);
-    auto it = entries_.find(capability_id);
-    return it != entries_.end() && !it->second.empty();
+    std::shared_ptr<RemoteBridge> bridge;
+    {
+        std::shared_lock lock(executor_->state->registry_mutex);
+        const auto& entries = executor_->state->entries;
+        auto it = entries.find(capability_id);
+        if (it != entries.end() && !it->second.empty()) {
+            return true;
+        }
+        bridge = executor_->state->remote_bridge;
+    }
+    if (bridge && bridge->has) {
+        try {
+            return bridge->has(capability_id);
+        } catch (...) {
+            return false;
+        }
+    }
+    return false;
 }
 
 std::vector<CapabilityDescriptor> CapabilityRegistry::providersFor(
     const std::string& capability_id) const {
-    std::shared_lock lock(mutex_);
     std::vector<CapabilityDescriptor> out;
-    auto it = entries_.find(capability_id);
-    if (it != entries_.end()) {
-        for (const auto& e : it->second) out.push_back(e.desc);
+    std::shared_ptr<RemoteBridge> bridge;
+    {
+        std::shared_lock lock(executor_->state->registry_mutex);
+        const auto& entries = executor_->state->entries;
+        auto it = entries.find(capability_id);
+        if (it != entries.end()) {
+            for (const auto& e : it->second) out.push_back(e.desc);
+        }
+        bridge = executor_->state->remote_bridge;
+    }
+    if (bridge && bridge->providers_for) {
+        try {
+            auto remote = bridge->providers_for(capability_id);
+            for (auto& desc : remote) {
+                bool exists = std::any_of(out.begin(), out.end(), [&](const CapabilityDescriptor& local) {
+                    return local.capability_id == desc.capability_id && local.plugin_id == desc.plugin_id;
+                });
+                if (!exists) {
+                    out.push_back(std::move(desc));
+                }
+            }
+            std::stable_sort(out.begin(), out.end(), [](const CapabilityDescriptor& a, const CapabilityDescriptor& b) {
+                return a.priority > b.priority;
+            });
+        } catch (...) {
+        }
     }
     return out;
 }
 
 std::vector<CapabilityDescriptor> CapabilityRegistry::listAll() const {
-    std::shared_lock lock(mutex_);
     std::vector<CapabilityDescriptor> out;
-    for (const auto& [_, list] : entries_) {
-        for (const auto& e : list) out.push_back(e.desc);
+    std::shared_ptr<RemoteBridge> bridge;
+    {
+        std::shared_lock lock(executor_->state->registry_mutex);
+        for (const auto& [_, list] : executor_->state->entries) {
+            for (const auto& e : list) out.push_back(e.desc);
+        }
+        bridge = executor_->state->remote_bridge;
+    }
+    if (bridge && bridge->list_all) {
+        try {
+            auto remote = bridge->list_all();
+            for (auto& desc : remote) {
+                bool exists = std::any_of(out.begin(), out.end(), [&](const CapabilityDescriptor& local) {
+                    return local.capability_id == desc.capability_id && local.plugin_id == desc.plugin_id;
+                });
+                if (!exists) {
+                    out.push_back(std::move(desc));
+                }
+            }
+        } catch (...) {
+        }
     }
     return out;
 }
@@ -425,123 +792,9 @@ CapabilityResult CapabilityRegistry::invokeInternal(const std::string& plugin_id
                                                     const StreamCallback& on_chunk,
                                                     const std::shared_ptr<CancelToken>& cancel,
                                                     bool stream_mode) const {
-    if (cancel && cancel->isCancelled()) {
-        return {false, nlohmann::json::object(), "cancelled", plugin_id_filter, true};
-    }
-
-    CapabilityHandler sync_fn;
-    CapabilityStreamHandler stream_fn;
-    std::string pid;
-    {
-        std::shared_lock lock(mutex_);
-        auto it = entries_.find(capability_id);
-        if (it != entries_.end() && !it->second.empty()) {
-            for (const auto& e : it->second) {
-                if (plugin_id_filter.empty() || e.desc.plugin_id == plugin_id_filter) {
-                    sync_fn = e.handler;
-                    stream_fn = e.stream_handler;
-                    pid = e.desc.plugin_id;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!sync_fn && !stream_fn) {
-        std::string err = plugin_id_filter.empty()
-                              ? ("capability not available: " + capability_id)
-                              : ("provider '" + plugin_id_filter + "' missing capability '" + capability_id + "'");
-        return {false, nlohmann::json::object(), std::move(err), "", false};
-    }
-
-    auto exec_state = executor_ ? executor_->state : nullptr;
-    auto fault_disp = fault_dispatcher_;
-    AsyncExecutor::trackPluginStart(exec_state, pid);
-    struct FlightGuard {
-        std::shared_ptr<AsyncExecutor::State> st;
-        std::string plugin;
-        ~FlightGuard() {
-            AsyncExecutor::trackPluginEnd(st, plugin);
-        }
-    } guard{exec_state, pid};
-
-    std::shared_ptr<CancelToken> eff_cancel = cancel ? cancel : CancelToken::create();
-    CapabilityResult res;
-    auto safeChunk = [&](const StreamChunk& chunk) {
-        if (!on_chunk) return;
-        try {
-            on_chunk(chunk);
-        } catch (...) {
-        }
-    };
-
-    if (stream_fn && (stream_mode || cancel != nullptr)) {
-        bool saw_done = false;
-        StreamCallback wrapped = [&](const StreamChunk& chunk) {
-            if (chunk.done) saw_done = true;
-            if (on_chunk && (!eff_cancel->isCancelled() || chunk.done)) {
-                safeChunk(chunk);
-            }
-        };
-        try {
-            res = stream_fn(request, eff_cancel, stream_mode ? wrapped : StreamCallback{});
-        } catch (const std::exception& e) {
-            res.ok = false;
-            res.error = std::string("plugin capability threw exception: ") + e.what();
-            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
-        } catch (...) {
-            res.ok = false;
-            res.error = "plugin capability threw unknown exception";
-            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
-        }
-        if (eff_cancel->isCancelled()) {
-            res.cancelled = true;
-            res.ok = false;
-            if (res.error.empty()) res.error = "cancelled";
-        }
-        if (stream_mode && !saw_done && on_chunk) {
-            StreamChunk terminal;
-            terminal.done = true;
-            terminal.data = res.data;
-            terminal.event = res.cancelled ? "cancelled" : (res.ok ? "done" : "error");
-            safeChunk(terminal);
-        }
-    } else {
-        try {
-            res = sync_fn(request);
-        } catch (const std::exception& e) {
-            res.ok = false;
-            res.error = std::string("plugin capability threw exception: ") + e.what();
-            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
-        } catch (...) {
-            res.ok = false;
-            res.error = "plugin capability threw unknown exception";
-            if (fault_disp) fault_disp->report(pid, capability_id, res.error);
-        }
-        if (eff_cancel->isCancelled()) {
-            res.cancelled = true;
-            res.ok = false;
-            if (res.error.empty()) res.error = "cancelled";
-        } else if (stream_mode && on_chunk) {
-            std::string txt = extractTextFallback(res.data);
-            if (!txt.empty()) {
-                StreamChunk c;
-                c.delta = std::move(txt);
-                c.data = res.data;
-                c.event = "delta";
-                c.done = false;
-                safeChunk(c);
-            }
-            StreamChunk terminal;
-            terminal.done = true;
-            terminal.data = res.data;
-            terminal.event = res.ok ? "done" : "error";
-            safeChunk(terminal);
-        }
-    }
-
-    if (res.provider_plugin_id.empty()) res.provider_plugin_id = pid;
-    return res;
+    return AsyncExecutor::invoke(
+        executor_ ? executor_->state : nullptr,
+        plugin_id_filter, capability_id, request, on_chunk, cancel, stream_mode);
 }
 
 void CapabilityRegistry::setFaultHandler(FaultHandler handler) {
@@ -569,7 +822,16 @@ CapabilityResult CapabilityRegistry::callProvider(const std::string& plugin_id,
 CapabilityResult CapabilityRegistry::callCancellable(const std::string& capability_id,
                                                      const nlohmann::json& request,
                                                      const std::shared_ptr<CancelToken>& cancel) const {
-    return invokeInternal("", capability_id, request, {}, cancel, false);
+    auto tok = cancel ? cancel : CancelToken::create();
+    return invokeInternal("", capability_id, request, {}, tok, false);
+}
+
+CapabilityResult CapabilityRegistry::callProviderCancellable(const std::string& plugin_id,
+                                                             const std::string& capability_id,
+                                                             const nlohmann::json& request,
+                                                             const std::shared_ptr<CancelToken>& cancel) const {
+    auto tok = cancel ? cancel : CancelToken::create();
+    return invokeInternal(plugin_id, capability_id, request, {}, tok, false);
 }
 
 CapabilityResult CapabilityRegistry::callStream(const std::string& capability_id,
@@ -601,10 +863,16 @@ std::shared_ptr<CancelToken> CapabilityRegistry::callProviderAsync(const std::st
                                                                    std::shared_ptr<CancelToken> cancel) const {
     if (!cancel) cancel = CancelToken::create();
     auto exec_state = executor_->state;
-    executor_->submit(plugin_id, cancel, [this, exec_state, plugin_id, capability_id, request,
+    executor_->submit(plugin_id, cancel, [exec_state, plugin_id, capability_id, request,
                                           on_complete = std::move(on_complete), cancel]() {
-        auto res = invokeInternal(plugin_id, capability_id, request, {}, cancel, false);
-        if (on_complete && exec_state->owner_alive.load(std::memory_order_acquire)) on_complete(res);
+        if (!exec_state->owner_alive.load(std::memory_order_acquire)) {
+            if (cancel) cancel->cancel();
+            return;
+        }
+        auto res = AsyncExecutor::invoke(exec_state, plugin_id, capability_id, request, {}, cancel, false);
+        if (on_complete && exec_state->owner_alive.load(std::memory_order_acquire)) {
+            on_complete(res);
+        }
     });
     return cancel;
 }
@@ -627,11 +895,26 @@ std::shared_ptr<CancelToken> CapabilityRegistry::callProviderStreamAsync(
     std::shared_ptr<CancelToken> cancel) const {
     if (!cancel) cancel = CancelToken::create();
     auto exec_state = executor_->state;
-    executor_->submit(plugin_id, cancel, [this, exec_state, plugin_id, capability_id, request,
-                                          on_chunk = std::move(on_chunk),
+    StreamCallback guarded_chunk;
+    if (on_chunk) {
+        guarded_chunk = [exec_state, cb = std::move(on_chunk)](const StreamChunk& chunk) {
+            if (exec_state->owner_alive.load(std::memory_order_acquire)) {
+                cb(chunk);
+            }
+        };
+    }
+    executor_->submit(plugin_id, cancel, [exec_state, plugin_id, capability_id, request,
+                                          guarded_chunk = std::move(guarded_chunk),
                                           on_complete = std::move(on_complete), cancel]() {
-        auto res = invokeInternal(plugin_id, capability_id, request, on_chunk, cancel, true);
-        if (on_complete && exec_state->owner_alive.load(std::memory_order_acquire)) on_complete(res);
+        if (!exec_state->owner_alive.load(std::memory_order_acquire)) {
+            if (cancel) cancel->cancel();
+            return;
+        }
+        auto res = AsyncExecutor::invoke(
+            exec_state, plugin_id, capability_id, request, guarded_chunk, cancel, true);
+        if (on_complete && exec_state->owner_alive.load(std::memory_order_acquire)) {
+            on_complete(res);
+        }
     });
     return cancel;
 }

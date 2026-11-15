@@ -1,0 +1,15 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/borealis/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/borealis/lib/extern/fmt/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/borealis/lib/extern/tweeny/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/borealis/lib/extern/yoga/yoga/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/lunasvg/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/lunasvg/include/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/lunasvg/source/cmake_install.cmake",
+		"/home/zhu/Projects/omnidesk/.build-recommendation-ui/_deps/lunasvg/3rdparty/plutovg/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,624 @@
+{
+  "schema_version": 1,
+  "catalog_name": "OmniDesk Official Marketplace",
+  "updated_at": "2026-11-14",
+  "plugins": [
+    {
+      "id": "plugin-magpie-agent",
+      "name": "Magpie AI Agent Router",
+      "version": "0.1.0",
+      "kind": "provider",
+      "domain": "core",
+      "author": "OmniDesk",
+      "description": "Reads local magpie harnesses, subscriptions, routing groups, quotas, and models; pushes user-selected harness/model routes back into magpie and exposes unified AI companion capabilities across all domains.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-magpie-agent",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-magpie-agent.git",
+        "branch": "main"
+      },
+      "provides": [
+        "ai.agent.v1",
+        "ai.curation.v1",
+        "llm.router.v1",
+        "llm.chat.v1",
+        "llm.translate.v1"
+      ],
+      "consumes": [
+        "recommend.feed.v1",
+        "media.playlist.v1",
+        "book.search.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-ai-curator",
+      "name": "AI 策展与历史推荐反写中心",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "core",
+      "author": "ZJFILOVE",
+      "description": "自动克隆同步 ZJFILOVE/obsidian-vault 与 ZJFILOVE/music-daily 回灌全量历史精选，对外提供 recommend.feed.v1 跨三域前端反写能力，严格隔离每日不重复精选（daily_immutable）与按需可重复灵感推荐（interactive_ephemeral）。",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-ai-curator",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-ai-curator.git",
+        "branch": "main"
+      },
+      "provides": [
+        "recommend.feed.v1",
+        "media.source.v1",
+        "text.source.v1",
+        "book.source.v1"
+      ],
+      "consumes": [
+        "ai.curation.v1",
+        "media.playlist.v1",
+        "vocab.sm2.v1",
+        "book.bilingual_pdf.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-asr-funasr",
+      "name": "FunASR 本地语音转写",
+      "version": "0.1.0",
+      "kind": "provider",
+      "domain": "core",
+      "author": "ZJFILOVE",
+      "description": "本地 Vulkan GPU FunASR SenseVoiceSmall Q8 离线与分块语音转写引擎，支持 FSMN-VAD 断句、FFmpeg 多音轨提取与断点续传，对外提供统一 speech.asr.v1 能力接口。",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-asr-funasr",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-asr-funasr.git",
+        "branch": "main"
+      },
+      "provides": [
+        "speech.asr.v1"
+      ],
+      "consumes": [],
+      "official": true
+    },
+    {
+      "id": "plugin-sponsorblock",
+      "name": "SponsorBlock 空降助手",
+      "version": "0.1.0",
+      "kind": "extension",
+      "domain": "media",
+      "author": "ZJFILOVE",
+      "description": "B 站 (bsbsb.top) 与 YouTube (sponsor.ajay.app) 通用空降片段扩展插件：支持 SHA-256 隐私前缀查询、多分类过滤、章节合并与 F9 一键跳过，对外提供标准 player.timeline.v1 能力。",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-sponsorblock",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-sponsorblock.git",
+        "branch": "main"
+      },
+      "provides": [
+        "player.timeline.v1"
+      ],
+      "consumes": [],
+      "official": true
+    },
+    {
+      "id": "plugin-sub-hunter",
+      "name": "SubHD / ASSRT / ffsubsync 字幕猎手",
+      "version": "0.1.0",
+      "kind": "provider",
+      "domain": "media",
+      "author": "OmniDesk",
+      "description": "SubHD 公开搜索与浏览器抓取、ASSRT API 检索下载（防重定向凭据泄露与 16MB 安全内存解压）、以及基于 ffsubsync 与内置时间轴缩放的字幕自动对齐底座能力（提供 subtitle.fetch.v1 与 subtitle.sync.v1）。",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-sub-hunter",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-sub-hunter.git",
+        "branch": "main"
+      },
+      "provides": [
+        "subtitle.fetch.v1",
+        "subtitle.sync.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-fnos-nas",
+      "name": "飞牛 fnOS NAS Connector",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "media",
+      "author": "OmniDesk",
+      "description": "User-configured connection to fnOS NAS (SMB/WebDAV/fnOS API). Indexes private video/audio/book libraries, exposes nas.connection.v1, local_match.v1, and clip_jump.v1 for cross-domain companion playback.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-fnos-nas",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-fnos-nas.git",
+        "branch": "main"
+      },
+      "provides": [
+        "nas.connection.v1",
+        "media.source.v1",
+        "media.local_match.v1",
+        "media.clip_jump.v1",
+        "book.sync.v1"
+      ],
+      "consumes": [],
+      "official": true
+    },
+    {
+      "id": "plugin-arr-imdb",
+      "name": "IMDb 发现与 Radarr/Sonarr 选片队列",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "media",
+      "author": "OmniDesk",
+      "description": "IMDb 榜单与详情发现、Radarr (7878) / Sonarr (8989) 对数做种分档选片（同档优先较小体积、排除枪版、不限大小）、qBittorrent 队列联动及飞牛 NAS 已入库片源直连播放。",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-arr-imdb",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-arr-imdb.git",
+        "branch": "main"
+      },
+      "provides": [
+        "imdb.discover.v1",
+        "arr.manage.v1"
+      ],
+      "consumes": [
+        "media.local_match.v1",
+        "nas.connection.v1",
+        "llm.chat.v1",
+        "llm.translate.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-bilibili",
+      "name": "Bilibili Workbench Source",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "media",
+      "author": "OmniDesk",
+      "description": "Adapts Bilibili feeds, dynamics, search, danmaku, WBI streams, and AI video/audio digest onto the OmniDesk Media Workbench.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-bilibili",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-bilibili.git",
+        "branch": "main"
+      },
+      "provides": [
+        "media.source.v1",
+        "media.search.v1",
+        "media.danmaku.v1"
+      ],
+      "consumes": [
+        "llm.chat.v1",
+        "media.local_match.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-youtube",
+      "name": "YouTube & Bilingual Subtitle",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "media",
+      "author": "OmniDesk",
+      "description": "YouTube channel subscriptions, video/podcast streams, timed subtitle extraction, and AI bilingual chapter translation.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-youtube",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-youtube.git",
+        "branch": "main"
+      },
+      "provides": [
+        "media.source.v1",
+        "media.subtitle.v1",
+        "media.search.v1"
+      ],
+      "consumes": [
+        "llm.chat.v1",
+        "llm.translate.v1",
+        "speech.asr.v1",
+        "web.cookies.v1",
+        "media.local_match.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-music",
+      "name": "Apple Music (Adam FairPlay Lossless)",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "media",
+      "author": "OmniDesk",
+      "description": "Headless Apple Music (Adam Go engine + FairPlay ALAC 24bit/192kHz) workspace with native Apple ID/2FA auth, catalog search, library playlists, gated Daily 5 & interactive playlist write-back (media.playlist.v1), MPVCore playback, native/LRCLIB bilingual lyrics, and AI phrase-level language explanation.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-music",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-music.git",
+        "branch": "main"
+      },
+      "provides": [
+        "media.source.v1",
+        "media.lyrics.v1",
+        "media.playlist.v1"
+      ],
+      "consumes": [
+        "llm.translate.v1",
+        "llm.chat.v1",
+        "ai.agent.v1",
+        "web.cookies.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-chrome-web",
+      "name": "Chrome Embedded Web & Session Bridge",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "core",
+      "author": "OmniDesk",
+      "description": "Embedded Chromium/CEF view & session bridge for interactive web logins, Cloudflare/OAuth pages, and clean DOM text extraction for reading plugins.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-chrome-web",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-chrome-web.git",
+        "branch": "main"
+      },
+      "provides": [
+        "web.embed.v1",
+        "web.extract.v1",
+        "web.cookies.v1",
+        "web.open_and_translate.v1"
+      ],
+      "consumes": [],
+      "official": true
+    },
+    {
+      "id": "plugin-zhihu",
+      "name": "知乎深度问答阅读器",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "Focused distraction-free ZhiHu answer & column reader with clean typography, formula preservation, and collapsible nested comments.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-zhihu",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-zhihu.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "web.extract.v1",
+        "web.fetch.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-linuxdo",
+      "name": "Linux.do Discourse Client",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "Native Discourse API reader for Linux.do tech threads, code block highlighting, AI thread summarization, and cookie-authenticated replies.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-linuxdo",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-linuxdo.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "web.extract.v1",
+        "web.fetch.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-shuiyuan",
+      "name": "交大水源社区 (Discourse)",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "SJTU Shuiyuan Discourse reader with Chrome jAccount SSO login, _t cookie sync, clean thread typography, and collapsible nested replies.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-shuiyuan",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-shuiyuan.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-v2ex",
+      "name": "V2EX Tech Community",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "V2EX client supporting API v2 Personal Access Token, Chrome A2 cookie sync, multi-node feeds, and full reply threads.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-v2ex",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-v2ex.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "web.extract.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-reddit",
+      "name": "Reddit Technical Subreddits",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "Subreddit feed curation, deep collapsible discussion trees, and inline AI translation for technical & hobbyist discussions.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-reddit",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-reddit.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-x",
+      "name": "X (Twitter) Timeline & Threads",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "X/Twitter timeline, lists, and thread reader powered by Chrome session login, context-bound GraphQL proxy, and inline bilingual translation.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-x",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-x.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "web.extract.v1",
+        "web.fetch.v1",
+        "llm.translate.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-journals",
+      "name": "arXiv / Nature / PubMed Journals",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "Scientific literature stream across arXiv, Nature RSS, bioRxiv, and PubMed with DOI citation lookup, bilingual abstract synthesis, and one-click PDF handoff.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-journals",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-journals.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.citation.v1"
+      ],
+      "consumes": [
+        "llm.chat.v1",
+        "book.bilingual_pdf.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-feed-recipe",
+      "name": "Declarative Feed Recipe Engine",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "20-line declarative JSON/Lua source recipe engine for Hacker News, V2EX, personal scholar blogs, and conference paper feeds with Chrome cookie reuse, bilingual parallel reading, and collapsible comment trees.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-feed-recipe",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-feed-recipe.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "text.comments.v1",
+        "feed.recipe.v1"
+      ],
+      "consumes": [
+        "web.cookies.v1",
+        "web.embed.v1",
+        "web.extract.v1",
+        "llm.translate.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-blog",
+      "name": "个人博客与博主订阅阅读器",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "text",
+      "author": "OmniDesk",
+      "description": "Creator-style personal blog subscription & reader plugin: add any blog URL (including SPA, Medium, Substack, and paywalled sites via plugin-chrome-web), browse saved blogs like channels, and read with bilingual AI support.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-blog",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-blog.git",
+        "branch": "main"
+      },
+      "provides": [
+        "text.source.v1",
+        "blog.subscription.v1"
+      ],
+      "consumes": [
+        "web.embed.v1",
+        "web.cookies.v1",
+        "web.extract.v1",
+        "web.fetch.v1",
+        "llm.translate.v1",
+        "llm.chat.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-pdf-babeldoc",
+      "name": "PDF & BabelDOC Bilingual Engine",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "book",
+      "author": "OmniDesk",
+      "description": "Layout-preserving PDF parsing and BabelDOC dual-column original/Chinese translation alignment for scientific papers and technical monographs.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-pdf-babeldoc",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-pdf-babeldoc.git",
+        "branch": "main"
+      },
+      "provides": [
+        "book.source.v1",
+        "book.bilingual_pdf.v1"
+      ],
+      "consumes": [
+        "llm.chat.v1",
+        "nas.connection.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-ebook",
+      "name": "eBook Companion & SM-2 Vocab",
+      "version": "0.1.0",
+      "kind": "workspace",
+      "domain": "book",
+      "author": "OmniDesk",
+      "description": "Bilingual eBook (EPUB/MOBI/AZW3/FB2/TXT) companion reader featuring sentence-level clause breakdown, root etymology notes, SM-2 spaced repetition deck, and NAS clip jumping.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-ebook",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-ebook.git",
+        "branch": "main"
+      },
+      "provides": [
+        "book.source.v1",
+        "vocab.sm2.v1",
+        "doc.open.ebook.v1"
+      ],
+      "consumes": [
+        "llm.chat.v1",
+        "llm.translate.v1",
+        "media.clip_jump.v1",
+        "book.sync.v1",
+        "nas.connection.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-zlib",
+      "name": "Z-Library Digital Library",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "book",
+      "author": "OmniDesk",
+      "description": "Z-Library EAPI book search, domain doctor, cookie/login auth, downloaded bookshelf integration, and BabelDOC/NAS handoff (adapted from heartleo/zlib).",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-zlib",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-zlib.git",
+        "branch": "main"
+      },
+      "provides": [
+        "book.search.v1",
+        "zlib.library.v1"
+      ],
+      "consumes": [
+        "book.bilingual_pdf.v1",
+        "book.sync.v1",
+        "nas.connection.v1",
+        "web.embed.v1",
+        "web.extract.v1"
+      ],
+      "official": true
+    },
+    {
+      "id": "plugin-annas-archive",
+      "name": "Anna's Archive",
+      "version": "0.1.0",
+      "kind": "hybrid",
+      "domain": "book",
+      "author": "OmniDesk",
+      "description": "Anna's Archive shadow library meta-search (Gumbo DOM + comment-unwrapped cards), Fast Download API, slow/external mirror resolution, bookshelf integration, and BabelDOC/WebEmbed handoff.",
+      "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-annas-archive",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/ZJFILOVE/omnidesk-plugin-annas-archive.git",
+        "branch": "main"
+      },
+      "provides": [
+        "book.search.v1",
+        "annas.archive.v1"
+      ],
+      "consumes": [
+        "book.bilingual_pdf.v1",
+        "book.sync.v1",
+        "nas.connection.v1",
+        "web.embed.v1",
+        "web.extract.v1"
+      ],
+      "official": true
+    }
+  ]
+}

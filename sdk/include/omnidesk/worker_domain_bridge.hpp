@@ -5,6 +5,7 @@
 #include <vector>
 #include <omnidesk/capabilities.hpp>
 #include <omnidesk/domain_registry.hpp>
+#include <omnidesk/entity_bus.hpp>
 #include <omnidesk/export.h>
 #include <omnidesk/worker_supervisor.hpp>
 
@@ -51,7 +52,10 @@ public:
     std::string sourceId() const override { return source_id_; }
     std::string displayName() const override { return display_name_; }
     std::string category() const override { return category_; }
+    std::vector<TextChannel> channels() const override;
     std::vector<TextFeedItem> fetchFeed(const std::string& query = "") override;
+    std::vector<TextFeedItem> fetchFeedInChannel(const std::string& channel_id,
+                                                 const std::string& query = "") override;
     TextArticle fetchArticle(const std::string& article_id) override;
 
 private:
@@ -97,5 +101,22 @@ OMNIDESK_API CapabilityStreamHandler makeWorkerStreamCapabilityHandler(
     std::string capability_id,
     std::string envelope_op = "cap.invoke",
     std::string default_action = "");
+
+/// RAII handle representing host-side CapabilityRegistry + EntityBus forwarding
+/// attached to a duplex WorkerSupervisor runtime.
+class OMNIDESK_API WorkerHostBridge {
+public:
+    virtual ~WorkerHostBridge() = default;
+    virtual void detach() = 0;
+};
+
+/// Attaches host-side cross-plugin CapabilityRegistry & EntityBus forwarding
+/// to a duplex worker registered in WorkerSupervisor.
+OMNIDESK_API std::shared_ptr<WorkerHostBridge> attachWorkerHostBridge(
+    WorkerSupervisor& workers,
+    const std::string& worker_id,
+    const std::string& plugin_id,
+    CapabilityRegistry& capabilities,
+    EntityBus& bus);
 
 }  // namespace omnidesk

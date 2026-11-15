@@ -112,7 +112,7 @@ Defined in `<omnidesk/plugin_abi.h>`, `<omnidesk/abi_fingerprint.hpp>`, and `<om
   - **Bounded Worker IO**: Requests have interruptible queue waits, nonblocking writes, and read deadlines. Timeouts and malformed responses produce fault events and participate in restart/quarantine limits. Frames and accumulated stream text are limited to 8 MiB, and stderr retains at most 100 chunks of 4096 bytes. Stopping a worker also terminates descendants in its process group.
   - **Request Semantics**: Plugin workers restart after a fault, but do not replay the failed capability call automatically. Explicit `WorkerSpec::retry_on_crash` is for idempotent operations only; streams that already delivered a chunk are never replayed. Unregistering a worker prevents an in-flight request from restarting it.
 
-For a plugin with custom NanoVG/Borealis views, keep its small UI shell in-process and register a separate worker with `PluginContext::registerWorker`, `registerWorkerCapability`, and the `registerWorker*Source` helpers. Whole-plugin subprocess mode exposes capabilities and media/text/book data sources; it rejects UI registrations rather than silently dropping them. The worker has local registries and an event bus: calls to other host capabilities and host event subscriptions are not forwarded by this protocol. This is process fault isolation, not a security sandbox or a permanent C++ ABI guarantee.
+For a plugin with custom NanoVG/Borealis views, keep its small UI shell in-process and register a separate worker with `PluginContext::registerWorker`, `registerWorkerCapability`, and the `registerWorker*Source` helpers. Whole-plugin subprocess mode exposes capabilities and media/text/book data sources; it rejects UI registrations rather than silently dropping them. Over the `--duplex` multiplexed channel (`WorkerHostBridge` + worker-side `RemoteBridge`), the worker's `CapabilityRegistry` (`has`, `providersFor`, `listAll`, sync/streaming `call*`, and cancellation propagation) and `EntityBus` (`subscribe`, `unsubscribe`, echo-free `publish`, and host event push) transparently forward cross-plugin capability calls and host event subscriptions—including calls made inside `onLoad` and re-entrant nested calls. This is process fault isolation, not a security sandbox or a permanent C++ ABI guarantee.
 
 Host article feeds, articles, book libraries/pages, and media lyrics/chapters perform provider IO on background jobs and apply results on the UI thread. Replaced requests and destroyed views discard late results.
 
@@ -121,15 +121,18 @@ When `onLoad(PluginContext& ctx)` registers capabilities (`ctx.registerCapabilit
 
 ---
 
-## 4. Standard Cross-Plugin Capability Contracts
+## 4. Standard Cross-Plugin Capability Contracts & Inbound Agent Gateway
 
-Plugins collaborate strictly through `CapabilityRegistry` and `EntityBus`—never by linking directly against one another.
+Plugins collaborate strictly through `CapabilityRegistry` and `EntityBus`—never by linking directly against one another. In addition to in-app plugins, the Host exposes a `0600` local Unix Domain Socket (`$XDG_RUNTIME_DIR/omnidesk/control.sock`, accessible via `omnidesk-pm rpc <cap> '<json>'`) so external coding/scheduled AI Agents can invoke capabilities and push recommendations into the live GUI (with offline persistence fallback in `<XDG_DATA_HOME>/omnidesk/curation/`). Full specification: [docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md](docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md).
 
 | Capability ID | Intended Provider | Key Operations & Purpose |
 | :--- | :--- | :--- |
 | `ai.agent.v1` | `plugin-magpie-agent` | `{"action":"chat","domain","context","prompt"}` -> contextual AI assistant response for `F8` Companion Dock |
+| `ai.curation.v1` | `plugin-magpie-agent` | `{"action":"curate_interactive" \| "run_daily_pipeline", ...}` -> embedded AI Agent orchestrating skill-driven curation & write-back |
 | `llm.router.v1` | `plugin-magpie-agent` | `{"action":"current_route"}` / `{"action":"list_harnesses"}` / `{"action":"apply_route","harness","group","model"}` — reads local `magpie` state and pushes route choices back to `magpie` |
 | `llm.chat.v1` | `plugin-magpie-agent` | General completion / translation / summarization consumed by Text & Book workbenches |
+| `recommend.feed.v1` | `plugin-ai-curator` | Clone & rehydrate historical archives (`obsidian-vault` + `music-daily`), and reverse-write `daily_immutable` (non-repeating) or `interactive_ephemeral` (repeatable) recommendations across Media, Text, and Book workbenches |
+| `media.playlist.v1` | `plugin-music` | Apple Music CN catalog preflight, gated sync to cumulative playlist `p.YJXV7dEIeb3GzZX` (`ChatGPT Daily 5`), and isolated repeatable interactive playlist / MPV playback queue write-back |
 | `nas.connection.v1` | `plugin-fnos-nas` | User-configured fnOS NAS session (`status`, `list_dir`, `stream_url`) |
 | `media.local_match.v1` | `plugin-fnos-nas` | Match cloud video/music metadata against local/NAS media files |
 | `media.clip_jump.v1` | `plugin-fnos-nas` | Given a vocabulary word or quote (`{"query","book"}`), return matching subtitle timestamped clip in NAS media |
@@ -141,6 +144,9 @@ Plugins collaborate strictly through `CapabilityRegistry` and `EntityBus`—neve
 - `entity.text.open` (`id`, `title`)
 - `entity.book.open` (`id`, `title`, `page`)
 - `entity.vocab.add` (`word`, `book`)
+- `entity.recommend.updated` (`mode`, `set_id`, `operation_id`, `domains`, `written_count`, `auto_focus`)
+- `entity.music.playlist_synced` (`mode`, `playlist_id`, `playlist_name`, `added_count`, `verified_count`)
+- `curation.job.progress` (`job_id`, `mode`, `stage`, `message`)
 - `entity.ai.route_changed` (`harness`, `group`, `model`)
 - `plugin.state_changed` (`plugin_id`, `loaded`)
 - `plugin.fault` (`plugin_id`, `component`, `error`)

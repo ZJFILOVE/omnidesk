@@ -30,6 +30,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(LIBWEBP REQUIRED IMPORTED_TARGET libwebp)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 
 # Upstream Borealis + lunasvg (compiled -fPIC, kept untouched under sources/)
 set(BRLS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sources/native-wiliwili/upstream/library/borealis")
@@ -59,15 +61,23 @@ set(OMNIDESK_BRLS_DEFS
 add_library(omnidesk_sdk SHARED
     sdk/src/async.cpp
     sdk/src/capabilities.cpp
+    sdk/src/comment_tree_view.cpp
     sdk/src/config_store.cpp
     sdk/src/domain_registry.cpp
+    sdk/src/dso_view_lease.cpp
     sdk/src/entity_bus.cpp
+    sdk/src/file_lock.cpp
     sdk/src/image_cache.cpp
     sdk/src/job_center.cpp
+    sdk/src/mpris2.cpp
     sdk/src/mpv_core.cpp
+    sdk/src/playback_coordinator.cpp
     sdk/src/plugin_context.cpp
     sdk/src/sdl_compat.cpp
+    sdk/src/search_index.cpp
+    sdk/src/selection_action_popover.cpp
     sdk/src/types_json.cpp
+    sdk/src/ui_task_runner.cpp
     sdk/src/ui_theme.cpp
     sdk/src/worker_domain_bridge.cpp
     sdk/src/worker_supervisor.cpp
@@ -98,6 +108,7 @@ configure_file(
 set(OMNIDESK_SDK_INCLUDE_DIRS
     "${CMAKE_BINARY_DIR}/sdk-generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/sdk/include"
+    "${LUNASVG_ROOT}/include"
     "${BRLS_ROOT}/library/include"
     "${BRLS_ROOT}/library/include/borealis/extern"
     "${BRLS_ROOT}/library/include/borealis/extern/nanovg"
@@ -116,7 +127,7 @@ target_include_directories(omnidesk_sdk PUBLIC $<INSTALL_INTERFACE:include>)
 
 target_compile_definitions(omnidesk_sdk
     PUBLIC ${OMNIDESK_BRLS_DEFS}
-    PRIVATE OMNIDESK_BUILDING_SDK=1
+    PRIVATE OMNIDESK_BUILDING_SDK=1 LUNASVG_STATIC_DEFINE
 )
 
 set_target_properties(omnidesk_sdk PROPERTIES
@@ -137,8 +148,11 @@ target_link_libraries(omnidesk_sdk
         $<LINK_LIBRARY:WHOLE_ARCHIVE,yogacore>
         $<$<TARGET_EXISTS:fmt>:$<LINK_LIBRARY:WHOLE_ARCHIVE,fmt>>
         $<$<TARGET_EXISTS:tinyxml2>:$<LINK_LIBRARY:WHOLE_ARCHIVE,tinyxml2>>
+        lunasvg
         PkgConfig::MPV
         PkgConfig::LIBWEBP
+        PkgConfig::SQLITE3
+        PkgConfig::SYSTEMD
         CURL::libcurl
         OpenSSL::Crypto
     PUBLIC
@@ -179,6 +193,7 @@ write_basic_package_version_file(
 # ------------------------------------------------------------------------------
 add_library(omnidesk_pm STATIC
     pm/src/catalog.cpp
+    pm/src/control_bridge.cpp
     pm/src/installer.cpp
     pm/src/manifest.cpp
     pm/src/manager.cpp
@@ -234,6 +249,10 @@ add_executable(omnidesk
     host/src/kernel.cpp
     host/src/main.cpp
     host/src/media_workbench.cpp
+    host/src/mini_player_bar.cpp
+    host/src/omni_command_palette.cpp
+    host/src/curation_calendar_dialog.cpp
+    host/src/curation_scheduler_dialog.cpp
     host/src/plugin_store_view.cpp
     host/src/shell_activity.cpp
     host/src/svg_view.cpp
@@ -306,4 +325,16 @@ if(OMNIDESK_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sdk_b
     add_test(NAME test_pm_core COMMAND test_pm_core)
     set_tests_properties(test_sdk_bus PROPERTIES TIMEOUT 90)
     set_tests_properties(test_pm_core PROPERTIES TIMEOUT 240)
+
+    add_executable(test_control_mcp tests/test_control_mcp.cpp)
+    target_link_libraries(test_control_mcp PRIVATE omnidesk_pm omnidesk_sdk)
+    target_compile_definitions(test_control_mcp PRIVATE
+        OMNIDESK_TEST_SDK_CMAKE_DIR="${CMAKE_BINARY_DIR}/sdk-cmake"
+        OMNIDESK_TEST_PM_EXE="$<TARGET_FILE:omnidesk-pm>"
+        OMNIDESK_TEST_WORKER_EXE="$<TARGET_FILE:omnidesk-plugin-worker>"
+        OMNIDESK_TEST_SAMPLE_PLUGIN="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_plugin_sample"
+    )
+    add_dependencies(test_control_mcp omnidesk-pm omnidesk-plugin-worker)
+    add_test(NAME test_control_mcp COMMAND test_control_mcp)
+    set_tests_properties(test_control_mcp PROPERTIES TIMEOUT 180)
 endif()

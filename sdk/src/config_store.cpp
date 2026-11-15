@@ -1,4 +1,5 @@
 #include "omnidesk/config_store.hpp"
+#include "omnidesk/file_lock.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -14,6 +15,21 @@ namespace omnidesk {
 namespace {
 
 std::atomic<uint64_t> g_atomic_write_seq{1};
+
+bool isValidPluginId(const std::string& plugin_id) {
+    if (plugin_id.empty() || plugin_id.size() > 200) return false;
+    if (plugin_id.front() == '.') return false;
+    if (plugin_id.find("..") != std::string::npos) return false;
+    for (char c : plugin_id) {
+        const auto uc = static_cast<unsigned char>(c);
+        const bool ok = (uc >= 'A' && uc <= 'Z') ||
+                        (uc >= 'a' && uc <= 'z') ||
+                        (uc >= '0' && uc <= '9') ||
+                        uc == '.' || uc == '_' || uc == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
 
 bool writeSecureAtomic(const std::string& target_path, const std::string& content) {
     std::error_code ec;
@@ -74,38 +90,51 @@ std::string ConfigStore::hostConfigPath() const {
 }
 
 std::string ConfigStore::pluginConfigPath(const std::string& plugin_id) const {
+    if (!isValidPluginId(plugin_id)) return {};
     return (fs::path(config_root_) / "plugins" / (plugin_id + ".json")).string();
 }
 
 nlohmann::json ConfigStore::loadHostConfig() const {
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(hostConfigPath(), FileLock::Mode::Shared);
     return readJsonFile(hostConfigPath());
 }
 
 bool ConfigStore::saveHostConfig(const nlohmann::json& cfg) const {
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(hostConfigPath(), FileLock::Mode::Exclusive);
     return writeSecureAtomic(hostConfigPath(), cfg.dump(2) + "\n");
 }
 
 nlohmann::json ConfigStore::loadPluginConfig(const std::string& plugin_id) const {
+    if (!isValidPluginId(plugin_id)) return nlohmann::json::object();
     std::lock_guard lock(mutex_);
-    return readJsonFile(pluginConfigPath(plugin_id));
+    const std::string path = pluginConfigPath(plugin_id);
+    ScopedFileLock flock(path, FileLock::Mode::Shared);
+    return readJsonFile(path);
 }
 
 bool ConfigStore::savePluginConfig(const std::string& plugin_id, const nlohmann::json& cfg) const {
+    if (!isValidPluginId(plugin_id)) return false;
     std::lock_guard lock(mutex_);
-    return writeSecureAtomic(pluginConfigPath(plugin_id), cfg.dump(2) + "\n");
+    const std::string path = pluginConfigPath(plugin_id);
+    ScopedFileLock flock(path, FileLock::Mode::Exclusive);
+    return writeSecureAtomic(path, cfg.dump(2) + "\n");
 }
 
 bool ConfigStore::removePluginConfig(const std::string& plugin_id) const {
+    if (!isValidPluginId(plugin_id)) return false;
     std::lock_guard lock(mutex_);
+    const std::string path = pluginConfigPath(plugin_id);
+    ScopedFileLock flock(path, FileLock::Mode::Exclusive);
     std::error_code ec;
-    return fs::remove(pluginConfigPath(plugin_id), ec);
+    return fs::remove(path, ec);
 }
 
 std::string ConfigStore::getPluginValue(const std::string& plugin_id,
                                         const std::string& key,
                                         const std::string& fallback) const {
+    if (!isValidPluginId(plugin_id) || key.empty()) return fallback;
     auto cfg = loadPluginConfig(plugin_id);
     if (!cfg.contains(key) || cfg[key].is_null()) return fallback;
     if (cfg[key].is_string()) return cfg[key].get<std::string>();
@@ -117,10 +146,13 @@ std::string ConfigStore::getPluginValue(const std::string& plugin_id,
 bool ConfigStore::setPluginValue(const std::string& plugin_id,
                                  const std::string& key,
                                  const nlohmann::json& value) const {
+    if (!isValidPluginId(plugin_id) || key.empty()) return false;
     std::lock_guard lock(mutex_);
-    auto cfg = readJsonFile(pluginConfigPath(plugin_id));
+    const std::string path = pluginConfigPath(plugin_id);
+    ScopedFileLock flock(path, FileLock::Mode::Exclusive);
+    auto cfg = readJsonFile(path);
     cfg[key] = value;
-    return writeSecureAtomic(pluginConfigPath(plugin_id), cfg.dump(2) + "\n");
+    return writeSecureAtomic(path, cfg.dump(2) + "\n");
 }
 
 SecretVault::SecretVault(std::string config_root)
@@ -137,8 +169,9 @@ bool SecretVault::saveAllLocked(const nlohmann::json& root) const {
 bool SecretVault::setSecret(const std::string& plugin_id,
                             const std::string& key,
                             const std::string& value) {
-    if (plugin_id.empty() || key.empty()) return false;
+    if (!isValidPluginId(plugin_id) || key.empty()) return false;
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(vault_path_, FileLock::Mode::Exclusive);
     auto root = loadAllLocked();
     if (!root.contains(plugin_id) || !root[plugin_id].is_object()) {
         root[plugin_id] = nlohmann::json::object();
@@ -149,7 +182,9 @@ bool SecretVault::setSecret(const std::string& plugin_id,
 
 std::optional<std::string> SecretVault::getSecret(const std::string& plugin_id,
                                                   const std::string& key) const {
+    if (!isValidPluginId(plugin_id) || key.empty()) return std::nullopt;
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(vault_path_, FileLock::Mode::Shared);
     auto root = loadAllLocked();
     if (!root.contains(plugin_id) || !root[plugin_id].is_object()) return std::nullopt;
     if (!root[plugin_id].contains(key) || !root[plugin_id][key].is_string()) return std::nullopt;
@@ -162,7 +197,9 @@ bool SecretVault::hasSecret(const std::string& plugin_id, const std::string& key
 }
 
 bool SecretVault::deleteSecret(const std::string& plugin_id, const std::string& key) {
+    if (!isValidPluginId(plugin_id) || key.empty()) return false;
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(vault_path_, FileLock::Mode::Exclusive);
     auto root = loadAllLocked();
     if (root.contains(plugin_id) && root[plugin_id].is_object()) {
         root[plugin_id].erase(key);
@@ -172,14 +209,18 @@ bool SecretVault::deleteSecret(const std::string& plugin_id, const std::string& 
 }
 
 bool SecretVault::purgePlugin(const std::string& plugin_id) {
+    if (!isValidPluginId(plugin_id)) return false;
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(vault_path_, FileLock::Mode::Exclusive);
     auto root = loadAllLocked();
     root.erase(plugin_id);
     return saveAllLocked(root);
 }
 
 std::vector<std::string> SecretVault::listKeys(const std::string& plugin_id) const {
+    if (!isValidPluginId(plugin_id)) return {};
     std::lock_guard lock(mutex_);
+    ScopedFileLock flock(vault_path_, FileLock::Mode::Shared);
     std::vector<std::string> keys;
     auto root = loadAllLocked();
     if (root.contains(plugin_id) && root[plugin_id].is_object()) {

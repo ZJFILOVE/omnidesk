@@ -1,6 +1,8 @@
 #pragma once
 
+#include <filesystem>
 #include <functional>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -185,6 +187,12 @@ private:
     std::string data_root_;
     std::string sdk_cmake_dir_;
     std::string abi_checker_exe_;
+
+    mutable std::mutex state_cache_mutex_;
+    mutable bool state_cache_valid_ = false;
+    mutable std::filesystem::file_time_type state_cache_mtime_{};
+    mutable uintmax_t state_cache_size_ = 0;
+    mutable nlohmann::json state_cache_json_;
 };
 
 } // namespace omnidesk::pm

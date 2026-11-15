@@ -25,6 +25,9 @@ OMNIDESK_API void fromJson(const nlohmann::json& j, ChapterSegment& out);
 OMNIDESK_API nlohmann::json toJson(const TextFeedItem& item);
 OMNIDESK_API void fromJson(const nlohmann::json& j, TextFeedItem& out);
 
+OMNIDESK_API nlohmann::json toJson(const TextChannel& channel);
+OMNIDESK_API void fromJson(const nlohmann::json& j, TextChannel& out);
+
 OMNIDESK_API nlohmann::json toJson(const TextParagraph& para);
 OMNIDESK_API void fromJson(const nlohmann::json& j, TextParagraph& out);
 

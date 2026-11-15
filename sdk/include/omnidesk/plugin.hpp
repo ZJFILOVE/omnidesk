@@ -95,7 +95,7 @@ public:
     void logWarn(const std::string& msg) const;
     void logError(const std::string& msg) const;
 
-    const std::vector<std::string>& logs() const { return recent_logs_; }
+    std::vector<std::string> logs() const;
 
 private:
     std::string plugin_id_;
@@ -111,7 +111,9 @@ private:
     mutable std::vector<std::string> recent_logs_;
 };
 
-#define OMNIDESK_PLUGIN_INTERFACE_REVISION 1u
+#ifndef OMNIDESK_PLUGIN_INTERFACE_REVISION
+#define OMNIDESK_PLUGIN_INTERFACE_REVISION 2u
+#endif
 
 /**
  * Base interface every standalone C++17 .so plugin implements.

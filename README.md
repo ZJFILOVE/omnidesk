@@ -6,8 +6,9 @@
 2. **影视与音乐 (Media Workbench)**：16:9 影视卡片流、1:1 封面与双语 LRC 歌词对照工作室、飞牛 fnOS 私有影库视图、MPV 播放舞台与章节导航。
 3. **文字 · 社区 · 科学期刊 (Text Workbench)**：博客、知乎、Linux.do、Reddit 与 arXiv/Nature/PubMed 专用高密度阅读排版，支持双语段落模式与可折叠嵌套评论树 (`CommentTreeView`)。
 4. **书本与 PDF (Book Workbench)**：2:3 立体书架、BabelDOC PDF 版面双栏精译对照、EPUB 长难句/词根伴读（含 `media.clip_jump.v1` 影视原声切片跳转接口）及 SM-2 间隔重复生词记忆卡片。
+5. **AI Agent 进驻与双模策展反写中心 (AI Curation & Write-Back)**：支持内驻 Magpie Agent 与外部入站 Agent（`control.sock` / `omnidesk-pm rpc`）共享单一渐进式 Skill（[`.agents/skills/omnidesk-curation-writeback/SKILL.md`](.agents/skills/omnidesk-curation-writeback/SKILL.md)），自动克隆 [`ZJFILOVE/obsidian-vault`](https://github.com/ZJFILOVE/obsidian-vault) 与 [`ZJFILOVE/music-daily`](https://github.com/ZJFILOVE/music-daily) 回灌全量历史精选，并严格隔离 **「每日不重复精选（`daily_immutable`）」** 与 **「按需可重复推荐（`interactive_ephemeral`）」** 反写三大工作台及 Apple Music 歌单。策展采用失败关闭：禁止合成占位推荐，文本/书籍须有真实归档来源，Apple Music 曲目须通过国区实时 `verified_ids` 预检；每日发布须提供匹配的 `PUBLISHED` 事务/收据，`qa_verified` 不能单独作为发布证明。
 
-> 详细插件接入协议、ABI v1 规范、`plugin.json` Schema、标准 Capability（如对接本机 `magpie` AI 路由和用户自配 `fnOS` NAS）见 [PLUGIN_SPEC.md](PLUGIN_SPEC.md)。
+> 详细插件接入协议、ABI v1 规范、`plugin.json` Schema、标准 Capability 见 [PLUGIN_SPEC.md](PLUGIN_SPEC.md) 与 [docs/PLUGIN_INTERFACE_PROTOCOL.md](docs/PLUGIN_INTERFACE_PROTOCOL.md)；AI Agent 入站网关、历史归档回灌与双模推荐/歌单反写协议见 [docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md](docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md)。
 
 ---
 
@@ -69,4 +70,8 @@ bash tests/run_tests.sh /tmp/omnidesk-build
 /tmp/omnidesk-build/omnidesk-pm verify plugin-mytool
 /tmp/omnidesk-build/omnidesk-pm list
 /tmp/omnidesk-build/omnidesk-pm rollback plugin-mytool
+
+# 克隆双仓回灌全部历史推荐 / 入站触发 AI 反写前端与 Apple Music 歌单
+/tmp/omnidesk-build/omnidesk-pm rpc recommend.feed.v1 '{"action":"bootstrap_and_rehydrate","pull_remote":true}'
+/tmp/omnidesk-build/omnidesk-pm rpc ai.curation.v1 '{"action":"curate_interactive","prompt":"来5首适合深夜写C++的器乐爵士，以前推过的也可以","sync_apple_music":"ephemeral_playlist"}'
 ```

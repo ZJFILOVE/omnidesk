@@ -13,6 +13,7 @@ struct ScaffoldOptions {
     std::string name;
     std::string author = "OmniDesk Developer";
     std::string version = "0.1.0";
+    std::string description;
     std::string github_owner = "";
     PluginKind kind = PluginKind::Provider;
     ContentDomain domain = ContentDomain::Core;

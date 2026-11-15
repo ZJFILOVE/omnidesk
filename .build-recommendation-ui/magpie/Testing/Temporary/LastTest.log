@@ -1,0 +1,56 @@
+Start testing: Nov 15 12:44 CST
+----------------------------------------------------------
+1/3 Testing: test_abi
+1/3 Test: test_abi
+Command: "/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/test_abi" "/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/libplugin_magpie_agent.so"
+Directory: /home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie
+"test_abi" start time: Nov 15 12:44 CST
+Output:
+----------------------------------------------------------
+12:44:40.320[0;34m[INFO][0m [plugin-magpie-agent] plugin-magpie-agent initialized (non-blocking fast path + SSE streaming)
+test_abi passed (onLoad 0 ms)
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_abi" end time: Nov 15 12:44 CST
+"test_abi" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/3 Testing: test_magpie_plugin
+2/3 Test: test_magpie_plugin
+Command: "/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/test_magpie_plugin"
+Directory: /home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie
+"test_magpie_plugin" start time: Nov 15 12:44 CST
+Output:
+----------------------------------------------------------
+12:44:40.364[0;34m[INFO][0m [plugin-magpie-agent] plugin-magpie-agent initialized (non-blocking fast path + SSE streaming)
+12:44:40.386[0;34m[INFO][0m [plugin-magpie-agent] Updated Magpie active route: codex/gpt-6-astra:high:fast (+1 fallback) · order/session [offline]
+12:44:40.401[0;34m[INFO][0m [plugin-magpie-agent] Updated Magpie active route: codex/gpt-6-astra · manual/session [offline]
+test_magpie_plugin: all parser, cycle, routing, RPC, and security tests passed
+<end of output>
+Test time =   0.35 sec
+----------------------------------------------------------
+Test Passed.
+"test_magpie_plugin" end time: Nov 15 12:44 CST
+"test_magpie_plugin" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/3 Testing: test_magpie_agent
+3/3 Test: test_magpie_agent
+Command: "/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/test_magpie_agent"
+Directory: /home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie
+"test_magpie_agent" start time: Nov 15 12:44 CST
+Output:
+----------------------------------------------------------
+12:44:40.721[0;34m[INFO][0m [plugin-magpie-agent] plugin-magpie-agent initialized (non-blocking fast path + SSE streaming)
+test_magpie_agent: all ai.curation.v1 tests passed
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"test_magpie_agent" end time: Nov 15 12:44 CST
+"test_magpie_agent" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 15 12:44 CST

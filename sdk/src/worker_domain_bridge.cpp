@@ -1,5 +1,8 @@
 #include <omnidesk/worker_domain_bridge.hpp>
 
+#include <atomic>
+#include <mutex>
+#include <unordered_set>
 #include <omnidesk/types_json.hpp>
 
 namespace omnidesk {
@@ -99,12 +102,33 @@ WorkerTextSource::WorkerTextSource(WorkerSupervisor& workers,
       display_name_(std::move(display_name)),
       category_(std::move(category)) {}
 
+std::vector<TextChannel> WorkerTextSource::channels() const {
+    CapabilityResult res = workers_.request(
+        worker_id_,
+        {
+            {"op", "text.channels"},
+            {"source_id", source_id_},
+        },
+        nullptr,
+        15000);
+    if (!res.ok || !res.data.contains("channels")) {
+        return {};
+    }
+    return fromJsonArray<TextChannel>(res.data["channels"]);
+}
+
 std::vector<TextFeedItem> WorkerTextSource::fetchFeed(const std::string& query) {
+    return fetchFeedInChannel("", query);
+}
+
+std::vector<TextFeedItem> WorkerTextSource::fetchFeedInChannel(const std::string& channel_id,
+                                                               const std::string& query) {
     CapabilityResult res = workers_.request(
         worker_id_,
         {
             {"op", "text.fetch_feed"},
             {"source_id", source_id_},
+            {"channel_id", channel_id},
             {"query", query},
         },
         nullptr,
@@ -226,6 +250,258 @@ CapabilityStreamHandler makeWorkerStreamCapabilityHandler(
         }
         return workers.streamRequest(worker_id, payload, on_chunk, cancel, 300000);
     };
+}
+
+namespace {
+
+struct HostBridgeState {
+    WorkerSupervisor& workers;
+    std::string worker_id;
+    std::string plugin_id;
+    std::string bridge_owner_id;
+    CapabilityRegistry& capabilities;
+    EntityBus& bus;
+    std::atomic<bool> alive{true};
+    std::atomic<bool> detached{false};
+    std::mutex bus_op_mutex;
+    std::mutex bus_mutex;
+    std::unordered_set<std::string> subscribed_topics;
+    uint64_t bus_token = 0;
+    uint64_t cap_change_token = 0;
+
+    HostBridgeState(WorkerSupervisor& w,
+                    std::string wid,
+                    std::string pid,
+                    CapabilityRegistry& caps,
+                    EntityBus& b)
+        : workers(w),
+          worker_id(std::move(wid)),
+          plugin_id(std::move(pid)),
+          bridge_owner_id("__worker_bridge__:" + worker_id),
+          capabilities(caps),
+          bus(b) {}
+};
+
+void clearBridgeSubscriptions(HostBridgeState& st) {
+    std::lock_guard op_lk(st.bus_op_mutex);
+    uint64_t tok = 0;
+    {
+        std::lock_guard lk(st.bus_mutex);
+        tok = st.bus_token;
+        st.bus_token = 0;
+        st.subscribed_topics.clear();
+    }
+    if (tok != 0) {
+        st.bus.unsubscribe(tok);
+    }
+}
+
+class WorkerHostBridgeImpl final : public WorkerHostBridge {
+public:
+    explicit WorkerHostBridgeImpl(std::shared_ptr<HostBridgeState> state)
+        : state_(std::move(state)) {}
+
+    ~WorkerHostBridgeImpl() override {
+        detach();
+    }
+
+    void detach() override {
+        if (!state_) return;
+        if (state_->detached.exchange(true)) return;
+        state_->alive.store(false);
+        state_->workers.setWorkerCallbacks(state_->worker_id, nullptr, nullptr, nullptr);
+        if (state_->cap_change_token != 0) {
+            state_->capabilities.unsubscribeChanges(state_->cap_change_token);
+            state_->cap_change_token = 0;
+        }
+        clearBridgeSubscriptions(*state_);
+    }
+
+private:
+    std::shared_ptr<HostBridgeState> state_;
+};
+
+}  // namespace
+
+std::shared_ptr<WorkerHostBridge> attachWorkerHostBridge(
+    WorkerSupervisor& workers,
+    const std::string& worker_id,
+    const std::string& plugin_id,
+    CapabilityRegistry& capabilities,
+    EntityBus& bus) {
+    auto st = std::make_shared<HostBridgeState>(workers, worker_id, plugin_id, capabilities, bus);
+
+    st->cap_change_token = capabilities.subscribeChanges([weak_st = std::weak_ptr<HostBridgeState>(st)]() {
+        auto s = weak_st.lock();
+        if (!s || !s->alive.load()) return;
+        s->workers.sendEvent(s->worker_id, {
+            {"kind", "event"},
+            {"op", "host.cap.changed"},
+        });
+    });
+
+    auto on_request = [st](const std::string&,
+                           const std::string&,
+                           const nlohmann::json& req,
+                           const std::shared_ptr<CancelToken>& cancel,
+                           const StreamCallback& on_chunk) -> CapabilityResult {
+        if (!st->alive.load()) {
+            return {false, nlohmann::json::object(), "worker host bridge detached", "", false};
+        }
+        const std::string op = req.value("op", "");
+        if (op == "host.cap.has") {
+            const std::string cap_id = req.value("capability_id", "");
+            return {true, {{"has", st->capabilities.has(cap_id)}}, "", "", false};
+        }
+        if (op == "host.cap.providers") {
+            const std::string cap_id = req.value("capability_id", "");
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& d : st->capabilities.providersFor(cap_id)) {
+                arr.push_back({
+                    {"capability_id", d.capability_id},
+                    {"plugin_id", d.plugin_id},
+                    {"priority", d.priority},
+                    {"metadata", d.metadata},
+                });
+            }
+            return {true, {{"providers", std::move(arr)}}, "", "", false};
+        }
+        if (op == "host.cap.list") {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& d : st->capabilities.listAll()) {
+                arr.push_back({
+                    {"capability_id", d.capability_id},
+                    {"plugin_id", d.plugin_id},
+                    {"priority", d.priority},
+                    {"metadata", d.metadata},
+                });
+            }
+            return {true, {{"capabilities", std::move(arr)}}, "", "", false};
+        }
+        if (op == "host.cap.invoke") {
+            const std::string cap_id = req.value("capability_id", "");
+            const std::string target_plugin_id = req.value("plugin_id", "");
+            const bool stream = req.value("stream", false);
+            const nlohmann::json inner =
+                req.contains("request") ? req["request"] : nlohmann::json::object();
+
+            if (!st->plugin_id.empty() && target_plugin_id == st->plugin_id) {
+                return {false,
+                        nlohmann::json::object(),
+                        "self-routing host.cap.invoke rejected for plugin '" + st->plugin_id + "'",
+                        "",
+                        false};
+            }
+
+            std::string resolved_plugin_id = target_plugin_id;
+            if (resolved_plugin_id.empty()) {
+                for (const auto& d : st->capabilities.providersFor(cap_id)) {
+                    if (!d.plugin_id.empty() && d.plugin_id != st->plugin_id) {
+                        resolved_plugin_id = d.plugin_id;
+                        break;
+                    }
+                }
+                if (resolved_plugin_id.empty()) {
+                    return {false,
+                            nlohmann::json::object(),
+                            "capability not available: " + cap_id,
+                            "",
+                            false};
+                }
+            }
+
+            if (stream) {
+                return st->capabilities.callProviderStream(
+                    resolved_plugin_id, cap_id, inner, on_chunk, cancel);
+            }
+            return st->capabilities.callProviderCancellable(
+                resolved_plugin_id, cap_id, inner, cancel);
+        }
+        if (op == "host.bus.subscribe") {
+            const std::string topic = req.value("topic", "");
+            if (topic.empty()) {
+                return {false, nlohmann::json::object(), "topic is required", "", false};
+            }
+            std::lock_guard op_lk(st->bus_op_mutex);
+            if (!st->alive.load()) {
+                return {false, nlohmann::json::object(), "worker host bridge detached", "", false};
+            }
+            bool need_sub = false;
+            {
+                std::lock_guard lk(st->bus_mutex);
+                st->subscribed_topics.insert(topic);
+                need_sub = (st->bus_token == 0);
+            }
+            if (need_sub) {
+                uint64_t tok = st->bus.subscribe(
+                    "*", st->bridge_owner_id,
+                    [weak_st = std::weak_ptr<HostBridgeState>(st)](
+                        const std::string& ev_topic, const nlohmann::json& payload) {
+                        auto s = weak_st.lock();
+                        if (!s || !s->alive.load()) return;
+                        bool want = false;
+                        {
+                            std::lock_guard lk(s->bus_mutex);
+                            want = s->subscribed_topics.count("*") > 0 ||
+                                   s->subscribed_topics.count(ev_topic) > 0;
+                        }
+                        if (want) {
+                            s->workers.sendEvent(s->worker_id, {
+                                {"kind", "event"},
+                                {"op", "host.bus.event"},
+                                {"topic", ev_topic},
+                                {"payload", payload},
+                            });
+                        }
+                    });
+                std::lock_guard lk(st->bus_mutex);
+                st->bus_token = tok;
+            }
+            return {true, {{"subscribed", true}, {"topic", topic}}, "", "", false};
+        }
+        if (op == "host.bus.unsubscribe") {
+            const std::string topic = req.value("topic", "");
+            if (topic.empty()) {
+                return {false, nlohmann::json::object(), "topic is required", "", false};
+            }
+            std::lock_guard op_lk(st->bus_op_mutex);
+            uint64_t unsub_tok = 0;
+            {
+                std::lock_guard lk(st->bus_mutex);
+                st->subscribed_topics.erase(topic);
+                if (st->subscribed_topics.empty() && st->bus_token != 0) {
+                    unsub_tok = st->bus_token;
+                    st->bus_token = 0;
+                }
+            }
+            if (unsub_tok != 0) {
+                st->bus.unsubscribe(unsub_tok);
+            }
+            return {true, {{"unsubscribed", true}, {"topic", topic}}, "", "", false};
+        }
+        if (op == "host.bus.publish") {
+            const std::string topic = req.value("topic", "");
+            if (topic.empty()) {
+                return {false, nlohmann::json::object(), "topic is required", "", false};
+            }
+            const nlohmann::json payload =
+                req.contains("payload") ? req["payload"] : nlohmann::json::object();
+            const size_t delivered =
+                st->bus.publishExcludingOwner(topic, payload, st->bridge_owner_id);
+            return {true, {{"delivered", delivered}}, "", "", false};
+        }
+        return {false, nlohmann::json::object(), "unsupported host operation: " + op, "", false};
+    };
+
+    auto on_exit = [weak_st = std::weak_ptr<HostBridgeState>(st)](const std::string&,
+                                                                  const std::string&) {
+        if (auto s = weak_st.lock()) {
+            clearBridgeSubscriptions(*s);
+        }
+    };
+
+    workers.setWorkerCallbacks(worker_id, std::move(on_request), nullptr, std::move(on_exit));
+    return std::make_shared<WorkerHostBridgeImpl>(std::move(st));
 }
 
 }  // namespace omnidesk

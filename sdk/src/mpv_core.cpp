@@ -934,6 +934,22 @@ std::vector<ChapterSegment> MPVCore::chapters() const {
     return impl_->chapters;
 }
 
+bool MPVCore::addSubtitleFile(const std::string& path) {
+    if (path.empty()) return false;
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->pending_load) {
+            impl_->pending_load->subtitle_urls.push_back(path);
+            return true;
+        }
+        if (!impl_->state.initialized || !impl_->mpv) {
+            return false;
+        }
+    }
+    impl_->commandAsync({"sub-add", path, "select"});
+    return true;
+}
+
 std::optional<ChapterSegment> MPVCore::activeAdSegment(double position_sec) const {
     std::lock_guard lock(impl_->mutex);
     for (const auto& ch : impl_->chapters) {
@@ -1134,51 +1150,51 @@ MpvStageView::MpvStageView(MPVCore* core)
     addView(canvas_);
 
     // SponsorBlock F9 hint pill
-    auto* ad_row = ui::makeCard("status/warn_bg", 8.f, 10.f);
+    auto* ad_row = ui::makeCard("status/warn_bg", 10.f, 10.f);
     ad_row->setAxis(brls::Axis::ROW);
     ad_row->setAlignItems(brls::AlignItems::CENTER);
     ad_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-    ad_row->setPadding(6, 12, 6, 12);
-    ad_row->setMarginTop(6);
+    ad_row->setPadding(8, 14, 8, 14);
+    ad_row->setMarginTop(8);
     ad_row->setVisibility(brls::Visibility::GONE);
-    auto* ad_txt = ui::makeLabel("检测到赞助/片头片段 · 点击或按 F9 跳过", 13, "status/warn_fg");
+    auto* ad_txt = ui::makeLabel("检测到赞助/片头片段 · 点击或按 F9 跳过", 14.0f, "status/warn_fg");
     ad_row->addView(ad_txt);
-    auto* ad_btn = ui::makeButton("跳过片段", [this]() { skipSponsorIfActive(); }, false, 30.f);
+    auto* ad_btn = ui::makeButton("跳过片段", [this]() { skipSponsorIfActive(); }, false, 32.f);
     ad_row->addView(ad_btn);
     ad_banner_ = ad_row;
     addView(ad_row);
 
     // Interactive timeline bar with chapter/ad segments
     progress_bar_ = new ChapterProgressBar(core_);
-    progress_bar_->setHeight(18);
+    progress_bar_->setHeight(20);
     progress_bar_->setMarginTop(6);
     addView(progress_bar_);
 
     // Transport control strip
-    auto* controls = ui::makeCard("desktop/soft", 8.f, 10.f);
+    auto* controls = ui::makeCard("desktop/soft", 10.f, 10.f);
     controls->setAxis(brls::Axis::ROW);
     controls->setAlignItems(brls::AlignItems::CENTER);
     controls->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-    controls->setPadding(6, 12, 6, 12);
+    controls->setPadding(8, 14, 8, 14);
     controls->setMarginTop(6);
 
     auto* left_btns = new brls::Box(brls::Axis::ROW);
     left_btns->setAlignItems(brls::AlignItems::CENTER);
 
-    auto* play_btn = ui::makeButton("播放", [this]() { core_->togglePause(); }, false, 30.f);
+    auto* play_btn = ui::makeButton("播放", [this]() { core_->togglePause(); }, false, 32.f);
     play_btn->setMarginRight(6);
     play_btn_ = play_btn;
     left_btns->addView(play_btn);
 
-    auto* back10 = ui::makeButton("-10s", [this]() { core_->seekRelative(-10.0); }, false, 30.f);
+    auto* back10 = ui::makeButton("-10s", [this]() { core_->seekRelative(-10.0); }, false, 32.f);
     back10->setMarginRight(6);
     left_btns->addView(back10);
 
-    auto* fwd10 = ui::makeButton("+10s", [this]() { core_->seekRelative(10.0); }, false, 30.f);
+    auto* fwd10 = ui::makeButton("+10s", [this]() { core_->seekRelative(10.0); }, false, 32.f);
     fwd10->setMarginRight(10);
     left_btns->addView(fwd10);
 
-    auto* time_lbl = ui::makeLabel("00:00 / 00:00", 13, "font/grey");
+    auto* time_lbl = ui::makeLabel("00:00 / 00:00", 14.0f, "font/grey");
     time_label_ = time_lbl;
     left_btns->addView(time_lbl);
 
@@ -1187,7 +1203,7 @@ MpvStageView::MpvStageView(MPVCore* core)
     auto* right_btns = new brls::Box(brls::Axis::ROW);
     right_btns->setAlignItems(brls::AlignItems::CENTER);
 
-    auto* status_lbl = ui::makeLabel("libmpv FBO", 12, "font/grey");
+    auto* status_lbl = ui::makeLabel("libmpv FBO", 13.5f, "font/grey");
     status_lbl->setMarginRight(10);
     status_label_ = status_lbl;
     right_btns->addView(status_lbl);
@@ -1195,7 +1211,7 @@ MpvStageView::MpvStageView(MPVCore* core)
     auto* sub_btn = ui::makeButton("双语字幕: 开", [this]() {
         subtitles_.setVisible(!subtitles_.isVisible());
         refreshHudState(core_->state());
-    }, false, 30.f);
+    }, false, 32.f);
     sub_btn->setMarginRight(6);
     sub_btn_ = sub_btn;
     right_btns->addView(sub_btn);
@@ -1203,7 +1219,7 @@ MpvStageView::MpvStageView(MPVCore* core)
     auto* dm_btn = ui::makeButton("弹幕: 开", [this]() {
         danmaku_.setVisible(!danmaku_.isVisible());
         refreshHudState(core_->state());
-    }, false, 30.f);
+    }, false, 32.f);
     dm_btn->setMarginRight(6);
     dm_btn_ = dm_btn;
     right_btns->addView(dm_btn);
@@ -1216,18 +1232,18 @@ MpvStageView::MpvStageView(MPVCore* core)
         else if (cur < 1.9) next = 2.0;
         else next = 1.0;
         core_->setSpeed(next);
-    }, false, 30.f);
+    }, false, 32.f);
     spd_btn->setMarginRight(6);
     speed_btn_ = spd_btn;
     right_btns->addView(spd_btn);
 
-    auto* stats_btn = ui::makeButton("媒体信息", [this]() { showMediaStatsDialog(); }, false, 30.f);
+    auto* stats_btn = ui::makeButton("媒体信息", [this]() { showMediaStatsDialog(); }, false, 32.f);
     stats_btn->setMarginRight(6);
     right_btns->addView(stats_btn);
 
     auto* fs_btn = ui::makeButton("全屏", [this]() {
         if (on_fullscreen_) on_fullscreen_();
-    }, false, 30.f);
+    }, false, 32.f);
     fs_btn_ = fs_btn;
     right_btns->addView(fs_btn);
 
@@ -1329,12 +1345,12 @@ void MpvStageView::showMediaStatsDialog() {
         << " | 字幕数: " << subtitles_.lineCount();
 
     auto* box = new brls::Box(brls::Axis::COLUMN);
-    box->setPadding(20);
-    box->setWidth(480);
+    box->setPadding(22);
+    box->setWidth(540);
     auto* hdr = ui::makeLabel("实时媒体信息统计 (Ctrl+F3)", 20.0f, "brls/text");
-    hdr->setMarginBottom(10);
+    hdr->setMarginBottom(12);
     box->addView(hdr);
-    box->addView(ui::makeLabel(oss.str(), 14.5f, "font/grey", 1.55f));
+    box->addView(ui::makeLabel(oss.str(), 15.0f, "font/grey", 1.60f));
     auto* dlg = new brls::Dialog(box);
     dlg->addButton("关闭", [] {});
     dlg->open();

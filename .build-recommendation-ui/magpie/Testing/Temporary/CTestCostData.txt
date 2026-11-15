@@ -1,0 +1,4 @@
+test_abi 2 0.0166486
+test_magpie_plugin 2 0.174813
+test_magpie_agent 1 0.0539384
+---

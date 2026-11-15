@@ -56,6 +56,21 @@ void assignStringVec(const nlohmann::json& j, const char* key, std::vector<std::
     }
 }
 
+void assignStringMap(const nlohmann::json& j,
+                     const char* key,
+                     std::unordered_map<std::string, std::string>& out) {
+    out.clear();
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_object()) {
+        return;
+    }
+    for (auto mit = it->begin(); mit != it->end(); ++mit) {
+        if (mit.value().is_string()) {
+            out[mit.key()] = mit.value().get<std::string>();
+        }
+    }
+}
+
 nlohmann::json commentToJsonDepth(const CommentNode& node, int depth) {
     nlohmann::json replies = nlohmann::json::array();
     if (depth < kMaxCommentDepth) {
@@ -180,7 +195,7 @@ void fromJson(const nlohmann::json& j, ChapterSegment& out) {
 }
 
 nlohmann::json toJson(const TextFeedItem& item) {
-    return {
+    nlohmann::json j = {
         {"id", item.id},
         {"source_id", item.source_id},
         {"source_name", item.source_name},
@@ -195,6 +210,9 @@ nlohmann::json toJson(const TextFeedItem& item) {
         {"score", item.score},
         {"bilingual_cached", item.bilingual_cached},
     };
+    if (!item.cover_url.empty()) j["cover_url"] = item.cover_url;
+    if (!item.image_headers.empty()) j["image_headers"] = item.image_headers;
+    return j;
 }
 
 void fromJson(const nlohmann::json& j, TextFeedItem& out) {
@@ -209,10 +227,30 @@ void fromJson(const nlohmann::json& j, TextFeedItem& out) {
     assignString(j, "author", out.author);
     assignString(j, "published_at", out.published_at);
     assignString(j, "url", out.url);
+    assignString(j, "cover_url", out.cover_url);
+    assignStringMap(j, "image_headers", out.image_headers);
     assignStringVec(j, "tags", out.tags);
     assignInt(j, "comment_count", out.comment_count);
     assignInt(j, "score", out.score);
     assignBool(j, "bilingual_cached", out.bilingual_cached);
+}
+
+nlohmann::json toJson(const TextChannel& channel) {
+    return {
+        {"id", channel.id},
+        {"name", channel.name},
+        {"badge", channel.badge},
+        {"requires_auth", channel.requires_auth},
+    };
+}
+
+void fromJson(const nlohmann::json& j, TextChannel& out) {
+    out = TextChannel{};
+    if (!j.is_object()) return;
+    assignString(j, "id", out.id);
+    assignString(j, "name", out.name);
+    assignString(j, "badge", out.badge);
+    assignBool(j, "requires_auth", out.requires_auth);
 }
 
 nlohmann::json toJson(const TextParagraph& para) {
@@ -242,7 +280,7 @@ void fromJson(const nlohmann::json& j, CommentNode& out) {
 }
 
 nlohmann::json toJson(const TextArticle& article) {
-    return {
+    nlohmann::json j = {
         {"id", article.id},
         {"source_name", article.source_name},
         {"category", article.category},
@@ -256,6 +294,9 @@ nlohmann::json toJson(const TextArticle& article) {
         {"paragraphs", toJsonArray(article.paragraphs)},
         {"comments", toJsonArray(article.comments)},
     };
+    if (!article.cover_url.empty()) j["cover_url"] = article.cover_url;
+    if (!article.image_headers.empty()) j["image_headers"] = article.image_headers;
+    return j;
 }
 
 void fromJson(const nlohmann::json& j, TextArticle& out) {
@@ -270,6 +311,8 @@ void fromJson(const nlohmann::json& j, TextArticle& out) {
     assignString(j, "published_at", out.published_at);
     assignString(j, "url", out.url);
     assignString(j, "doi", out.doi);
+    assignString(j, "cover_url", out.cover_url);
+    assignStringMap(j, "image_headers", out.image_headers);
     assignStringVec(j, "tags", out.tags);
     if (j.contains("paragraphs")) {
         out.paragraphs = fromJsonArray<TextParagraph>(j["paragraphs"]);

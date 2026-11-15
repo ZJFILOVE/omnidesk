@@ -1,5 +1,7 @@
 #include "omnidesk/host/host_settings_view.hpp"
 
+#include "omnidesk/host/curation_calendar_dialog.hpp"
+#include "omnidesk/host/curation_scheduler_dialog.hpp"
 #include "omnidesk/host/desktop_ui.hpp"
 #include "omnidesk/host/kernel.hpp"
 #include "omnidesk/ui_theme.hpp"
@@ -30,6 +32,13 @@ HostSettingsView::HostSettingsView(std::function<void()> on_theme_toggled,
     refresh();
 }
 
+HostSettingsView::~HostSettingsView() {
+    alive_->store(false, std::memory_order_release);
+    if (catalog_request_) {
+        catalog_request_->cancel();
+    }
+}
+
 void HostSettingsView::refresh() {
     if (!body_) return;
     body_->clearViews();
@@ -37,16 +46,16 @@ void HostSettingsView::refresh() {
     if (!kernel.isInitialized()) return;
 
     // 1. Appearance card
-    auto* theme_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
-    theme_card->setMarginBottom(12);
-    theme_card->addView(ui::makeLabel("视觉设计系统 (Paper Light / Graphite Dark)", 18.0f, "brls/text"));
+    auto* theme_card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
+    theme_card->setMarginBottom(14);
+    theme_card->addView(ui::makeLabel("视觉设计系统 (Paper Light / Graphite Dark)", 18.5f, "brls/text"));
     auto* t_desc = ui::makeLabel(
         std::string("当前主题: ") +
             (kernel.isDarkTheme() ? "Graphite 深色石墨 (#181718)" : "Paper 暖调纸感 (#F6F5F3)") +
             " · 支持随时按键盘 `t` 瞬时切换",
-        14.5f, "font/grey");
-    t_desc->setMarginTop(6);
-    t_desc->setMarginBottom(10);
+        15.0f, "font/grey", 1.5f);
+    t_desc->setMarginTop(8);
+    t_desc->setMarginBottom(12);
     theme_card->addView(t_desc);
 
     auto* btn_row = new brls::Box(brls::Axis::ROW);
@@ -55,43 +64,84 @@ void HostSettingsView::refresh() {
                                       if (on_theme_toggled_) on_theme_toggled_();
                                       brls::sync([this]() { refresh(); });
                                   },
-                                  true, 36.0f);
-    toggle->setMarginRight(8);
+                                  true, 38.0f);
+    toggle->setMarginRight(10);
     btn_row->addView(toggle);
     btn_row->addView(ui::makeButton("查看键盘快捷键 (?)", []() {
         DesktopInputController::showShortcutsHelp();
-    }, false, 36.0f));
+    }, false, 38.0f));
     theme_card->addView(btn_row);
     body_->addView(theme_card);
 
     // 2. AI Routing Bridge status
-    auto* ai_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
-    ai_card->setMarginBottom(12);
-    ai_card->addView(ui::makeLabel("AI Agent 路由与 Magpie 反向控制接口", 18.0f, "brls/text"));
+    auto* ai_card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
+    ai_card->setMarginBottom(14);
+    ai_card->addView(ui::makeLabel("AI Agent 路由与 Magpie 反向控制接口", 18.5f, "brls/text"));
     const bool has_router = kernel.capabilities().has("llm.router.v1");
     auto* ai_desc = ui::makeLabel(
         has_router
             ? "已检测到 `llm.router.v1` 能力提供方，用户选择的 Harness / 模型路由将同步写回底层路由器。"
             : "尚未接入 AI 路由插件。主核已预设 `ai.agent.v1` / `llm.router.v1` / `llm.chat.v1` 标准协议，后续从插件市场安装 `plugin-magpie-agent` 即可无缝接入本地 magpie 网关与路由控制。",
-        14.5f, has_router ? "status/ok_fg" : "font/grey", 1.5f);
-    ai_desc->setMarginTop(6);
-    ai_desc->setMarginBottom(10);
+        15.0f, has_router ? "status/ok_fg" : "font/grey", 1.55f);
+    ai_desc->setMarginTop(8);
+    ai_desc->setMarginBottom(12);
     ai_card->addView(ai_desc);
     ai_card->addView(ui::makeButton("前往插件市场管理 AI 插件", [this]() {
         if (on_open_store_) on_open_store_();
-    }, false, 36.0f));
+    }, false, 38.0f));
     body_->addView(ai_card);
 
-    // 3. Paths & Marketplace Lockfile
-    auto* paths_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
-    paths_card->addView(ui::makeLabel("目录与锁定状态 (XDG Paths & SDK)", 18.0f, "brls/text"));
+    // 3. Daily Curation Scheduler & Calendar
+    auto* sched_card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
+    sched_card->setMarginBottom(14);
+    sched_card->addView(ui::makeLabel("每日定时推荐 · 自动检测与后台 Agent 调度", 18.5f, "brls/text"));
+    const auto sched_st = CurationSchedulerManager::instance().latestStatus();
+    const bool auto_on = sched_st.is_object() ? sched_st.value("auto_run_enabled", true) : true;
+    const std::string sched_summary = sched_st.is_object()
+        ? sched_st.value(
+              "summary_text",
+              "自动检测当天（Asia/Shanghai）4 个定时推荐工作流是否已运行，未运行则在 App 内后台调用本地 Agent 补跑。")
+        : std::string("自动检测当天（Asia/Shanghai）4 个定时推荐工作流是否已运行，未运行则在 App 内后台调用本地 Agent 补跑。");
+    auto* sched_desc = ui::makeLabel(sched_summary, 15.0f, "font/grey", 1.55f);
+    sched_desc->setMarginTop(8);
+    sched_desc->setMarginBottom(12);
+    sched_card->addView(sched_desc);
+
+    auto* sched_row = new brls::Box(brls::Axis::ROW);
+    auto* auto_btn = ui::makeButton(
+        auto_on ? "自动补跑开关: 已开启 ✓" : "自动补跑开关: 已关闭",
+        [this, auto_on]() {
+            CurationSchedulerManager::instance().setAutoRunEnabled(!auto_on);
+            brls::delay(200, [this, alive = alive_]() {
+                if (alive->load(std::memory_order_acquire)) refresh();
+            });
+        },
+        auto_on, 38.0f);
+    auto_btn->setMarginRight(10);
+    sched_row->addView(auto_btn);
+
+    auto* open_sched_btn = ui::makeButton("定时开关与运行面板", []() {
+        CurationSchedulerDialog::open([]() { CurationCalendarDialog::open(); });
+    }, false, 38.0f);
+    open_sched_btn->setMarginRight(10);
+    sched_row->addView(open_sched_btn);
+
+    sched_row->addView(ui::makeButton("📅 推荐日历", []() {
+        CurationCalendarDialog::open();
+    }, false, 38.0f));
+    sched_card->addView(sched_row);
+    body_->addView(sched_card);
+
+    // 4. Paths & Marketplace Lockfile
+    auto* paths_card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
+    paths_card->addView(ui::makeLabel("目录与锁定状态 (XDG Paths & SDK)", 18.5f, "brls/text"));
     std::string pinfo =
         "Data Root:      " + kernel.dataRoot() + "\n"
         "Config Root:    " + kernel.configRoot() + "\n"
         "SDK CMake Dir:  " + (kernel.sdkCmakeDir().empty() ? "<unset>" : kernel.sdkCmakeDir()) + "\n"
         "Lockfile:       " + kernel.installer().lockFilePath() + "\n"
         "Catalog Source: " + (kernel.catalogPath().empty() ? "<none>" : kernel.catalogPath());
-    auto* pl = ui::makeLabel(pinfo, 14.0f, "font/grey", 1.55f);
+    auto* pl = ui::makeLabel(pinfo, 14.5f, "font/grey", 1.60f);
     pl->setMarginTop(8);
     paths_card->addView(pl);
 
@@ -113,7 +163,7 @@ void HostSettingsView::refresh() {
                 256,
                 "https://");
         }
-    }, false, 36.0f);
+    }, false, 38.0f);
     add_cat->setMarginTop(12);
     paths_card->addView(add_cat);
     body_->addView(paths_card);

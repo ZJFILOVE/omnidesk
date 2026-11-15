@@ -31,16 +31,17 @@ std::string domainColorToken(ContentDomain d) {
 brls::Box* makeBadgeRow(const std::vector<std::string>& items,
                         const std::string& bg_token,
                         const std::string& fg_token,
-                        const std::string& prefix = "") {
+                        const std::string& prefix = "",
+                        size_t max_items = 4) {
     auto* row = new brls::Box(brls::Axis::ROW);
     row->setAlignItems(brls::AlignItems::CENTER);
-    for (size_t i = 0; i < items.size() && i < 4; ++i) {
+    for (size_t i = 0; i < items.size() && i < max_items; ++i) {
         auto* pill = ui::makePill(prefix + items[i], bg_token, fg_token);
         pill->setMarginRight(6);
         row->addView(pill);
     }
-    if (items.size() > 4) {
-        auto* more = ui::makePill("+" + std::to_string(items.size() - 4), bg_token, fg_token);
+    if (items.size() > max_items) {
+        auto* more = ui::makePill("+" + std::to_string(items.size() - max_items), bg_token, fg_token);
         row->addView(more);
     }
     return row;
@@ -55,6 +56,7 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
 
     // Top Header Row
     auto* header = new brls::Box(brls::Axis::ROW);
+    header->setId("omnidesk/pane_header");
     header->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
     header->setAlignItems(brls::AlignItems::CENTER);
     header->setMarginBottom(12);
@@ -70,39 +72,51 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     auto* actions = new brls::Box(brls::Axis::ROW);
     actions->setAlignItems(brls::AlignItems::CENTER);
 
-    auto* search_btn = ui::makeButton("搜索 /", [this]() { promptSearch(); }, false, 38.0f);
-    search_btn->setMarginRight(8);
+    auto* search_btn = ui::makeButton("搜索 /", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) promptSearch();
+    }, false, 38.0f);
+    search_btn->setMarginRight(6);
     actions->addView(search_btn);
 
-    auto* radar_btn = ui::makeButton("更新雷达", [this]() { startUpdateRadar(); }, false, 38.0f);
-    radar_btn->setMarginRight(8);
+    auto* radar_btn = ui::makeButton("更新雷达", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) startUpdateRadar();
+    }, false, 38.0f);
+    radar_btn->setMarginRight(6);
     actions->addView(radar_btn);
 
-    rebuild_stale_btn_ = ui::makeButton("一键重编过期", [this]() {
-        if (!busy_) {
+    rebuild_stale_btn_ = ui::makeButton("一键重编过期", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire) && !busy_) {
             startBatchRebuild(true);
         }
     }, false, 38.0f);
-    rebuild_stale_btn_->setMarginRight(8);
+    rebuild_stale_btn_->setMarginRight(6);
     rebuild_stale_btn_->setVisibility(brls::Visibility::GONE);
     actions->addView(rebuild_stale_btn_);
 
-    auto* gh_btn = ui::makeButton("+ GitHub 安装", [this]() { openInstallModal(false); }, true, 38.0f);
-    gh_btn->setMarginRight(8);
+    auto* gh_btn = ui::makeButton("+ GitHub 安装", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) openInstallModal(false);
+    }, true, 38.0f);
+    gh_btn->setMarginRight(6);
     actions->addView(gh_btn);
 
-    auto* local_btn = ui::makeButton("+ 本地源码安装", [this]() { openInstallModal(true); }, false, 38.0f);
-    local_btn->setMarginRight(8);
+    auto* local_btn = ui::makeButton("+ 本地源码安装", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) openInstallModal(true);
+    }, false, 38.0f);
+    local_btn->setMarginRight(6);
     actions->addView(local_btn);
 
-    auto* new_btn = ui::makeButton("+ 脚手架", [this]() { openScaffoldModal(); }, false, 38.0f);
+    auto* new_btn = ui::makeButton("+ 脚手架", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) openScaffoldModal();
+    }, false, 38.0f);
     actions->addView(new_btn);
 
+    header->setId("omnidesk/pane_header");
     header->addView(actions);
     addView(header);
 
     // Filter Bar
     filter_bar_ = new brls::Box(brls::Axis::ROW);
+    filter_bar_->setId("omnidesk/pane_filters");
     filter_bar_->setAlignItems(brls::AlignItems::CENTER);
     filter_bar_->setMarginBottom(14);
     addView(filter_bar_);
@@ -113,16 +127,18 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     split->setWidthPercentage(100);
 
     auto* list_scroll = new brls::ScrollingFrame();
-    list_scroll->setWidthPercentage(54);
+    list_scroll->setId("omnidesk/pane_primary");
+    list_scroll->setWidthPercentage(52);
     list_scroll->setHeightPercentage(100);
-    list_scroll->setMarginRight(14);
+    list_scroll->setMarginRight(16);
     list_container_ = new brls::Box(brls::Axis::COLUMN);
     list_container_->setWidthPercentage(100);
     list_scroll->setContentView(list_container_);
     split->addView(list_scroll);
 
     auto* right_col = new brls::Box(brls::Axis::COLUMN);
-    right_col->setWidthPercentage(46);
+    right_col->setId("omnidesk/pane_secondary");
+    right_col->setWidthPercentage(48);
     right_col->setHeightPercentage(100);
 
     auto* detail_scroll = new brls::ScrollingFrame();
@@ -134,28 +150,29 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     right_col->addView(detail_scroll);
 
     // Live Build & Verify Log Console
-    auto* console_card = ui::makeCard("desktop/soft", 12.0f, 10.0f);
-    console_card->setHeight(155);
-    console_card->setMarginTop(10);
+    auto* console_card = ui::makeCard("desktop/soft", 14.0f, 10.0f);
+    console_card->setHeight(172);
+    console_card->setMarginTop(12);
 
     auto* console_hdr = new brls::Box(brls::Axis::ROW);
     console_hdr->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
     console_hdr->setMarginBottom(6);
-    console_hdr->addView(ui::makeLabel("构建与验证日志 (CMake / ABI / Load)", 13.5f, "font/grey"));
-    auto* clr_btn = ui::makeButton("清空", [this]() {
+    console_hdr->addView(ui::makeLabel("构建与验证日志 (CMake / ABI / Load)", 14.0f, "font/grey"));
+    auto* clr_btn = ui::makeButton("清空", [this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
         std::lock_guard<std::mutex> lock(log_state_->mutex);
         log_state_->buffer.clear();
         if (console_label_) {
             console_label_->setText("就绪。点击插件「安装」或「更新」查看完整构建流水线输出。");
         }
-    }, false, 26.0f);
+    }, false, 30.0f);
     console_hdr->addView(clr_btn);
     console_card->addView(console_hdr);
 
     auto* console_scroll = new brls::ScrollingFrame();
     console_scroll->setGrow(1.0f);
     console_scroll->setWidthPercentage(100);
-    console_label_ = ui::makeLabel("就绪。点击插件「安装」或「更新」查看完整构建流水线输出。", 13.0f, "brls/text", 1.35f);
+    console_label_ = ui::makeLabel("就绪。点击插件「安装」或「更新」查看完整构建流水线输出。", 13.5f, "brls/text", 1.38f);
     console_scroll->setContentView(console_label_);
     console_card->addView(console_scroll);
 
@@ -167,8 +184,11 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
         "plugin.state_changed", "host.plugin_store",
         [this, alive = alive_](const std::string&, const nlohmann::json&) {
             brls::sync([this, alive]() {
-                if (alive->load(std::memory_order_acquire)) {
+                if (!alive->load(std::memory_order_acquire)) return;
+                if (getVisibility() == brls::Visibility::VISIBLE) {
                     refresh();
+                } else {
+                    dirty_ = true;
                 }
             });
         });
@@ -203,7 +223,14 @@ void PluginStoreView::appendLog(const std::string& line) {
     });
 }
 
+void PluginStoreView::refreshIfNeeded() {
+    if (dirty_) {
+        refresh();
+    }
+}
+
 void PluginStoreView::refresh() {
+    dirty_ = false;
     auto& kernel = HostKernel::instance();
     if (!kernel.isInitialized()) return;
 
@@ -263,8 +290,9 @@ void PluginStoreView::refresh() {
 
     for (const auto& t : tabs) {
         const bool active = (filter_tab_ == t.tab);
-        auto* btn = ui::makeButton(t.label, [this, tab = t.tab]() {
-            brls::sync([this, tab]() {
+        auto* btn = ui::makeButton(t.label, [this, alive = alive_, tab = t.tab]() {
+            brls::sync([this, alive, tab]() {
+                if (!alive->load(std::memory_order_acquire)) return;
                 filter_tab_ = tab;
                 refresh();
             });
@@ -274,8 +302,9 @@ void PluginStoreView::refresh() {
     }
 
     if (!search_query_.empty()) {
-        auto* clr = ui::makeButton("清除搜索", [this]() {
-            brls::sync([this]() {
+        auto* clr = ui::makeButton("清除搜索", [this, alive = alive_]() {
+            brls::sync([this, alive]() {
+                if (!alive->load(std::memory_order_acquire)) return;
                 search_query_.clear();
                 refresh();
             });
@@ -287,6 +316,7 @@ void PluginStoreView::refresh() {
 }
 
 void PluginStoreView::rebuildList() {
+    list_cards_.clear();
     list_container_->clearViews();
     if (filter_tab_ == FilterTab::Diagnostics) {
         renderDiagnosticsView();
@@ -295,9 +325,25 @@ void PluginStoreView::rebuildList() {
     renderCatalogOrInstalledList();
 }
 
+void PluginStoreView::updateSelectedCardStyling(const std::string& prev_id, const std::string& next_id) {
+    if (auto it = list_cards_.find(prev_id); it != list_cards_.end() && it->second) {
+        it->second->setBackgroundColor(ui::color("desktop/surface"));
+        it->second->setBorderColor(ui::color("desktop/border"));
+    }
+    if (auto it = list_cards_.find(next_id); it != list_cards_.end() && it->second) {
+        it->second->setBackgroundColor(ui::color("desktop/active"));
+        it->second->setBorderColor(ui::color("brls/accent"));
+    }
+}
+
 void PluginStoreView::renderCatalogOrInstalledList() {
     auto& kernel = HostKernel::instance();
     const auto installed = kernel.installer().listInstalled();
+    std::unordered_map<std::string, pm::InstalledPluginRecord> installed_map;
+    installed_map.reserve(installed.size());
+    for (const auto& r : installed) {
+        installed_map.emplace(r.manifest.id, r);
+    }
 
     struct Entry {
         std::string id;
@@ -338,12 +384,14 @@ void PluginStoreView::renderCatalogOrInstalledList() {
         else if (filter_tab_ == FilterTab::Book) dom = ContentDomain::Book;
 
         for (const auto& item : kernel.catalog().filter(dom, search_query_)) {
-            auto rec = kernel.installer().getInstalled(item.id);
+            auto inst_it = installed_map.find(item.id);
+            const pm::InstalledPluginRecord* rec =
+                (inst_it != installed_map.end()) ? &inst_it->second : nullptr;
             auto st = kernel.plugins().statusOf(item.id);
             rows.push_back({
                 item.id, item.name, rec ? rec->manifest.version : item.version,
                 item.kind, item.domain, item.description, item.provides, item.consumes,
-                rec.has_value(), st && st->loaded, rec ? rec->enabled : false,
+                rec != nullptr, st && st->loaded, rec ? rec->enabled : false,
                 st ? st->load_error : ""
             });
         }
@@ -377,8 +425,8 @@ void PluginStoreView::renderCatalogOrInstalledList() {
 
     for (const auto& e : rows) {
         const bool selected = (e.id == selected_plugin_id_);
-        auto* card = ui::makeCard(selected ? "desktop/active" : "desktop/surface", 14.0f, 10.0f);
-        card->setMarginBottom(10);
+        auto* card = ui::makeCard(selected ? "desktop/active" : "desktop/surface", 16.0f, 12.0f);
+        card->setMarginBottom(12);
         card->setFocusable(true);
         if (selected) {
             card->setBorderColor(ui::color("brls/accent"));
@@ -391,7 +439,7 @@ void PluginStoreView::renderCatalogOrInstalledList() {
 
         auto* name_row = new brls::Box(brls::Axis::ROW);
         name_row->setAlignItems(brls::AlignItems::CENTER);
-        name_row->addView(ui::makeLabel(e.name, 17.5f, "brls/text"));
+        name_row->addView(ui::makeLabel(e.name, 18.0f, "brls/text"));
         auto* ver = ui::makePill("v" + e.version, "desktop/soft", "font/grey");
         ver->setMarginLeft(8);
         name_row->addView(ver);
@@ -441,8 +489,8 @@ void PluginStoreView::renderCatalogOrInstalledList() {
         top->addView(badges);
         card->addView(top);
 
-        auto* desc = ui::makeLabel(e.description, 14.5f, "font/grey", 1.45f);
-        desc->setMarginBottom(8);
+        auto* desc = ui::makeLabel(e.description, 15.0f, "font/grey", 1.48f);
+        desc->setMarginBottom(10);
         card->addView(desc);
 
         auto* meta = new brls::Box(brls::Axis::ROW);
@@ -454,14 +502,18 @@ void PluginStoreView::renderCatalogOrInstalledList() {
         kind_pill->setMarginRight(8);
         meta->addView(kind_pill);
         if (!e.provides.empty()) {
-            meta->addView(makeBadgeRow(e.provides, "status/info_bg", "status/info_fg", "⊕ "));
+            meta->addView(makeBadgeRow(e.provides, "status/info_bg", "status/info_fg", "⊕ ", 3));
         }
         card->addView(meta);
 
-        card->registerClickAction([this, id = e.id](brls::View*) {
-            brls::sync([this, id]() {
+        list_cards_[e.id] = card;
+        card->registerClickAction([this, alive = alive_, id = e.id](brls::View*) {
+            brls::sync([this, alive, id]() {
+                if (!alive->load(std::memory_order_acquire) || selected_plugin_id_ == id) return;
+                const std::string prev = selected_plugin_id_;
                 selected_plugin_id_ = id;
-                rebuildList();
+                updateSelectedCardStyling(prev, selected_plugin_id_);
+                renderDetail(selected_plugin_id_);
             });
             return true;
         });
@@ -524,16 +576,16 @@ void PluginStoreView::renderDiagnosticsView() {
     auto* rebuild_stale = ui::makeButton(
         busy_ ? "正在重编..."
               : ("一键重编全部过期插件 (" + std::to_string(stale_count) + ")"),
-        [this]() {
-            if (!busy_) startBatchRebuild(true);
+        [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire) && !busy_) startBatchRebuild(true);
         },
         stale_count > 0, 36.0f);
     rebuild_stale->setMarginRight(8);
     abi_actions->addView(rebuild_stale);
     abi_actions->addView(ui::makeButton(
         "全量按当前SDK重编",
-        [this]() {
-            if (!busy_) startBatchRebuild(false);
+        [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire) && !busy_) startBatchRebuild(false);
         },
         false, 36.0f));
     abi_card->addView(abi_actions);
@@ -641,7 +693,7 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
         return;
     }
 
-    auto* card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
+    auto* card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
     const std::string name = rec ? rec->manifest.name : cat->name;
     const std::string ver = rec ? rec->manifest.version : cat->version;
     const std::string desc = rec ? rec->manifest.description : cat->description;
@@ -650,14 +702,14 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
     const auto provides = rec ? rec->manifest.provides : cat->provides;
     const auto consumes = rec ? rec->manifest.consumes : cat->consumes;
 
-    card->addView(ui::makeLabel(name, 21.0f, "brls/text"));
+    card->addView(ui::makeLabel(name, 22.0f, "brls/text"));
     auto* sub = ui::makeLabel(plugin_id + " · v" + ver + " · " + (rec ? rec->manifest.author : cat->author),
-                              14.0f, "font/grey");
+                              14.5f, "font/grey");
     sub->setMarginTop(4);
     sub->setMarginBottom(10);
     card->addView(sub);
 
-    auto* d_lbl = ui::makeLabel(desc, 15.0f, "brls/text", 1.5f);
+    auto* d_lbl = ui::makeLabel(desc, 15.5f, "brls/text", 1.52f);
     d_lbl->setMarginBottom(12);
     card->addView(d_lbl);
 
@@ -699,7 +751,7 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                                (rec->release_tag.empty() ? "" : " [" + rec->release_tag + "]") +
                                " · SHA-256: " + rec->so_sha256.substr(0, 16) + "... · Commit: " +
                                (rec->commit_sha.size() > 10 ? rec->commit_sha.substr(0, 10) : rec->commit_sha);
-        auto* l_lbl = ui::makeLabel(lock_txt, 13.0f, "font/grey");
+        auto* l_lbl = ui::makeLabel(lock_txt, 13.5f, "font/grey");
         l_lbl->setMarginBottom(4);
         card->addView(l_lbl);
 
@@ -716,7 +768,7 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                                 : abi_it->second.plugin_abi_signature) +
                            ")";
         }
-        auto* iso_lbl = ui::makeLabel(runtime_txt, 13.0f, "font/grey");
+        auto* iso_lbl = ui::makeLabel(runtime_txt, 13.5f, "font/grey");
         iso_lbl->setMarginBottom(4);
         card->addView(iso_lbl);
 
@@ -733,7 +785,7 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                 w_txt += " · [已熔断隔离]";
             }
             auto* w_lbl = ui::makeLabel(
-                w_txt, 13.0f, w->quarantined ? "status/err_fg" : "status/info_fg");
+                w_txt, 13.5f, w->quarantined ? "status/err_fg" : "status/info_fg");
             w_lbl->setMarginBottom(8);
             card->addView(w_lbl);
         } else {
@@ -812,8 +864,8 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
     if (!rec.has_value()) {
         auto* inst_btn = ui::makeButton(
             busy_ ? "正在安装..." : "安装插件 (优先 .tar.zst)",
-            [this, repo, branch]() {
-                if (!busy_) {
+            [this, alive = alive_, repo, branch]() {
+                if (alive->load(std::memory_order_acquire) && !busy_) {
                     startGitInstall(repo, branch);
                 }
             },
@@ -823,8 +875,9 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
         const bool is_loaded = st && st->loaded;
         auto* toggle_btn = ui::makeButton(
             rec->enabled ? (is_loaded ? "停用" : "启用并加载") : "启用",
-            [this, plugin_id, enabled = rec->enabled, is_loaded]() {
-                brls::sync([this, plugin_id, enabled, is_loaded]() {
+            [this, alive = alive_, plugin_id, enabled = rec->enabled, is_loaded]() {
+                brls::sync([this, alive, plugin_id, enabled, is_loaded]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
                     auto& k = HostKernel::instance();
                     std::string err;
                     if (enabled && is_loaded) {
@@ -853,8 +906,8 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
         }
         auto* upd_btn = ui::makeButton(
             upd_label,
-            [this, plugin_id]() {
-                if (!busy_) startUpdate(plugin_id);
+            [this, alive = alive_, plugin_id]() {
+                if (alive->load(std::memory_order_acquire) && !busy_) startUpdate(plugin_id);
             },
             radar_has_update, 38.0f);
         upd_btn->setMarginRight(8);
@@ -862,16 +915,17 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
 
         auto* rebuild_btn = ui::makeButton(
             busy_ ? "重编中..." : "按当前SDK重编",
-            [this, plugin_id]() {
-                if (!busy_) startRebuildPlugin(plugin_id);
+            [this, alive = alive_, plugin_id]() {
+                if (alive->load(std::memory_order_acquire) && !busy_) startRebuildPlugin(plugin_id);
             },
             abi_needs_rebuild && !radar_has_update, 38.0f);
         rebuild_btn->setMarginRight(8);
         act->addView(rebuild_btn);
 
         if (!rec->backup_versions.empty()) {
-            auto* rb_btn = ui::makeButton("回滚", [this, plugin_id]() {
-                brls::sync([this, plugin_id]() {
+            auto* rb_btn = ui::makeButton("回滚", [this, alive = alive_, plugin_id]() {
+                brls::sync([this, alive, plugin_id]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
                     auto& k = HostKernel::instance();
                     k.plugins().unloadPlugin(plugin_id);
                     auto r = k.installer().rollbackPlugin(plugin_id);
@@ -889,8 +943,9 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
             act->addView(rb_btn);
         }
 
-        auto* rm_btn = ui::makeButton("卸载", [this, plugin_id]() {
-            brls::sync([this, plugin_id]() {
+        auto* rm_btn = ui::makeButton("卸载", [this, alive = alive_, plugin_id]() {
+            brls::sync([this, alive, plugin_id]() {
+                if (!alive->load(std::memory_order_acquire)) return;
                 auto& k = HostKernel::instance();
                 k.plugins().unloadPlugin(plugin_id);
                 std::string err;
@@ -958,14 +1013,17 @@ void PluginStoreView::renderConfigSection(brls::Box* container, const pm::Instal
             else if (cfg[field.key].is_number()) cur_val = cfg[field.key].dump();
         }
 
-        auto* edit_btn = ui::makeButton(cur_val.empty() ? "设置..." : cur_val, [this, id = rec.manifest.id, field, cur_val]() {
+        auto* edit_btn = ui::makeButton(cur_val.empty() ? "设置..." : cur_val, [this, alive = alive_, id = rec.manifest.id, field, cur_val]() {
+            if (!alive->load(std::memory_order_acquire)) return;
             auto& k = HostKernel::instance();
             if (field.type == ConfigFieldType::Bool) {
                 bool next = (cur_val != "true");
                 k.config().setPluginValue(id, field.key, next);
                 std::string err;
                 if (k.plugins().isLoaded(id)) k.plugins().reloadPlugin(id, err);
-                brls::sync([this]() { refresh(); });
+                brls::sync([this, alive]() {
+                    if (alive->load(std::memory_order_acquire)) refresh();
+                });
                 return;
             }
             if (field.type == ConfigFieldType::Select && !field.options.empty()) {
@@ -979,13 +1037,16 @@ void PluginStoreView::renderConfigSection(brls::Box* container, const pm::Instal
                 k.config().setPluginValue(id, field.key, field.options[idx]);
                 std::string err;
                 if (k.plugins().isLoaded(id)) k.plugins().reloadPlugin(id, err);
-                brls::sync([this]() { refresh(); });
+                brls::sync([this, alive]() {
+                    if (alive->load(std::memory_order_acquire)) refresh();
+                });
                 return;
             }
             if (auto* plat = brls::Application::getPlatform()) {
                 plat->getImeManager()->openForText(
-                    [this, id, field](std::string val) {
+                    [this, alive, id, field](std::string val) {
                         auto& hk = HostKernel::instance();
+                        if (!hk.isInitialized()) return;
                         if (field.type == ConfigFieldType::Secret) {
                             hk.secrets().setSecret(id, field.key, val);
                         } else if (field.type == ConfigFieldType::Int) {
@@ -999,7 +1060,9 @@ void PluginStoreView::renderConfigSection(brls::Box* container, const pm::Instal
                         }
                         std::string err;
                         if (hk.plugins().isLoaded(id)) hk.plugins().reloadPlugin(id, err);
-                        brls::sync([this]() { refresh(); });
+                        brls::sync([this, alive]() {
+                            if (alive->load(std::memory_order_acquire)) refresh();
+                        });
                     },
                     "配置 " + field.label,
                     field.description,
@@ -1017,8 +1080,9 @@ void PluginStoreView::renderConfigSection(brls::Box* container, const pm::Instal
 void PluginStoreView::promptSearch() {
     if (auto* plat = brls::Application::getPlatform()) {
         plat->getImeManager()->openForText(
-            [this](std::string q) {
-                brls::sync([this, q]() {
+            [this, alive = alive_](std::string q) {
+                brls::sync([this, alive, q = std::move(q)]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
                     search_query_ = q;
                     refresh();
                 });
@@ -1033,13 +1097,15 @@ void PluginStoreView::promptSearch() {
 void PluginStoreView::openInstallModal(bool local_mode) {
     if (auto* plat = brls::Application::getPlatform()) {
         plat->getImeManager()->openForText(
-            [this, local_mode](std::string input) {
-                if (input.empty()) return;
-                if (local_mode) {
-                    startLocalInstall(input);
-                } else {
-                    startGitInstall(input, "");
-                }
+            [this, alive = alive_, local_mode](std::string input) {
+                brls::sync([this, alive, local_mode, input = std::move(input)]() {
+                    if (!alive->load(std::memory_order_acquire) || input.empty()) return;
+                    if (local_mode) {
+                        startLocalInstall(input);
+                    } else {
+                        startGitInstall(input, "");
+                    }
+                });
             },
             local_mode ? "从本地目录编译安装插件" : "从 GitHub 仓库编译安装插件",
             local_mode ? "输入含 plugin.json + CMakeLists.txt 的本地路径"
@@ -1052,22 +1118,24 @@ void PluginStoreView::openInstallModal(bool local_mode) {
 void PluginStoreView::openScaffoldModal() {
     if (auto* plat = brls::Application::getPlatform()) {
         plat->getImeManager()->openForText(
-            [this](std::string dir_and_id) {
-                if (dir_and_id.empty()) return;
-                pm::ScaffoldOptions opts;
-                opts.target_dir = dir_and_id;
-                const auto pos = dir_and_id.find_last_of('/');
-                opts.plugin_id = (pos == std::string::npos) ? dir_and_id : dir_and_id.substr(pos + 1);
-                opts.name = opts.plugin_id;
-                opts.github_owner = "ZJFILOVE";
-                auto res = pm::scaffoldPluginRepo(opts);
-                if (res.ok) {
-                    appendLog("Scaffolded standalone plugin repo at " + res.dir_path);
-                    brls::Application::notify("已生成独立插件仓库: " + res.dir_path);
-                } else {
-                    appendLog("Scaffold failed: " + res.error);
-                    brls::Application::notify("生成失败: " + res.error);
-                }
+            [this, alive = alive_](std::string dir_and_id) {
+                brls::sync([this, alive, dir_and_id = std::move(dir_and_id)]() {
+                    if (!alive->load(std::memory_order_acquire) || dir_and_id.empty()) return;
+                    pm::ScaffoldOptions opts;
+                    opts.target_dir = dir_and_id;
+                    const auto pos = dir_and_id.find_last_of('/');
+                    opts.plugin_id = (pos == std::string::npos) ? dir_and_id : dir_and_id.substr(pos + 1);
+                    opts.name = opts.plugin_id;
+                    opts.github_owner = "ZJFILOVE";
+                    auto res = pm::scaffoldPluginRepo(opts);
+                    if (res.ok) {
+                        appendLog("Scaffolded standalone plugin repo at " + res.dir_path);
+                        brls::Application::notify("已生成独立插件仓库: " + res.dir_path);
+                    } else {
+                        appendLog("Scaffold failed: " + res.error);
+                        brls::Application::notify("生成失败: " + res.error);
+                    }
+                });
             },
             "生成独立 C++17 .so 插件仓库骨架",
             "输入目标本地目录路径（目录名将作为初始插件 ID，自动初始化 git 仓库）",

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -28,7 +29,14 @@ public:
                                             const std::string& topic,
                                             const std::string& error)>;
 
+    struct RemoteBridge {
+        std::function<void(const std::string& topic)> on_subscribe;
+        std::function<void(const std::string& topic)> on_unsubscribe;
+        std::function<size_t(const std::string& topic, const nlohmann::json& payload)> on_publish;
+    };
+
     void setFaultHandler(FaultHandler handler);
+    void setRemoteBridge(std::shared_ptr<RemoteBridge> bridge);
 
     uint64_t subscribe(const std::string& topic,
                        const std::string& owner_id,
@@ -39,6 +47,11 @@ public:
 
     size_t publish(const std::string& topic,
                    const nlohmann::json& payload = nlohmann::json::object()) const;
+    size_t publishLocalOnly(const std::string& topic,
+                            const nlohmann::json& payload = nlohmann::json::object()) const;
+    size_t publishExcludingOwner(const std::string& topic,
+                                 const nlohmann::json& payload,
+                                 const std::string& exclude_owner_id) const;
 
     std::vector<std::string> activeTopics() const;
 
@@ -52,6 +65,8 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<Subscription> subs_;
+    std::unordered_map<std::string, size_t> topic_refcounts_;
+    std::shared_ptr<RemoteBridge> remote_bridge_;
     mutable std::mutex fault_mutex_;
     FaultHandler fault_handler_;
     uint64_t next_token_ = 1;

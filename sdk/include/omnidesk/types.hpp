@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace omnidesk {
@@ -73,23 +74,32 @@ struct TextFeedItem {
     std::string id;
     std::string source_id;
     std::string source_name;          ///< e.g. "Linux.do", "知乎", "Reddit", "arXiv", "Nature", "Blog"
-    std::string category = "blog";    ///< "blog" | "zhihu" | "linuxdo" | "reddit" | "journal"
+    std::string category = "blog";    ///< "blog" | "zhihu" | "linuxdo" | "shuiyuan" | "v2ex" | "reddit" | "x" | "journal"
     std::string title;
     std::string excerpt;
     std::string author;
     std::string published_at;
     std::string url;
+    std::string cover_url;            ///< Optional thumbnail / hero image URL or file:// URI
+    std::unordered_map<std::string, std::string> image_headers; ///< Optional HTTP headers (Referer, Cookie) for images
     std::vector<std::string> tags;
     int comment_count = 0;
     int score = 0;
     bool bilingual_cached = false;
 };
 
+struct TextChannel {
+    std::string id;                   ///< e.g. "hot", "recommend", "following", "blog:lilianweng"
+    std::string name;                 ///< Human-readable channel label shown in TextWorkbench
+    std::string badge;                ///< Optional count / status badge (e.g. "12", "需登录")
+    bool requires_auth = false;
+};
+
 struct TextParagraph {
     std::string id;
-    std::string kind = "paragraph";   ///< "heading" | "paragraph" | "quote" | "code" | "formula"
-    std::string original;
-    std::string translated;
+    std::string kind = "paragraph";   ///< "heading" | "paragraph" | "quote" | "code" | "formula" | "image"
+    std::string original;             ///< For kind == "image": image URL or file:// path
+    std::string translated;           ///< For kind == "image": alt text or figure caption
 };
 
 struct CommentNode {
@@ -114,6 +124,8 @@ struct TextArticle {
     std::string published_at;
     std::string url;
     std::string doi;
+    std::string cover_url;            ///< Optional hero / og:image URL or file:// URI
+    std::unordered_map<std::string, std::string> image_headers; ///< Optional HTTP headers (Referer, Cookie) for images
     std::vector<std::string> tags;
     std::vector<TextParagraph> paragraphs;
     std::vector<CommentNode> comments;
@@ -137,9 +149,9 @@ struct BookItem {
 
 struct BookPageBlock {
     std::string id;
-    std::string kind = "paragraph";   ///< "heading" | "paragraph" | "caption" | "formula"
-    std::string original;
-    std::string translated;
+    std::string kind = "paragraph";   ///< "heading" | "paragraph" | "caption" | "formula" | "image"
+    std::string original;             ///< For kind == "image": image URL or file:// path
+    std::string translated;           ///< For kind == "image": alt text or caption
     std::vector<std::string> highlighted_words;
 };
 

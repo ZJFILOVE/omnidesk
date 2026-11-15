@@ -185,6 +185,11 @@ void PluginContext::logError(const std::string& msg) const {
     brls::Logger::error("[{}] {}", plugin_id_, msg);
 }
 
+std::vector<std::string> PluginContext::logs() const {
+    std::lock_guard<std::mutex> lk(pluginLogMutex());
+    return recent_logs_;
+}
+
 std::string sdkVersion() {
     return OMNIDESK_SDK_VERSION_STRING;
 }
