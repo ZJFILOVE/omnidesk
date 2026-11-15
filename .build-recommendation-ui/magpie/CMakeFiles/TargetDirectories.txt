@@ -1,8 +1,0 @@
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/plugin_magpie_agent_core.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/plugin_magpie_agent.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/test_abi.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/test_magpie_plugin.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/test_magpie_agent.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/test.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/edit_cache.dir
-/home/zhu/Projects/omnidesk/.build-recommendation-ui/magpie/CMakeFiles/rebuild_cache.dir
