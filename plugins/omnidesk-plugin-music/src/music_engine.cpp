@@ -172,6 +172,7 @@ void MusicEngine::initializeFast() {
         std::error_code ec;
         fs::create_directories(fs::path(cfg_.data_dir) / "lyrics", ec);
     }
+    loadPlayHistory();
 }
 
 void MusicEngine::reloadConfig() {
@@ -619,6 +620,140 @@ void MusicEngine::setQueueAndPlay(std::vector<MusicTrack> queue, size_t start_in
     playTrack(target);
 }
 
+void MusicEngine::appendTrackNext(const MusicTrack& track) {
+    if (track.id.empty()) return;
+    bool should_play_now = false;
+    {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        if (!has_active_track_ || queue_.empty()) {
+            queue_ = {track};
+            queue_index_ = 0;
+            should_play_now = true;
+        } else {
+            size_t insert_pos = std::min(queue_index_ + 1, queue_.size());
+            queue_.insert(queue_.begin() + static_cast<ptrdiff_t>(insert_pos), track);
+        }
+    }
+    if (should_play_now) {
+        playTrack(track);
+    } else {
+        notifyObservers();
+    }
+}
+
+void MusicEngine::loadPlayHistory() {
+    MusicConfig cfg = currentConfig();
+    if (cfg.data_dir.empty()) return;
+    fs::path hp = fs::path(cfg.data_dir) / "play_history.json";
+    std::error_code ec;
+    if (!fs::exists(hp, ec)) return;
+    std::ifstream ifs(hp);
+    if (!ifs.is_open()) return;
+    auto j = nlohmann::json::parse(ifs, nullptr, false);
+    if (!j.is_object() || !j.contains("tracks") || !j["tracks"].is_array()) return;
+    std::vector<MusicTrack> loaded;
+    for (const auto& item : j["tracks"]) {
+        if (!item.is_object()) continue;
+        MusicTrack tr;
+        if (item.contains("id") && item["id"].is_string()) tr.id = item["id"].get<std::string>();
+        if (item.contains("kind") && item["kind"].is_string()) tr.kind = item["kind"].get<std::string>();
+        if (item.contains("title") && item["title"].is_string()) tr.title = item["title"].get<std::string>();
+        if (item.contains("artist") && item["artist"].is_string()) tr.artist = item["artist"].get<std::string>();
+        if (item.contains("album") && item["album"].is_string()) tr.album = item["album"].get<std::string>();
+        if (item.contains("cover_url") && item["cover_url"].is_string()) tr.cover_url = item["cover_url"].get<std::string>();
+        if (item.contains("storefront") && item["storefront"].is_string()) tr.storefront = item["storefront"].get<std::string>();
+        if (item.contains("quality_label") && item["quality_label"].is_string()) tr.quality_label = item["quality_label"].get<std::string>();
+        if (item.contains("duration_sec") && item["duration_sec"].is_number()) tr.duration_sec = item["duration_sec"].get<double>();
+        if (!tr.id.empty() && !tr.title.empty()) loaded.push_back(std::move(tr));
+        if (loaded.size() >= 30) break;
+    }
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    play_history_ = std::move(loaded);
+}
+
+void MusicEngine::recordPlayHistory(const MusicTrack& track) {
+    if (track.id.empty() || track.title.empty()) return;
+    std::vector<MusicTrack> snap;
+    {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        play_history_.erase(
+            std::remove_if(play_history_.begin(), play_history_.end(),
+                           [&](const MusicTrack& x) { return x.id == track.id; }),
+            play_history_.end());
+        play_history_.insert(play_history_.begin(), track);
+        if (play_history_.size() > 30) play_history_.resize(30);
+        snap = play_history_;
+    }
+    MusicConfig cfg = currentConfig();
+    if (cfg.data_dir.empty()) return;
+    std::error_code ec;
+    fs::create_directories(cfg.data_dir, ec);
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& t : snap) {
+        arr.push_back({
+            {"id", t.id},
+            {"kind", t.kind},
+            {"title", t.title},
+            {"artist", t.artist},
+            {"album", t.album},
+            {"cover_url", t.cover_url},
+            {"storefront", t.storefront},
+            {"quality_label", t.quality_label},
+            {"duration_sec", t.duration_sec},
+        });
+    }
+    fs::path hp = fs::path(cfg.data_dir) / "play_history.json";
+    fs::path tmp = hp.string() + ".tmp";
+    std::ofstream ofs(tmp, std::ios::trunc);
+    if (ofs.is_open()) {
+        ofs << nlohmann::json{{"schema_version", 1}, {"tracks", std::move(arr)}}.dump(2) << "\n";
+        ofs.close();
+        fs::rename(tmp, hp, ec);
+    }
+}
+
+std::vector<MusicTrack> MusicEngine::recentPlayHistory() const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    return play_history_;
+}
+
+bool MusicEngine::exportTrack(const MusicTrack& track,
+                              bool convert_to_flac,
+                              ExportJobInfo& job_out,
+                              std::string& error) {
+    const std::string sf = track.storefront.empty() ? adam_.effectiveStorefront() : track.storefront;
+    const bool is_mv = (track.kind == "mv");
+    return adam_.enqueueExportJob(
+        track.id, sf, is_mv, false, false, convert_to_flac, "",
+        track.title, track.artist, track.cover_url, job_out, error);
+}
+
+bool MusicEngine::exportContainer(const ContainerItem& container,
+                                  bool convert_to_flac,
+                                  ExportJobInfo& job_out,
+                                  std::string& error) {
+    const std::string sf = container.storefront.empty() ? adam_.effectiveStorefront() : container.storefront;
+    const bool is_lib_pl = (container.type == "library-playlists" || container.id.rfind("p.", 0) == 0);
+    const bool is_pl = is_lib_pl || (container.type == "playlists" || container.type == "albums");
+    return adam_.enqueueExportJob(
+        container.id, sf, false, is_pl, is_lib_pl, convert_to_flac, "",
+        container.name, container.subtitle, container.cover_url, job_out, error);
+}
+
+std::vector<ExportJobInfo> MusicEngine::listExportJobs(std::string& error) {
+    std::vector<ExportJobInfo> jobs;
+    adam_.listExportJobs(jobs, error);
+    return jobs;
+}
+
+bool MusicEngine::cancelExportJob(const std::string& job_id, std::string& error) {
+    return adam_.cancelExportJob(job_id, error);
+}
+
+bool MusicEngine::retryExportJob(const std::string& job_id, ExportJobInfo& job_out, std::string& error) {
+    return adam_.retryExportJob(job_id, job_out, error);
+}
+
 void MusicEngine::playAdjacentTrack(int delta) {
     MusicTrack target;
     {
@@ -699,6 +834,7 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
             return;
         }
 
+        MusicTrack resolved_for_history;
         {
             std::lock_guard<std::mutex> lk(state_mutex_);
             if (gen != lyric_generation_) {
@@ -707,16 +843,20 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
             }
             active_session_ = sess;
             if (sess.ok) {
-                if (active_track_.title.empty() && !sess.title.empty()) active_track_.title = sess.title;
+                if ((active_track_.title.empty() || active_track_.title == active_track_.id) && !sess.title.empty()) {
+                    active_track_.title = sess.title;
+                }
                 if (active_track_.artist.empty() && !sess.artist.empty()) active_track_.artist = sess.artist;
                 if (active_track_.album.empty() && !sess.album.empty()) active_track_.album = sess.album;
                 if (active_track_.cover_url.empty() && !sess.cover_url.empty()) active_track_.cover_url = sess.cover_url;
                 if (active_track_.duration_sec <= 0.0 && sess.duration_sec > 0.0) active_track_.duration_sec = sess.duration_sec;
                 active_track_.quality_label = sess.formattedQuality();
             }
+            resolved_for_history = active_track_;
         }
 
         if (sess.ok) {
+            recordPlayHistory(resolved_for_history);
             omnidesk::MediaRequestOptions opts;
             opts.url = (sess.type == "mv" && !sess.video_url.empty()) ? sess.video_url : sess.audio_url;
             if (sess.type == "mv" && !sess.audio_url.empty() && sess.video_url != sess.audio_url) {
@@ -727,9 +867,9 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
             omnidesk::MPVCore::instance().load(opts);
 
             ctx_.publish("entity.media.open", {
-                {"id", track.id},
-                {"title", track.title},
-                {"artist", track.artist},
+                {"id", resolved_for_history.id},
+                {"title", resolved_for_history.title},
+                {"artist", resolved_for_history.artist},
                 {"source_id", "plugin-music"},
                 {"kind", is_mv ? "video" : "music"},
                 {"origin", "plugin_music"},

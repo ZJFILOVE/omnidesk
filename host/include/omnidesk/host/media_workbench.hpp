@@ -79,6 +79,9 @@ private:
     void ensureVisibleMusicSelection();
     void selectAdjacentMusicTrack(int delta);
     void updateActiveLyricHighlight(double position_sec);
+    void triggerAiLyricsTranslate();
+    void explainLyricLineWithAi(size_t line_index);
+    void openWordLookupForLyric(size_t line_index);
     void loadNasStatus(bool probe_remote);
     void loadNasDirectory(const std::string& path);
     void loadImdbDiscover(const std::string& chart_id, const std::string& query);
@@ -113,10 +116,13 @@ private:
     std::shared_ptr<CancelToken> nas_dir_request_;
     std::shared_ptr<CancelToken> imdb_request_;
     std::shared_ptr<CancelToken> imdb_action_request_;
+    std::shared_ptr<CancelToken> lyric_translate_request_;
+    std::shared_ptr<CancelToken> lyric_explain_request_;
     uint64_t fetch_seq_ = 0;
     uint64_t mpv_state_sub_ = 0;
     uint64_t coord_state_sub_ = 0;
     uint64_t recommend_sub_ = 0;
+    uint64_t lyrics_updated_sub_ = 0;
     brls::VoidEvent::Subscription resize_sub_;
     std::shared_ptr<CancelToken> rehydrate_request_;
 
@@ -153,10 +159,26 @@ private:
     bool imdb_loaded_ = false;
     bool imdb_loading_ = false;
 
+    std::string lyrics_display_mode_ = "bilingual";
+    bool lyric_translating_ = false;
+    bool lyric_explaining_ = false;
+    bool lyric_tutor_expanded_ = true;
+    int selected_lyric_idx_ = -1;
+    std::string lyric_tutor_track_id_;
+    std::string lyric_tutor_target_;
+    std::string lyric_tutor_provider_;
+    std::string lyric_tutor_explanation_;
+    std::unordered_map<std::string, std::string> lyric_explain_cache_;
+
+    brls::ScrollingFrame* lyrics_scroll_ = nullptr;
     std::vector<brls::Box*> lyric_cards_;
     std::vector<brls::Label*> lyric_orig_labels_;
+    std::vector<brls::Label*> lyric_trans_labels_;
     std::vector<double> lyric_times_;
     int active_lyric_idx_ = -1;
+    brls::Label* lyric_tutor_status_label_ = nullptr;
+    brls::Label* lyric_tutor_target_label_ = nullptr;
+    brls::Label* lyric_tutor_body_label_ = nullptr;
 
     brls::Box* header_box_ = nullptr;
     brls::Box* sub_tabs_box_ = nullptr;

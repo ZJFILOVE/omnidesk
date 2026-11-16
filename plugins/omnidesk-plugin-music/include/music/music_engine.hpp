@@ -48,6 +48,7 @@ public:
 
     // Playback & Queue via MPVCore
     void setQueueAndPlay(std::vector<MusicTrack> queue, size_t start_index);
+    void appendTrackNext(const MusicTrack& track);
     void playTrack(const MusicTrack& track);
     void syncExternalTrack(const MusicTrack& track);
     void playAdjacentTrack(int delta);
@@ -55,6 +56,31 @@ public:
     void seekSeconds(double sec);
     void setVolumePercent(int vol);
     void setLosslessEnabled(bool enabled);
+    std::vector<MusicTrack> recentPlayHistory() const;
+
+    // Lossless / MV Export via Adam Go Engine
+    bool exportTrack(const MusicTrack& track, bool convert_to_flac, ExportJobInfo& job_out, std::string& error);
+    bool exportContainer(const ContainerItem& container, bool convert_to_flac, ExportJobInfo& job_out, std::string& error);
+    std::vector<ExportJobInfo> listExportJobs(std::string& error);
+    bool cancelExportJob(const std::string& job_id, std::string& error);
+    bool retryExportJob(const std::string& job_id, ExportJobInfo& job_out, std::string& error);
+
+    // AI Curation, Archive Rehydration View & Reverse-Write (ai反写)
+    CurationWorkspaceSnapshot loadCurationSnapshot(const std::string& requested_date = "", bool enrich_artwork = true);
+    InteractiveWritebackOutcome curateAndWriteBackInteractive(
+        const std::string& user_prompt,
+        const std::string& target_playlist_name = "OmniDesk AI 灵感电台",
+        bool sync_playlist = true,
+        bool enqueue_now = false);
+    bool syncInteractiveTracksToPlaylist(
+        const std::vector<CuratedTrackItem>& items,
+        const std::string& playlist_name,
+        bool enqueue_now,
+        nlohmann::json& result_out,
+        std::string& error);
+    bool clearInteractiveSessions(const std::string& session_id, std::string& error);
+    bool checkDailyPlaylistSyncDryRun(const std::string& date, nlohmann::json& result_out, std::string& error);
+    void onExternalCurationUpdated();
 
     // Lyrics & AI
     void setDisplayMode(const std::string& mode);
@@ -94,6 +120,7 @@ public:
 
     static constexpr const char* kProtectedDailyPlaylistId = "p.YJXV7dEIeb3GzZX";
     static constexpr const char* kProtectedDailyPlaylistName = "ChatGPT Daily 5";
+    static constexpr const char* kDefaultInteractivePlaylistName = "OmniDesk AI 灵感电台";
 
     AdamClient& adamClient() { return adam_; }
     LyricsCacheStore& cacheStore() { return cache_; }
@@ -102,6 +129,8 @@ private:
     void workerLoop();
     void enqueueTask(std::function<void()> task);
     void notifyObservers();
+    void loadPlayHistory();
+    void recordPlayHistory(const MusicTrack& track);
     void startAsyncLyricLoadLocked(const MusicTrack& track, bool force_refresh, bool force_translate);
     void releasePlaybackSessionAsync(const std::string& session_id);
     std::string makeMpvUrlHeaders(std::unordered_map<std::string, std::string>& headers_out) const;
@@ -123,6 +152,7 @@ private:
     std::unordered_map<std::string, FeedOutcome> feed_cache_;
     std::vector<MusicTrack> queue_;
     size_t queue_index_ = 0;
+    std::vector<MusicTrack> play_history_;
     MusicTrack active_track_;
     bool has_active_track_ = false;
     PlaybackSessionInfo active_session_;
@@ -131,6 +161,9 @@ private:
     uint64_t lyric_generation_ = 0;
     bool was_playing_in_mpv_ = false;
     bool auto_advancing_ = false;
+
+    mutable std::mutex curation_mutex_;
+    std::unordered_map<std::string, MusicTrack> curated_meta_cache_;
 
     uint64_t mpv_sub_token_ = 0;
 

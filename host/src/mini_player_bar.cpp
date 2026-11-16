@@ -105,6 +105,30 @@ void MiniPlayerBar::buildStaticUi() {
     info_col->addView(meta_label_);
     left->addView(info_col);
 
+    fluid_lyric_box_ = new brls::Box(brls::Axis::ROW);
+    fluid_lyric_box_->setPadding(5, 12, 5, 12);
+    fluid_lyric_box_->setCornerRadius(14.0f);
+    fluid_lyric_box_->setHighlightCornerRadius(14.0f);
+    fluid_lyric_box_->setBackgroundColor(ui::color("desktop/active"));
+    fluid_lyric_box_->setBorderThickness(1.0f);
+    fluid_lyric_box_->setBorderColor(ui::color("desktop/line"));
+    fluid_lyric_box_->setAlignItems(brls::AlignItems::CENTER);
+    fluid_lyric_box_->setMarginLeft(12);
+    fluid_lyric_box_->setGrow(1.2f);
+    fluid_lyric_box_->setShrink(1.0f);
+    fluid_lyric_box_->setFocusable(true);
+    fluid_lyric_box_->setVisibility(brls::Visibility::GONE);
+    fluid_lyric_label_ = ui::makeLabel("", 13.5f, "brls/accent", 1.2f);
+    fluid_lyric_label_->setSingleLine(true);
+    fluid_lyric_label_->setShrink(1.0f);
+    fluid_lyric_box_->addView(fluid_lyric_label_);
+    fluid_lyric_box_->registerClickAction([this](brls::View*) {
+        const auto st = PlaybackCoordinator::instance().state();
+        if (on_open_stage_) on_open_stage_(st.active_role);
+        return true;
+    });
+    left->addView(fluid_lyric_box_);
+
     time_label_ = ui::makeLabel("00:00 / 00:00", 13.0f, "font/grey");
     time_label_->setMarginLeft(12);
     time_label_->setMarginRight(14);
@@ -185,6 +209,7 @@ void MiniPlayerBar::refresh(const PlaybackSessionState& session) {
 
     if (item_key != last_item_key_) {
         last_item_key_ = item_key;
+        last_lyric_text_.clear();
         if (role_pill_label_) {
             if (!has_active && session.has_suspended_music) {
                 role_pill_label_->setText("音乐已暂停");
@@ -216,11 +241,17 @@ void MiniPlayerBar::refresh(const PlaybackSessionState& session) {
 
     if (meta_label_) {
         std::string meta = shown_track.item.creator;
-        if (!shown_track.item.source_badge.empty()) {
+        if (!shown_track.item.quality_label.empty()) {
+            if (!meta.empty()) meta += " · ";
+            meta += shown_track.item.quality_label;
+        } else if (!shown_track.item.source_badge.empty()) {
             if (!meta.empty()) meta += " · ";
             meta += shown_track.item.source_badge;
         }
-        if (!session.subtitle_status.empty()) {
+        if (!session.mpv.last_error.empty() && has_active) {
+            if (!meta.empty()) meta += " · ";
+            meta += "播放错误: " + session.mpv.last_error;
+        } else if (!session.subtitle_status.empty()) {
             if (!meta.empty()) meta += " · ";
             meta += session.subtitle_status;
         } else if (session.has_suspended_music && has_active) {
@@ -261,8 +292,14 @@ void MiniPlayerBar::refresh(const PlaybackSessionState& session) {
 }
 
 void MiniPlayerBar::updateProgress(const PlaybackSessionState& session) {
+    const bool has_active =
+        (session.active_role != PlaybackRole::None && !session.active_track.item.id.empty());
+    const PlaybackTrack& shown_track =
+        has_active ? session.active_track : session.suspended_music_track;
     const double pos = std::max(0.0, session.mpv.position_sec);
-    const double dur = std::max(0.0, session.mpv.duration_sec);
+    const double dur = session.mpv.duration_sec > 0.0
+                           ? session.mpv.duration_sec
+                           : std::max(0.0, shown_track.item.duration_sec);
     if (time_label_) {
         time_label_->setText(formatTimeMmSs(pos) + " / " + formatTimeMmSs(dur));
     }
@@ -271,6 +308,38 @@ void MiniPlayerBar::updateProgress(const PlaybackSessionState& session) {
                               ? static_cast<float>(std::clamp((pos / dur) * 100.0, 0.0, 100.0))
                               : 0.0f;
         progress_fill_->setWidthPercentage(pct);
+    }
+
+    if (fluid_lyric_box_ && fluid_lyric_label_) {
+        std::string lyric_str;
+        if (has_active && !shown_track.lyrics.empty()) {
+            int idx = -1;
+            for (size_t i = 0; i < shown_track.lyrics.size(); ++i) {
+                if (pos >= shown_track.lyrics[i].time_sec) {
+                    idx = static_cast<int>(i);
+                } else {
+                    break;
+                }
+            }
+            if (idx < 0) idx = 0;
+            const auto& ln = shown_track.lyrics[static_cast<size_t>(idx)];
+            if (!ln.original.empty()) {
+                lyric_str = "♪ " + ln.original;
+                if (!ln.translation.empty() && ln.translation != ln.original) {
+                    lyric_str += "  ｜  " + ln.translation;
+                }
+            }
+        }
+        if (lyric_str.empty()) {
+            if (!last_lyric_text_.empty()) {
+                last_lyric_text_.clear();
+                fluid_lyric_box_->setVisibility(brls::Visibility::GONE);
+            }
+        } else if (lyric_str != last_lyric_text_) {
+            last_lyric_text_ = lyric_str;
+            fluid_lyric_label_->setText(lyric_str);
+            fluid_lyric_box_->setVisibility(brls::Visibility::VISIBLE);
+        }
     }
 }
 

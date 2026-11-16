@@ -1491,6 +1491,43 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
                     }
                 });
             });
+
+        lyrics_updated_sub_ = HostKernel::instance().bus().subscribe(
+            "entity.lyrics.updated",
+            "host.media_workbench",
+            [this, alive = alive_](const std::string&, const nlohmann::json& payload) {
+                if (!payload.is_object() || !payload.contains("lines") || !payload["lines"].is_array()) {
+                    return;
+                }
+                const std::string upd_id = payload.value("id", std::string{});
+                std::vector<LyricLine> updated_lines;
+                for (const auto& l : payload["lines"]) {
+                    if (!l.is_object()) continue;
+                    double tsec = 0.0;
+                    if (l.contains("time_sec") && l["time_sec"].is_number()) {
+                        tsec = l["time_sec"].get<double>();
+                    }
+                    updated_lines.push_back(LyricLine{
+                        tsec,
+                        l.value("original", std::string{}),
+                        l.value("translation", std::string{}),
+                    });
+                }
+                if (updated_lines.empty()) return;
+                brls::sync([this, alive, upd_id, lines = std::move(updated_lines)]() mutable {
+                    if (!alive->load(std::memory_order_acquire) || !has_active_item_) return;
+                    const auto am = extractAppleMusicLookup(active_item_);
+                    if (!upd_id.empty() && active_item_.id != upd_id && am.song_id != upd_id) {
+                        return;
+                    }
+                    active_lyrics_ = std::move(lines);
+                    active_item_.has_bilingual_sub = true;
+                    lyric_translating_ = false;
+                    if (sub_mode_ == SubMode::MusicLyrics) {
+                        rebuildSubContent();
+                    }
+                });
+            });
     }
 
     resize_sub_ = brls::Application::getWindowSizeChangedEvent()->subscribe([this, alive = alive_]() {
@@ -1504,6 +1541,10 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
 
 MediaWorkbench::~MediaWorkbench() {
     brls::Application::getWindowSizeChangedEvent()->unsubscribe(resize_sub_);
+    if (lyrics_updated_sub_ != 0 && HostKernel::instance().isInitialized()) {
+        HostKernel::instance().bus().unsubscribe(lyrics_updated_sub_);
+        lyrics_updated_sub_ = 0;
+    }
     if (recommend_sub_ != 0 && HostKernel::instance().isInitialized()) {
         HostKernel::instance().bus().unsubscribe(recommend_sub_);
         recommend_sub_ = 0;
@@ -1520,11 +1561,20 @@ MediaWorkbench::~MediaWorkbench() {
         rehydrate_request_->cancel();
         rehydrate_request_.reset();
     }
+    if (lyric_translate_request_) {
+        lyric_translate_request_->cancel();
+        lyric_translate_request_.reset();
+    }
+    if (lyric_explain_request_) {
+        lyric_explain_request_->cancel();
+        lyric_explain_request_.reset();
+    }
     if (provenance_request_) provenance_request_->cancel();
     if (cover_enrich_request_) cover_enrich_request_->cancel();
     if (nas_cover_enrich_request_) nas_cover_enrich_request_->cancel();
     alive_->store(false, std::memory_order_release);
     cancelActiveFetch();
+    lyrics_scroll_ = nullptr;
     music_queue_grid_ = nullptr;
     mpv_stage_ = nullptr;
 }
@@ -1562,7 +1612,8 @@ void MediaWorkbench::onViewportLayoutChanged() {
     const int sw = static_cast<int>(std::round(estimateMediaStageWidth(this, immersive_fullscreen_)));
     const int sh = static_cast<int>(std::round(estimateMediaStageHeight(this, immersive_fullscreen_)));
     if (std::abs(sw - last_stage_w_) >= 12 ||
-        (sub_mode_ == SubMode::PlayerStage && std::abs(sh - last_stage_h_) >= 12)) {
+        ((sub_mode_ == SubMode::PlayerStage || sub_mode_ == SubMode::MusicLyrics) &&
+         std::abs(sh - last_stage_h_) >= 12)) {
         rebuildSubContent();
     }
 }
@@ -1990,11 +2041,16 @@ void MediaWorkbench::rebuildSubContent() {
 
     mpv_stage_ = nullptr;
     music_queue_grid_ = nullptr;
+    lyrics_scroll_ = nullptr;
     lyric_cards_.clear();
     lyric_orig_labels_.clear();
+    lyric_trans_labels_.clear();
     lyric_times_.clear();
     active_lyric_idx_ = -1;
-    if (immersive_fullscreen_ && stage_grid_) {
+    lyric_tutor_status_label_ = nullptr;
+    lyric_tutor_target_label_ = nullptr;
+    lyric_tutor_body_label_ = nullptr;
+    if ((immersive_fullscreen_ || sub_mode_ == SubMode::MusicLyrics) && stage_grid_) {
         stage_grid_->setContentOffsetY(0.0f, false);
     }
     switch (sub_mode_) {
@@ -2504,6 +2560,14 @@ void MediaWorkbench::enrichMissingNasCovers() {
                 auto it = nas_imdb_cover_cache_.find(toLowerCopy(q));
                 if (it == nas_imdb_cover_cache_.end() || it->second.empty()) return false;
                 item.cover_url = it->second;
+                if (item.extra.is_object() && item.extra.contains("episodes") &&
+                    item.extra["episodes"].is_array()) {
+                    for (auto& ep_j : item.extra["episodes"]) {
+                        if (ep_j.is_object() && ep_j.value("cover_url", "").empty()) {
+                            ep_j["cover_url"] = it->second;
+                        }
+                    }
+                }
                 return true;
             };
 
@@ -2627,55 +2691,94 @@ void MediaWorkbench::renderMusicLyricsView() {
     static_root->addView(buildScopeControlsBox(true));
 
     const float stage_w = estimateMediaStageWidth(this, false);
-    const float art_side = std::clamp(std::round(stage_w * 0.38f - 68.0f), 160.0f, 320.0f);
+    const float stage_h = estimateMediaStageHeight(this, false);
+    const float scope_overhead = (music_scope_ == MusicScope::Personal) ? 46.0f : 90.0f;
+    const float split_h = std::max(440.0f, stage_h - 154.0f - scope_overhead);
+    const float art_side = std::clamp(std::round(stage_w * 0.085f), 84.0f, 118.0f);
 
     auto* split = new brls::Box(brls::Axis::ROW);
     split->setWidthPercentage(100);
+    split->setHeight(split_h);
 
-    // Left Square Cover & Transport Studio
-    auto* left_card = ui::makeCard("desktop/surface", 18.0f, 12.0f);
-    left_card->setWidthPercentage(38);
+    // =========================================================================
+    // Left Column: Compact Now-Playing Hero + Full-Height Independent Queue Grid
+    // (Fills split_h completely so scrolling lyrics NEVER exposes empty black space)
+    // =========================================================================
+    auto* left_card = ui::makeCard("desktop/surface", 16.0f, 14.0f);
+    left_card->setWidthPercentage(37);
+    left_card->setHeight(split_h);
+    left_card->setShrink(0.0f);
     left_card->setMarginRight(16);
 
-    auto* art = ui::makeCard("desktop/active", 16.0f, 12.0f);
-    art->setHeight(art_side + 24.0f);
+    auto* hero_row = new brls::Box(brls::Axis::ROW);
+    hero_row->setWidthPercentage(100);
+    hero_row->setShrink(0.0f);
+    hero_row->setAlignItems(brls::AlignItems::CENTER);
+
+    auto* art = ui::makeCard("desktop/active", 6.0f, 12.0f);
+    art->setDimensions(art_side + 12.0f, art_side + 12.0f);
+    art->setShrink(0.0f);
+    art->setMarginRight(12);
     art->setJustifyContent(brls::JustifyContent::CENTER);
     art->setAlignItems(brls::AlignItems::CENTER);
     if (!active_item_.cover_url.empty()) {
         auto* cover = new CachedImageView(&ImageCache::instance());
         cover->setDimensions(art_side, art_side);
-        cover->setCornerRadius(10.0f);
+        cover->setCornerRadius(9.0f);
         cover->setScalingType(brls::ImageScalingType::FILL);
         cover->setImageUrl(active_item_.cover_url, extractHeadersFromItem(active_item_));
         art->addView(cover);
     } else {
-        art->addView(ui::makePill("1:1 专辑封面舞台", "desktop/surface", "brls/accent"));
+        art->addView(ui::makeLabel("♪", 26.0f, "brls/accent"));
     }
-    left_card->addView(art);
+    hero_row->addView(art);
 
-    auto* track_title = ui::makeLabel(active_item_.title.empty() ? "请选择曲目" : active_item_.title,
-                                      18.0f, "brls/text");
-    track_title->setMarginTop(12);
-    left_card->addView(track_title);
+    auto* hero_meta = new brls::Box(brls::Axis::COLUMN);
+    hero_meta->setGrow(1.0f);
+    hero_meta->setShrink(1.0f);
+    hero_meta->setMinWidth(0);
 
-    std::string artist_text = active_item_.creator;
+    auto* track_title = ui::makeLabel(
+        active_item_.title.empty() ? "请选择曲目" : active_item_.title,
+        17.5f, "brls/text", 1.32f);
+    hero_meta->addView(track_title);
+
+    if (!active_item_.creator.empty()) {
+        auto* artist = ui::makeLabel(active_item_.creator, 13.5f, "font/grey", 1.28f);
+        artist->setMarginTop(4);
+        hero_meta->addView(artist);
+    }
+
+    auto* meta_pills = new brls::Box(brls::Axis::ROW);
+    meta_pills->setMarginTop(7);
+    ui_comfort::enableFlexWrap(meta_pills, 4.0f);
     if (!active_item_.quality_label.empty()) {
-        if (!artist_text.empty()) artist_text += " · ";
-        artist_text += active_item_.quality_label;
+        auto* qp = ui::makePill(active_item_.quality_label, "status/ok_bg", "status/ok_fg");
+        qp->setMarginRight(6);
+        meta_pills->addView(qp);
     }
-    auto* artist = ui::makeLabel(artist_text, 14.0f, "font/grey");
-    artist->setMarginTop(4);
-    left_card->addView(artist);
+    if (active_item_.duration_sec > 0.0) {
+        auto* dp = ui::makePill(formatDuration(active_item_.duration_sec), "desktop/soft", "font/grey");
+        meta_pills->addView(dp);
+    }
+    if (!meta_pills->getChildren().empty()) {
+        hero_meta->addView(meta_pills);
+    }
+    hero_row->addView(hero_meta);
+    left_card->addView(hero_row);
 
     auto* controls = new brls::Box(brls::Axis::ROW);
-    controls->setMarginTop(14);
+    controls->setShrink(0.0f);
+    controls->setMarginTop(12);
+    ui_comfort::enableFlexWrap(controls, 6.0f);
     controls->addView(ui::makeButton("上一曲", [this, alive = alive_]() {
         brls::sync([this, alive]() {
             if (alive->load(std::memory_order_acquire)) {
                 selectAdjacentMusicTrack(-1);
             }
         });
-    }, false, 36.0f));
+    }, false, 34.0f));
+
     auto* play_b = ui::makeButton("播放 / 暂停", [this, alive = alive_]() {
         if (!alive->load(std::memory_order_acquire)) return;
         const auto visible = visibleMusicItems();
@@ -2705,40 +2808,54 @@ void MediaWorkbench::renderMusicLyricsView() {
             coord_st.active_role != PlaybackRole::None) {
             PlaybackCoordinator::instance().playPause();
         } else {
-            brls::Application::notify("MPV 音频引擎就绪: " + active_item_.title);
+            brls::Application::notify("当前曲目暂不可播放: " + active_item_.title);
         }
-    }, true, 36.0f);
-    play_b->setMarginLeft(8);
+    }, true, 34.0f);
+    play_b->setMarginLeft(7);
     controls->addView(play_b);
+
     auto* next_b = ui::makeButton("下一曲", [this, alive = alive_]() {
         brls::sync([this, alive]() {
             if (alive->load(std::memory_order_acquire)) {
                 selectAdjacentMusicTrack(1);
             }
         });
-    }, false, 36.0f);
-    next_b->setMarginLeft(8);
+    }, false, 34.0f);
+    next_b->setMarginLeft(7);
     controls->addView(next_b);
-    auto* ai_b = ui::makeButton("F8 逐句精讲", [this, alive = alive_]() {
-        if (alive->load(std::memory_order_acquire) && on_entity_focus_) {
-            on_entity_focus_(active_item_.title + " [歌词语言分析]");
+
+    auto* ai_b = ui::makeButton("精讲本句", [this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (active_lyrics_.empty()) {
+            brls::Application::notify("当前曲目暂无可精讲的歌词");
+            return;
         }
-    }, false, 36.0f);
-    ai_b->setMarginLeft(8);
+        const int target_i = (selected_lyric_idx_ >= 0 &&
+                              static_cast<size_t>(selected_lyric_idx_) < active_lyrics_.size())
+                                 ? selected_lyric_idx_
+                                 : (active_lyric_idx_ >= 0 ? active_lyric_idx_ : 0);
+        explainLyricLineWithAi(static_cast<size_t>(target_i));
+    }, false, 34.0f);
+    ai_b->setMarginLeft(7);
     controls->addView(ai_b);
     left_card->addView(controls);
+
     appendCuratedMetadataBlock(left_card, active_item_);
 
     visible_music_items_ = visibleMusicItems();
     if (visible_music_items_.empty()) {
-        auto* empty_lbl = ui::makeLabel("当前范围暂无曲目，可切换个人曲库、每日音乐或交互推荐", 14.0f, "font/grey");
-        empty_lbl->setMarginTop(12);
-        left_card->addView(empty_lbl);
+        auto* empty_box = new brls::Box(brls::Axis::COLUMN);
+        empty_box->setGrow(1.0f);
+        empty_box->setJustifyContent(brls::JustifyContent::CENTER);
+        empty_box->addView(ui::makeLabel(
+            "当前范围暂无曲目，可切换个人曲库、每日音乐或交互推荐", 14.0f, "font/grey"));
+        left_card->addView(empty_box);
     } else {
         auto* queue_hdr = ui::makeLabel(
             "曲库与 AI 策展列表 (" + std::to_string(visible_music_items_.size()) + " 首)",
-            15.0f, "brls/text");
-        queue_hdr->setMarginTop(14);
+            14.5f, "brls/text");
+        queue_hdr->setShrink(0.0f);
+        queue_hdr->setMarginTop(12);
         queue_hdr->setMarginBottom(6);
         left_card->addView(queue_hdr);
 
@@ -2790,102 +2907,365 @@ void MediaWorkbench::renderMusicLyricsView() {
 
         music_queue_grid_ = new RecyclingGrid();
         music_queue_grid_->setWidthPercentage(100);
-        const float queue_h = std::clamp(
-            static_cast<float>(visible_music_items_.size()) * 76.0f, 160.0f, 460.0f);
-        music_queue_grid_->setHeight(queue_h);
+        music_queue_grid_->setGrow(1.0f);
+        music_queue_grid_->setShrink(1.0f);
+        music_queue_grid_->setMinHeight(120.0f);
         music_queue_grid_->setSpanCount(1);
         music_queue_grid_->setColSpace(0.0f);
         music_queue_grid_->setEstimatedRowHeight(68.0f);
         music_queue_grid_->setEstimatedRowSpace(8.0f);
-        music_queue_grid_->setPreFetchLine(2);
+        music_queue_grid_->setPreFetchLine(3);
         music_queue_grid_->registerCell("music_track", []() { return new MusicTrackRowCell(); });
         music_queue_grid_->setDataSource(new MusicQueueDataSource(this), true);
         left_card->addView(music_queue_grid_);
     }
     split->addView(left_card);
 
-    // Right Bilingual Synced Lyrics Canvas
-    auto* lyrics_card = ui::makeCard("desktop/surface", 18.0f, 12.0f);
-    lyrics_card->setWidthPercentage(60);
-    lyrics_card->addView(ui::makeLabel("双语同步歌词 · LRC Studio", 18.0f, "brls/text"));
+    // =========================================================================
+    // Right Column: Unified Fluid-Cloud Lyrics Sheet + AI Translation & Tutor Window
+    // =========================================================================
+    auto* right_col = new brls::Box(brls::Axis::COLUMN);
+    right_col->setGrow(1.0f);
+    right_col->setShrink(1.0f);
+    right_col->setMinWidth(0);
+    right_col->setHeight(split_h);
 
-    std::vector<LyricLine> lines = active_lyrics_;
-    if (lines.empty()) {
-        lyrics_card->addView(ui::makeLabel("此曲暂无可用歌词", 15.0f, "font/grey"));
+    auto* lyrics_card = ui::makeCard("desktop/surface", 16.0f, 14.0f);
+    lyrics_card->setWidthPercentage(100);
+    lyrics_card->setGrow(1.0f);
+    lyrics_card->setShrink(1.0f);
+    lyrics_card->setMinHeight(180.0f);
+
+    const std::vector<LyricLine>& lines = active_lyrics_;
+    const bool any_translated = std::any_of(lines.begin(), lines.end(), [](const LyricLine& l) {
+        return !l.translation.empty() && l.translation != l.original;
+    });
+
+    auto* lyr_hdr = new brls::Box(brls::Axis::ROW);
+    lyr_hdr->setWidthPercentage(100);
+    lyr_hdr->setShrink(0.0f);
+    lyr_hdr->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    lyr_hdr->setAlignItems(brls::AlignItems::CENTER);
+    lyr_hdr->setMarginBottom(10);
+    ui_comfort::enableFlexWrap(lyr_hdr, 6.0f);
+
+    auto* lyr_hdr_left = new brls::Box(brls::Axis::ROW);
+    lyr_hdr_left->setAlignItems(brls::AlignItems::CENTER);
+    auto* lyr_title = ui::makeLabel("流体云歌词", 17.5f, "brls/text");
+    lyr_title->setMarginRight(10);
+    lyr_hdr_left->addView(lyr_title);
+
+    std::string status_pill_txt = lines.empty()
+                                      ? "暂无歌词"
+                                      : (lyric_translating_
+                                             ? "AI 正在补全中文…"
+                                             : (any_translated ? "双语同步就绪" : "原文同步 · 可 AI 补译"));
+    const char* status_bg = lyric_translating_
+                                ? "status/info_bg"
+                                : (any_translated ? "status/ok_bg" : "desktop/soft");
+    const char* status_fg = lyric_translating_
+                                ? "brls/accent"
+                                : (any_translated ? "status/ok_fg" : "font/grey");
+    lyr_hdr_left->addView(ui::makePill(status_pill_txt, status_bg, status_fg));
+    lyr_hdr->addView(lyr_hdr_left);
+
+    auto* lyr_hdr_right = new brls::Box(brls::Axis::ROW);
+    lyr_hdr_right->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(lyr_hdr_right, 5.0f);
+    for (const auto& [mode_id, mode_lbl] : std::vector<std::pair<std::string, std::string>>{
+             {"bilingual", "双语"}, {"original", "原文"}, {"translation", "译文"}}) {
+        auto* chip = ui_comfort::makeFilterChip(
+            mode_lbl,
+            [this, alive = alive_, mode_id]() {
+                brls::sync([this, alive, mode_id]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    lyrics_display_mode_ = mode_id;
+                    rebuildSubContent();
+                });
+            },
+            lyrics_display_mode_ == mode_id,
+            "domain/media",
+            28.0f);
+        chip->setMarginRight(5);
+        lyr_hdr_right->addView(chip);
     }
 
-    const double pos_sec = MPVCore::instance().state().position_sec;
-    int initial_idx = -1;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (pos_sec >= lines[i].time_sec) {
-            initial_idx = static_cast<int>(i);
-        } else {
-            break;
+    auto* tr_btn = ui::makeButton(
+        lyric_translating_ ? "翻译中…" : "AI 补译中文",
+        [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire)) {
+                triggerAiLyricsTranslate();
+            }
+        },
+        !any_translated && !lines.empty(),
+        29.0f);
+    lyr_hdr_right->addView(tr_btn);
+    lyr_hdr->addView(lyr_hdr_right);
+    lyrics_card->addView(lyr_hdr);
+
+    // Unified One-Piece Fluid-Cloud Sheet (no separate boxy borders per line)
+    auto* fluid_sheet_wrap = ui::makeCard("desktop/soft", 8.0f, 12.0f);
+    fluid_sheet_wrap->setWidthPercentage(100);
+    fluid_sheet_wrap->setGrow(1.0f);
+    fluid_sheet_wrap->setShrink(1.0f);
+    fluid_sheet_wrap->setMinHeight(120.0f);
+    fluid_sheet_wrap->setBorderThickness(0);
+
+    lyrics_scroll_ = new brls::ScrollingFrame();
+    lyrics_scroll_->setWidthPercentage(100);
+    lyrics_scroll_->setGrow(1.0f);
+    lyrics_scroll_->setShrink(1.0f);
+    lyrics_scroll_->setMinHeight(100.0f);
+
+    auto* lyrics_sheet = new brls::Box(brls::Axis::COLUMN);
+    lyrics_sheet->setWidthPercentage(100);
+    lyrics_sheet->setPadding(6, 6, 18, 6);
+
+    if (lines.empty()) {
+        auto* empty_lyr = new brls::Box(brls::Axis::COLUMN);
+        empty_lyr->setPadding(28, 18, 28, 18);
+        empty_lyr->addView(ui::makeLabel(
+            "当前曲目暂无时间轴歌词（纯音乐或未收录）", 15.5f, "font/grey", 1.45f));
+        lyrics_sheet->addView(empty_lyr);
+    } else {
+        const double pos_sec = MPVCore::instance().state().position_sec;
+        int initial_idx = -1;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (pos_sec >= lines[i].time_sec) {
+                initial_idx = static_cast<int>(i);
+            } else {
+                break;
+            }
+        }
+        active_lyric_idx_ = initial_idx;
+
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const bool active_line = (static_cast<int>(i) == initial_idx);
+            const bool selected_line = (static_cast<int>(i) == selected_lyric_idx_);
+
+            auto* row = new brls::Box(brls::Axis::COLUMN);
+            row->setWidthPercentage(100);
+            row->setPadding(9, 14, 9, 14);
+            row->setCornerRadius(10.0f);
+            row->setHighlightCornerRadius(10.0f);
+            row->setBackgroundColor(active_line ? ui::color("desktop/active") : nvgRGBA(0, 0, 0, 0));
+            if (selected_line && !active_line) {
+                row->setBorderThickness(1.0f);
+                row->setBorderColor(ui::color("brls/accent"));
+            } else {
+                row->setBorderThickness(0.0f);
+            }
+            row->setMarginBottom(2);
+            row->setFocusable(true);
+
+            auto* top_line = new brls::Box(brls::Axis::ROW);
+            top_line->setWidthPercentage(100);
+            top_line->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+            top_line->setAlignItems(brls::AlignItems::CENTER);
+
+            std::string main_txt = lines[i].original;
+            if (lyrics_display_mode_ == "translation" && !lines[i].translation.empty()) {
+                main_txt = lines[i].translation;
+            }
+            auto* orig_lbl = ui::makeLabel(
+                main_txt,
+                active_line ? 18.5f : 16.0f,
+                active_line ? "brls/accent" : "brls/text",
+                1.38f);
+            orig_lbl->setGrow(1.0f);
+            top_line->addView(orig_lbl);
+
+            auto* ts_lbl = ui::makeLabel(formatDuration(lines[i].time_sec), 12.0f, "font/grey");
+            ts_lbl->setMarginLeft(12);
+            ts_lbl->setShrink(0.0f);
+            top_line->addView(ts_lbl);
+            row->addView(top_line);
+
+            brls::Label* tr_lbl = nullptr;
+            const bool show_sub_tr =
+                lyrics_display_mode_ == "bilingual" &&
+                !lines[i].translation.empty() &&
+                lines[i].translation != lines[i].original;
+            if (show_sub_tr) {
+                tr_lbl = ui::makeLabel(
+                    lines[i].translation,
+                    active_line ? 15.0f : 14.2f,
+                    active_line ? "brls/text" : "font/grey",
+                    1.36f);
+                tr_lbl->setMarginTop(3);
+                row->addView(tr_lbl);
+            }
+
+            const double seek_sec = lines[i].time_sec;
+            row->registerClickAction([this, alive = alive_, i, seek_sec](brls::View*) {
+                if (!alive->load(std::memory_order_acquire)) return true;
+                selected_lyric_idx_ = static_cast<int>(i);
+                const auto coord_st = PlaybackCoordinator::instance().state();
+                const bool same_coord_track =
+                    coord_st.active_role != PlaybackRole::None &&
+                    coord_st.active_track.item.id == active_item_.id &&
+                    coord_st.active_track.item.source_id == active_item_.source_id &&
+                    !MPVCore::instance().state().current_url.empty();
+                if (!same_coord_track && isPlayableOrResolvableItem(active_item_)) {
+                    auto opts = buildPlaybackOptions(active_item_);
+                    last_loaded_stream_key_ =
+                        active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
+                    playVisibleMusic(seek_sec);
+                } else {
+                    PlaybackCoordinator::instance().seekAbsolute(seek_sec);
+                }
+                explainLyricLineWithAi(i);
+                return true;
+            });
+
+            lyric_cards_.push_back(row);
+            lyric_orig_labels_.push_back(orig_lbl);
+            lyric_trans_labels_.push_back(tr_lbl);
+            lyric_times_.push_back(lines[i].time_sec);
+            lyrics_sheet->addView(row);
         }
     }
-    active_lyric_idx_ = initial_idx;
 
-    for (size_t i = 0; i < lines.size(); ++i) {
-        const bool active_line = (static_cast<int>(i) == initial_idx);
-        auto* row = ui::makeCard(active_line ? "desktop/active" : "desktop/soft", 14.0f, 10.0f);
-        row->setMarginTop(10);
-        row->setFocusable(true);
-        auto* top_line = new brls::Box(brls::Axis::ROW);
-        top_line->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-        top_line->setAlignItems(brls::AlignItems::CENTER);
-        auto* orig_lbl = ui::makeLabel(formatDuration(lines[i].time_sec) + "  " + lines[i].original,
-                                       17.0f, active_line ? "brls/accent" : "brls/text");
-        orig_lbl->setGrow(1.0f);
-        top_line->addView(orig_lbl);
-        auto* sel_btn = ui::makeButton("划词", [this, alive = alive_, line = lines[i]]() {
+    lyrics_scroll_->setContentView(lyrics_sheet);
+    fluid_sheet_wrap->addView(lyrics_scroll_);
+    lyrics_card->addView(fluid_sheet_wrap);
+    right_col->addView(lyrics_card);
+
+    // =========================================================================
+    // Dedicated AI Translation & Phrase Deep-Dive Window (Docked inside Studio)
+    // =========================================================================
+    auto* tutor_card = ui::makeCard("desktop/surface", 14.0f, 14.0f);
+    tutor_card->setWidthPercentage(100);
+    tutor_card->setShrink(0.0f);
+    tutor_card->setMarginTop(12);
+
+    auto* tutor_hdr = new brls::Box(brls::Axis::ROW);
+    tutor_hdr->setWidthPercentage(100);
+    tutor_hdr->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    tutor_hdr->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(tutor_hdr, 6.0f);
+
+    auto* tutor_hdr_left = new brls::Box(brls::Axis::ROW);
+    tutor_hdr_left->setAlignItems(brls::AlignItems::CENTER);
+    auto* tutor_title = ui::makeLabel("AI 歌词翻译与精讲窗口", 15.5f, "brls/accent");
+    tutor_title->setMarginRight(8);
+    tutor_hdr_left->addView(tutor_title);
+
+    const std::string init_tutor_status =
+        lyric_explaining_
+            ? "AI 流式生成中…"
+            : (!lyric_tutor_provider_.empty() ? lyric_tutor_provider_ : "点击任意歌词即刻精讲");
+    lyric_tutor_status_label_ = ui::makeLabel(init_tutor_status, 12.5f, "font/grey");
+    tutor_hdr_left->addView(lyric_tutor_status_label_);
+    tutor_hdr->addView(tutor_hdr_left);
+
+    auto* tutor_btns = new brls::Box(brls::Axis::ROW);
+    tutor_btns->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(tutor_btns, 5.0f);
+
+    auto* exp_now_btn = ui::makeButton("AI 精讲当前句", [this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (active_lyrics_.empty()) {
+            brls::Application::notify("当前曲目暂无歌词可精讲");
+            return;
+        }
+        const int idx = (selected_lyric_idx_ >= 0 &&
+                         static_cast<size_t>(selected_lyric_idx_) < active_lyrics_.size())
+                            ? selected_lyric_idx_
+                            : (active_lyric_idx_ >= 0 ? active_lyric_idx_ : 0);
+        explainLyricLineWithAi(static_cast<size_t>(idx));
+    }, true, 28.0f);
+    exp_now_btn->setMarginRight(6);
+    tutor_btns->addView(exp_now_btn);
+
+    auto* dict_btn = ui::makeButton("划词查词", [this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (active_lyrics_.empty()) return;
+        const int idx = (selected_lyric_idx_ >= 0 &&
+                         static_cast<size_t>(selected_lyric_idx_) < active_lyrics_.size())
+                            ? selected_lyric_idx_
+                            : (active_lyric_idx_ >= 0 ? active_lyric_idx_ : 0);
+        openWordLookupForLyric(static_cast<size_t>(idx));
+    }, false, 28.0f);
+    dict_btn->setMarginRight(6);
+    tutor_btns->addView(dict_btn);
+
+    auto* f8_btn = ui::makeButton("F8 深入对话", [this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        std::string ctx_summary = active_item_.title;
+        if (!lyric_tutor_target_.empty()) {
+            ctx_summary += " · " + lyric_tutor_target_;
+        }
+        if (on_entity_focus_) {
+            on_entity_focus_(ctx_summary + " [歌词语言分析]");
+        }
+        if (HostKernel::instance().isInitialized()) {
+            HostKernel::instance().bus().publish("host.companion.open", {
+                {"domain", "media"},
+                {"summary", ctx_summary},
+            });
+        }
+    }, false, 28.0f);
+    f8_btn->setMarginRight(6);
+    tutor_btns->addView(f8_btn);
+
+    auto* collapse_btn = ui::makeButton(lyric_tutor_expanded_ ? "收起" : "展开", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
             if (!alive->load(std::memory_order_acquire)) return;
-            auto& k = HostKernel::instance();
-            SelectionContext sctx;
-            sctx.context_sentence = line.original;
-            sctx.source_title = active_item_.title;
-            if (!active_item_.kind.empty()) sctx.source_title += " · " + active_item_.kind;
-            if (!active_item_.creator.empty()) sctx.source_title += " · " + active_item_.creator;
-            sctx.source_id = active_item_.source_id;
-            sctx.domain = ContentDomain::Media;
-            if (k.isInitialized()) {
-                sctx.capabilities = &k.capabilities();
-                sctx.bus = &k.bus();
-                sctx.ui_tasks = &k.uiTasks();
-            }
-            SelectionActionPopover::show(std::move(sctx));
-        }, false, 30.0f);
-        sel_btn->setMarginLeft(8);
-        top_line->addView(sel_btn);
-        row->addView(top_line);
-        auto* tr = ui::makeLabel(lines[i].translation, 15.0f, "font/grey");
-        tr->setMarginTop(4);
-        row->addView(tr);
-        const double seek_sec = lines[i].time_sec;
-        row->registerClickAction([this, alive = alive_, seek_sec](brls::View*) {
-            if (!alive->load(std::memory_order_acquire)) return true;
-            const auto coord_st = PlaybackCoordinator::instance().state();
-            const bool same_coord_track =
-                coord_st.active_role != PlaybackRole::None &&
-                coord_st.active_track.item.id == active_item_.id &&
-                coord_st.active_track.item.source_id == active_item_.source_id &&
-                !MPVCore::instance().state().current_url.empty();
-            if (!same_coord_track && isPlayableOrResolvableItem(active_item_)) {
-                auto opts = buildPlaybackOptions(active_item_);
-                last_loaded_stream_key_ =
-                    active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
-                playVisibleMusic(seek_sec);
-                return true;
-            }
-            PlaybackCoordinator::instance().seekAbsolute(seek_sec);
-            return true;
+            lyric_tutor_expanded_ = !lyric_tutor_expanded_;
+            rebuildSubContent();
         });
-        lyric_cards_.push_back(row);
-        lyric_orig_labels_.push_back(orig_lbl);
-        lyric_times_.push_back(lines[i].time_sec);
-        lyrics_card->addView(row);
+    }, false, 28.0f);
+    tutor_btns->addView(collapse_btn);
+
+    tutor_hdr->addView(tutor_btns);
+    tutor_card->addView(tutor_hdr);
+
+    if (lyric_tutor_expanded_) {
+        auto* tutor_scroll = new brls::ScrollingFrame();
+        tutor_scroll->setWidthPercentage(100);
+        tutor_scroll->setHeight(148.0f);
+        tutor_scroll->setMarginTop(8);
+
+        auto* tutor_body = new brls::Box(brls::Axis::COLUMN);
+        tutor_body->setWidthPercentage(100);
+        tutor_body->setPadding(4, 4, 8, 4);
+
+        std::string target_line_preview = lyric_tutor_target_;
+        if (target_line_preview.empty() && !lines.empty()) {
+            const size_t preview_i = active_lyric_idx_ >= 0 ? static_cast<size_t>(active_lyric_idx_) : 0;
+            target_line_preview = lines[preview_i].original;
+            if (!lines[preview_i].translation.empty() &&
+                lines[preview_i].translation != lines[preview_i].original) {
+                target_line_preview += "  ｜  " + lines[preview_i].translation;
+            }
+        }
+
+        lyric_tutor_target_label_ = ui::makeLabel(
+            target_line_preview.empty() ? "" : ("▶ " + target_line_preview),
+            14.2f, "brls/text", 1.38f);
+        if (target_line_preview.empty()) {
+            lyric_tutor_target_label_->setVisibility(brls::Visibility::GONE);
+        }
+        tutor_body->addView(lyric_tutor_target_label_);
+
+        const std::string default_hint =
+            "点击上方流体云中的任意歌词行（或点「AI 精讲当前句」），即可由 AI 实时输出：\n"
+            "1. 自然中文意译与情绪语气  ·  2. 核心词汇、俚语缩略与语法拆解  ·  3. 文化典故与演唱连读提示";
+        lyric_tutor_body_label_ = ui::makeLabel(
+            lyric_tutor_explanation_.empty() ? default_hint : lyric_tutor_explanation_,
+            13.8f,
+            lyric_tutor_explanation_.empty() ? "font/grey" : "brls/text",
+            1.48f);
+        lyric_tutor_body_label_->setMarginTop(target_line_preview.empty() ? 0 : 6);
+        tutor_body->addView(lyric_tutor_body_label_);
+
+        tutor_scroll->setContentView(tutor_body);
+        tutor_card->addView(tutor_scroll);
     }
 
-    split->addView(lyrics_card);
+    right_col->addView(tutor_card);
+    split->addView(right_col);
     static_root->addView(split);
     stage_grid_->setStaticContent(static_root);
 }
@@ -3725,6 +4105,172 @@ void MediaWorkbench::renderPlayerStageView() {
     stage_grid_->setStaticContent(player_card);
 }
 
+void MediaWorkbench::activateMediaItem(const MediaItem& item) {
+    if (item.extra.is_object() && item.extra.value("is_season_group", false)) {
+        const auto episodes = extractSeasonEpisodes(item);
+        if (!episodes.empty()) {
+            showSeasonEpisodesDialog(item, episodes);
+            return;
+        }
+    }
+    last_loaded_stream_key_.clear();
+    selectItem(item, true);
+    if (item.kind == "music" && isPlayableOrResolvableItem(item)) {
+        auto opts = buildPlaybackOptions(active_item_);
+        last_loaded_stream_key_ =
+            active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
+        playVisibleMusic();
+    }
+}
+
+void MediaWorkbench::showSeasonEpisodesDialog(const MediaItem& season_item,
+                                              const std::vector<MediaItem>& episodes) {
+    if (episodes.empty()) return;
+
+    auto* box = new brls::Box(brls::Axis::COLUMN);
+    box->setPadding(20.0f);
+    box->setWidth(720.0f);
+
+    auto* hdr = new brls::Box(brls::Axis::ROW);
+    hdr->setWidthPercentage(100);
+    hdr->setAlignItems(brls::AlignItems::CENTER);
+    hdr->setMarginBottom(14.0f);
+
+    const std::string season_poster =
+        season_item.extra.is_object() ? season_item.extra.value("poster_url", "") : "";
+    const std::string hdr_img = !season_poster.empty() ? season_poster : season_item.cover_url;
+    if (!hdr_img.empty()) {
+        auto* cover = new CachedImageView(&ImageCache::instance());
+        if (!season_poster.empty() && season_poster != season_item.cover_url) {
+            cover->setDimensions(76.0f, 114.0f);
+        } else {
+            cover->setDimensions(144.0f, 81.0f);
+        }
+        cover->setCornerRadius(8.0f);
+        cover->setScalingType(brls::ImageScalingType::FILL);
+        cover->setMarginRight(14.0f);
+        cover->setImageUrl(hdr_img, extractHeadersFromItem(season_item));
+        hdr->addView(cover);
+    }
+
+    auto* title_col = new brls::Box(brls::Axis::COLUMN);
+    title_col->setGrow(1.0f);
+    title_col->setShrink(1.0f);
+    title_col->addView(ui::makeLabel(season_item.title, 20.0f, "brls/text"));
+    std::string sub_desc = "共 " + std::to_string(episodes.size()) + " 集";
+    if (!season_item.quality_label.empty()) {
+        sub_desc += " · " + season_item.quality_label;
+    }
+    sub_desc += " · 点击任一集直接进入 MPV 播放";
+    auto* sub_lbl = ui::makeLabel(sub_desc, 13.5f, "font/grey");
+    sub_lbl->setMarginTop(4.0f);
+    title_col->addView(sub_lbl);
+    hdr->addView(title_col);
+    box->addView(hdr);
+
+    auto* scroll = new brls::ScrollingFrame();
+    scroll->setWidthPercentage(100);
+    const float list_h = std::clamp(static_cast<float>(episodes.size()) * 62.0f, 140.0f, 380.0f);
+    scroll->setHeight(list_h);
+
+    auto* list_col = new brls::Box(brls::Axis::COLUMN);
+    list_col->setWidthPercentage(100);
+
+    auto dlg_holder = std::make_shared<brls::Dialog*>(nullptr);
+
+    for (size_t i = 0; i < episodes.size(); ++i) {
+        const MediaItem ep = episodes[i];
+        auto* row = ui::makeCard("desktop/soft", 12.0f, 9.0f);
+        if (i > 0) row->setMarginTop(8.0f);
+        row->setFocusable(true);
+
+        auto* rbox = new brls::Box(brls::Axis::ROW);
+        rbox->setWidthPercentage(100);
+        rbox->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        rbox->setAlignItems(brls::AlignItems::CENTER);
+
+        auto* left_row = new brls::Box(brls::Axis::ROW);
+        left_row->setAlignItems(brls::AlignItems::CENTER);
+        left_row->setGrow(1.0f);
+        left_row->setShrink(1.0f);
+
+        std::string code = ep.extra.is_object() ? ep.extra.value("episode_code", "") : "";
+        if (code.empty()) code = "第 " + std::to_string(i + 1) + " 集";
+        auto* code_pill = ui::makePill(code, "desktop/surface", "domain/media");
+        code_pill->setMarginRight(10.0f);
+        left_row->addView(code_pill);
+
+        std::string ep_sub = ep.extra.is_object() ? ep.extra.value("episode_title", "") : "";
+        std::string main_txt = !ep_sub.empty() ? ep_sub : ep.title;
+        auto* ep_lbl = ui::makeLabel(clipUtf8Bytes(main_txt, 64), 15.5f, "brls/text");
+        ep_lbl->setSingleLine(true);
+        left_row->addView(ep_lbl);
+        rbox->addView(left_row);
+
+        auto* right_row = new brls::Box(brls::Axis::ROW);
+        right_row->setAlignItems(brls::AlignItems::CENTER);
+        right_row->setShrink(0.0f);
+        if (!ep.quality_label.empty()) {
+            auto* qp = ui::makePill(ep.quality_label, "status/info_bg", "status/info_fg");
+            qp->setMarginRight(6.0f);
+            right_row->addView(qp);
+        }
+        if (ep.has_bilingual_sub) {
+            auto* sp = ui::makePill("双语字幕", "status/ok_bg", "status/ok_fg");
+            sp->setMarginRight(6.0f);
+            right_row->addView(sp);
+        }
+        right_row->addView(ui::makeLabel("播放", 13.5f, "brls/accent"));
+        rbox->addView(right_row);
+
+        row->addView(rbox);
+
+        auto onPick = [this, alive = alive_, dlg_holder, ep]() {
+            if (*dlg_holder) {
+                (*dlg_holder)->dismiss();
+                *dlg_holder = nullptr;
+            }
+            brls::sync([this, alive, ep]() {
+                if (!alive->load(std::memory_order_acquire)) return;
+                last_loaded_stream_key_.clear();
+                selectItem(ep, true);
+            });
+        };
+
+        row->registerClickAction([onPick](brls::View*) {
+            onPick();
+            return true;
+        });
+        row->addGestureRecognizer(new brls::TapGestureRecognizer(
+            [row, onPick](brls::TapGestureStatus status, brls::Sound* soundToPlay) {
+                if (!row->isFocusable() || row->getVisibility() != brls::Visibility::VISIBLE) return;
+                if (status.state == brls::GestureState::END) {
+                    if (soundToPlay) *soundToPlay = brls::SOUND_CLICK;
+                    onPick();
+                }
+            }));
+
+        list_col->addView(row);
+    }
+
+    scroll->setContentView(list_col);
+    box->addView(scroll);
+
+    auto* dlg = new brls::Dialog(box);
+    *dlg_holder = dlg;
+    const MediaItem first_ep = episodes.front();
+    dlg->addButton("从第 1 集开始播放", [this, alive = alive_, dlg_holder, first_ep]() {
+        *dlg_holder = nullptr;
+        brls::sync([this, alive, first_ep]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            last_loaded_stream_key_.clear();
+            selectItem(first_ep, true);
+        });
+    });
+    dlg->addButton("取消", [dlg_holder]() { *dlg_holder = nullptr; });
+    dlg->open();
+}
+
 void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
     if (detail_request_) {
         detail_request_->cancel();
@@ -3738,6 +4284,23 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
         archive_all_ = false;
     }
     if (item.kind == "music" && !isCuratedMedia(item)) music_scope_ = MusicScope::Personal;
+    if (lyric_tutor_track_id_ != item.id) {
+        lyric_tutor_track_id_ = item.id;
+        selected_lyric_idx_ = -1;
+        lyric_translating_ = false;
+        lyric_explaining_ = false;
+        lyric_tutor_target_.clear();
+        lyric_tutor_provider_.clear();
+        lyric_tutor_explanation_.clear();
+        if (lyric_translate_request_) {
+            lyric_translate_request_->cancel();
+            lyric_translate_request_.reset();
+        }
+        if (lyric_explain_request_) {
+            lyric_explain_request_->cancel();
+            lyric_explain_request_.reset();
+        }
+    }
     active_item_ = item;
     has_active_item_ = true;
     active_lyrics_.clear();
@@ -4056,14 +4619,461 @@ void MediaWorkbench::updateActiveLyricHighlight(double position_sec) {
         return;
     }
     if (active_lyric_idx_ >= 0 && static_cast<size_t>(active_lyric_idx_) < lyric_cards_.size()) {
-        lyric_cards_[active_lyric_idx_]->setBackgroundColor(ui::color("desktop/soft"));
-        lyric_orig_labels_[active_lyric_idx_]->setTextColor(ui::color("brls/text"));
+        const size_t prev_i = static_cast<size_t>(active_lyric_idx_);
+        const bool is_sel = (active_lyric_idx_ == selected_lyric_idx_);
+        lyric_cards_[prev_i]->setBackgroundColor(nvgRGBA(0, 0, 0, 0));
+        lyric_cards_[prev_i]->setBorderThickness(is_sel ? 1.0f : 0.0f);
+        if (is_sel) lyric_cards_[prev_i]->setBorderColor(ui::color("brls/accent"));
+        lyric_orig_labels_[prev_i]->setTextColor(ui::color("brls/text"));
+        lyric_orig_labels_[prev_i]->setFontSize(16.0f);
+        if (prev_i < lyric_trans_labels_.size() && lyric_trans_labels_[prev_i]) {
+            lyric_trans_labels_[prev_i]->setTextColor(ui::color("font/grey"));
+            lyric_trans_labels_[prev_i]->setFontSize(14.2f);
+        }
     }
     active_lyric_idx_ = idx;
     if (active_lyric_idx_ >= 0 && static_cast<size_t>(active_lyric_idx_) < lyric_cards_.size()) {
-        lyric_cards_[active_lyric_idx_]->setBackgroundColor(ui::color("desktop/active"));
-        lyric_orig_labels_[active_lyric_idx_]->setTextColor(ui::color("brls/accent"));
+        const size_t cur_i = static_cast<size_t>(active_lyric_idx_);
+        lyric_cards_[cur_i]->setBackgroundColor(ui::color("desktop/active"));
+        lyric_cards_[cur_i]->setBorderThickness(0.0f);
+        lyric_orig_labels_[cur_i]->setTextColor(ui::color("brls/accent"));
+        lyric_orig_labels_[cur_i]->setFontSize(18.5f);
+        if (cur_i < lyric_trans_labels_.size() && lyric_trans_labels_[cur_i]) {
+            lyric_trans_labels_[cur_i]->setTextColor(ui::color("brls/text"));
+            lyric_trans_labels_[cur_i]->setFontSize(15.0f);
+        }
+
+        // Smoothly keep active lyric near upper-center of Fluid-Cloud scroll when user isn't browsing it
+        if (lyrics_scroll_ && !focusIsInsideView(lyrics_scroll_)) {
+            const float scroll_h = lyrics_scroll_->getHeight();
+            const float row_y = lyric_cards_[cur_i]->getY();
+            const float sf_y = lyrics_scroll_->getY();
+            if (scroll_h > 60.0f && row_y > 0.0f) {
+                const float content_y = (row_y - sf_y) + lyrics_scroll_->getContentOffsetY();
+                const float target_off = std::max(0.0f, content_y - scroll_h * 0.34f);
+                lyrics_scroll_->setContentOffsetY(target_off, true);
+            }
+        }
+
+        if (lyric_tutor_explanation_.empty() && lyric_tutor_target_label_ &&
+            cur_i < active_lyrics_.size()) {
+            std::string preview = active_lyrics_[cur_i].original;
+            if (!active_lyrics_[cur_i].translation.empty() &&
+                active_lyrics_[cur_i].translation != active_lyrics_[cur_i].original) {
+                preview += "  ｜  " + active_lyrics_[cur_i].translation;
+            }
+            lyric_tutor_target_label_->setText("▶ " + preview);
+            lyric_tutor_target_label_->setVisibility(brls::Visibility::VISIBLE);
+        }
     }
+}
+
+void MediaWorkbench::triggerAiLyricsTranslate() {
+    if (!has_active_item_ || active_lyrics_.empty()) {
+        brls::Application::notify("当前曲目暂无可翻译的歌词");
+        return;
+    }
+    if (lyric_translating_) {
+        brls::Application::notify("AI 正在补译整首歌词，请稍候…");
+        return;
+    }
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return;
+
+    if (lyric_translate_request_) {
+        lyric_translate_request_->cancel();
+    }
+    auto req = CancelToken::create();
+    lyric_translate_request_ = req;
+    lyric_translating_ = true;
+    if (sub_mode_ == SubMode::MusicLyrics) {
+        rebuildSubContent();
+    }
+
+    const MediaItem item_snap = active_item_;
+    const std::vector<LyricLine> lines_snap = active_lyrics_;
+    const auto am = extractAppleMusicLookup(item_snap);
+
+    loadUiInBackground(
+        kernel.uiTasks(),
+        "media.lyrics_translate",
+        req,
+        [item_snap, lines_snap, am](const auto& cancel) {
+            CapabilityResult out;
+            if (cancel && cancel->isCancelled()) return out;
+            auto& caps = HostKernel::instance().capabilities();
+
+            nlohmann::json lines_json = nlohmann::json::array();
+            for (const auto& l : lines_snap) {
+                lines_json.push_back({
+                    {"time_sec", l.time_sec},
+                    {"original", l.original},
+                    {"translation", l.translation},
+                });
+            }
+
+            if (caps.has("media.lyrics.v1")) {
+                nlohmann::json lreq = {
+                    {"action", "translate"},
+                    {"id", !am.song_id.empty() ? am.song_id : item_snap.id},
+                    {"title", item_snap.title},
+                    {"artist", item_snap.creator},
+                    {"target_language", "zh-CN"},
+                    {"lines", lines_json},
+                };
+                out = caps.callCancellable("media.lyrics.v1", lreq, cancel);
+                if (out.ok) return out;
+            }
+
+            // Direct LLM fallback when media.lyrics.v1 is unavailable
+            if (caps.has("llm.chat.v1") || caps.has("ai.agent.v1")) {
+                nlohmann::json input_arr = nlohmann::json::array();
+                std::unordered_map<std::string, std::vector<size_t>> uniq_map;
+                std::vector<std::string> uniq_texts;
+                for (size_t i = 0; i < lines_snap.size(); ++i) {
+                    const std::string t = trimSpaces(lines_snap[i].original);
+                    if (t.empty() || !lines_snap[i].translation.empty()) continue;
+                    auto& b = uniq_map[t];
+                    if (b.empty()) {
+                        input_arr.push_back({{"id", std::to_string(uniq_texts.size())}, {"text", t}});
+                        uniq_texts.push_back(t);
+                    }
+                    b.push_back(i);
+                }
+                if (uniq_texts.empty()) {
+                    out.ok = true;
+                    out.data = {{"lines", lines_json}};
+                    return out;
+                }
+                const std::string sys_prompt =
+                    "Translate song lyrics faithfully into natural Simplified Chinese (zh-CN). "
+                    "Return ONLY a JSON array of objects with exact matching id and translated text fields.";
+                const std::string usr_prompt =
+                    "Track: " + item_snap.title + " - " + item_snap.creator + "\n" + input_arr.dump();
+                CapabilityResult chat_res;
+                if (caps.has("llm.chat.v1")) {
+                    chat_res = caps.callCancellable(
+                        "llm.chat.v1",
+                        {{"system_prompt", sys_prompt}, {"prompt", usr_prompt}, {"temperature", 0.2}},
+                        cancel);
+                } else {
+                    chat_res = caps.callCancellable(
+                        "ai.agent.v1",
+                        {{"action", "chat"}, {"domain", "media"}, {"prompt", sys_prompt + "\n\n" + usr_prompt}},
+                        cancel);
+                }
+                if (!chat_res.ok) return chat_res;
+                std::string reply = chat_res.data.value("reply", chat_res.data.value("text", ""));
+                size_t lb = reply.find('[');
+                size_t rb = reply.rfind(']');
+                if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+                    auto parsed = nlohmann::json::parse(reply.substr(lb, rb - lb + 1), nullptr, false);
+                    if (parsed.is_array()) {
+                        for (size_t k = 0; k < parsed.size() && k < uniq_texts.size(); ++k) {
+                            std::string tr_txt;
+                            if (parsed[k].is_object()) {
+                                tr_txt = parsed[k].value("text", parsed[k].value("translation", ""));
+                            } else if (parsed[k].is_string()) {
+                                tr_txt = parsed[k].get<std::string>();
+                            }
+                            if (!tr_txt.empty()) {
+                                for (size_t li : uniq_map[uniq_texts[k]]) {
+                                    lines_json[li]["translation"] = tr_txt;
+                                }
+                            }
+                        }
+                        out.ok = true;
+                        out.data = {{"lines", std::move(lines_json)}};
+                        return out;
+                    }
+                }
+                out.ok = false;
+                out.error = "AI 返回的歌词翻译 JSON 解析失败";
+                return out;
+            }
+
+            out.ok = false;
+            out.error = "未检测到 AI 翻译插件（请启用 plugin-magpie-agent）";
+            return out;
+        },
+        [this, alive = alive_, req, item_id = item_snap.id](CapabilityResult res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (lyric_translate_request_ == req) {
+                lyric_translate_request_.reset();
+            }
+            lyric_translating_ = false;
+            if (!has_active_item_ || active_item_.id != item_id) return;
+
+            if (!res.ok) {
+                brls::Application::notify("歌词翻译未完成: " + (res.error.empty() ? "请检查 AI 配置" : res.error));
+                if (sub_mode_ == SubMode::MusicLyrics) rebuildSubContent();
+                return;
+            }
+            if (res.data.is_object() && res.data.contains("lines") && res.data["lines"].is_array()) {
+                std::vector<LyricLine> next_lines;
+                for (const auto& l : res.data["lines"]) {
+                    if (!l.is_object()) continue;
+                    double tsec = 0.0;
+                    if (l.contains("time_sec") && l["time_sec"].is_number()) {
+                        tsec = l["time_sec"].get<double>();
+                    }
+                    next_lines.push_back(LyricLine{
+                        tsec,
+                        l.value("original", std::string{}),
+                        l.value("translation", std::string{}),
+                    });
+                }
+                if (!next_lines.empty()) {
+                    active_lyrics_ = std::move(next_lines);
+                    active_item_.has_bilingual_sub = true;
+                }
+            }
+            brls::Application::notify("流体云双语歌词已由 AI 补全");
+            if (sub_mode_ == SubMode::MusicLyrics) {
+                rebuildSubContent();
+            }
+        },
+        [this, alive = alive_, req]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (lyric_translate_request_ == req) {
+                lyric_translate_request_.reset();
+            }
+            lyric_translating_ = false;
+        });
+}
+
+void MediaWorkbench::explainLyricLineWithAi(size_t line_index) {
+    if (!has_active_item_ || line_index >= active_lyrics_.size()) {
+        return;
+    }
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return;
+
+    selected_lyric_idx_ = static_cast<int>(line_index);
+    lyric_tutor_expanded_ = true;
+    const LyricLine target = active_lyrics_[line_index];
+    const std::string prev_line = (line_index > 0) ? active_lyrics_[line_index - 1].original : "";
+    const std::string next_line =
+        (line_index + 1 < active_lyrics_.size()) ? active_lyrics_[line_index + 1].original : "";
+
+    std::string target_header = target.original;
+    if (!target.translation.empty() && target.translation != target.original) {
+        target_header += "  ｜  " + target.translation;
+    }
+    lyric_tutor_target_ = target_header;
+
+    for (size_t i = 0; i < lyric_cards_.size(); ++i) {
+        const bool is_act = (static_cast<int>(i) == active_lyric_idx_);
+        const bool is_sel = (i == line_index);
+        if (!is_act) {
+            lyric_cards_[i]->setBorderThickness(is_sel ? 1.0f : 0.0f);
+            if (is_sel) lyric_cards_[i]->setBorderColor(ui::color("brls/accent"));
+        }
+    }
+
+    const std::string cache_key = active_item_.id + "|" + target.original;
+    if (auto it = lyric_explain_cache_.find(cache_key); it != lyric_explain_cache_.end() && !it->second.empty()) {
+        lyric_explaining_ = false;
+        lyric_tutor_provider_ = "AI 精讲 · 已缓存";
+        lyric_tutor_explanation_ = it->second;
+        if (lyric_tutor_target_label_) {
+            lyric_tutor_target_label_->setText("▶ " + lyric_tutor_target_);
+            lyric_tutor_target_label_->setVisibility(brls::Visibility::VISIBLE);
+        }
+        if (lyric_tutor_status_label_) {
+            lyric_tutor_status_label_->setText(lyric_tutor_provider_);
+        }
+        if (lyric_tutor_body_label_) {
+            lyric_tutor_body_label_->setTextColor(ui::color("brls/text"));
+            lyric_tutor_body_label_->setText(lyric_tutor_explanation_);
+        } else if (sub_mode_ == SubMode::MusicLyrics) {
+            rebuildSubContent();
+        }
+        return;
+    }
+
+    if (lyric_explain_request_) {
+        lyric_explain_request_->cancel();
+    }
+    auto req = CancelToken::create();
+    lyric_explain_request_ = req;
+    lyric_explaining_ = true;
+    lyric_tutor_provider_ = "AI 流式生成中…";
+    lyric_tutor_explanation_ = "正在调用 AI 解析句意、词汇俚语与演唱语境…";
+
+    if (!lyric_tutor_body_label_ && sub_mode_ == SubMode::MusicLyrics) {
+        rebuildSubContent();
+    } else {
+        if (lyric_tutor_target_label_) {
+            lyric_tutor_target_label_->setText("▶ " + lyric_tutor_target_);
+            lyric_tutor_target_label_->setVisibility(brls::Visibility::VISIBLE);
+        }
+        if (lyric_tutor_status_label_) {
+            lyric_tutor_status_label_->setText(lyric_tutor_provider_);
+        }
+        if (lyric_tutor_body_label_) {
+            lyric_tutor_body_label_->setTextColor(ui::color("font/grey"));
+            lyric_tutor_body_label_->setText(lyric_tutor_explanation_);
+        }
+    }
+
+    const MediaItem item_snap = active_item_;
+    std::weak_ptr<std::atomic<bool>> alive_weak = alive_;
+
+    loadUiInBackground(
+        kernel.uiTasks(),
+        "media.lyric_explain",
+        req,
+        [this, alive_weak, req, item_snap, target, prev_line, next_line](const auto& cancel) {
+            struct ExplainOutcome {
+                bool ok = false;
+                std::string text;
+                std::string provider;
+                std::string error;
+            } out;
+            if (cancel && cancel->isCancelled()) return out;
+            auto& caps = HostKernel::instance().capabilities();
+
+            std::ostringstream prompt;
+            prompt << "请用简体中文精讲这句歌词（紧凑清晰，适合边听边看）：\n"
+                   << "歌曲: " << item_snap.title;
+            if (!item_snap.creator.empty()) prompt << " — " << item_snap.creator;
+            prompt << "\n";
+            if (!prev_line.empty()) prompt << "上句: " << prev_line << "\n";
+            prompt << "当前句: " << target.original << "\n";
+            if (!target.translation.empty()) prompt << "已有译文: " << target.translation << "\n";
+            if (!next_line.empty()) prompt << "下句: " << next_line << "\n";
+            prompt << "请分 3 点输出：\n"
+                   << "1. 【精准意译与情绪】自然贴合旋律语气的中文翻译及情感基调\n"
+                   << "2. 【词汇/俚语/语法】拆解核心词组、口语拼写/方言缩略或句法亮点\n"
+                   << "3. 【文化背景与听感】文化意象或连读咬字提示";
+
+            std::string streamed;
+            auto pushPartial = [&](const std::string& delta) {
+                if (delta.empty()) return;
+                streamed += delta;
+                const std::string snap = streamed;
+                brls::sync([this, alive_weak, req, snap]() {
+                    auto a = alive_weak.lock();
+                    if (!a || !a->load(std::memory_order_acquire)) return;
+                    if (lyric_explain_request_ != req) return;
+                    lyric_tutor_explanation_ = snap;
+                    if (lyric_tutor_body_label_) {
+                        lyric_tutor_body_label_->setTextColor(ui::color("brls/text"));
+                        lyric_tutor_body_label_->setText(snap);
+                    }
+                });
+            };
+
+            if (caps.has("llm.chat.v1")) {
+                auto res = caps.callStream(
+                    "llm.chat.v1",
+                    {
+                        {"system_prompt", "You are a concise, insightful bilingual music & language tutor."},
+                        {"prompt", prompt.str()},
+                        {"temperature", 0.35},
+                    },
+                    [&](const StreamChunk& ch) {
+                        if (ch.done) return;
+                        if (ch.data.is_object()) {
+                            pushPartial(ch.data.value("delta", ch.data.value("text", "")));
+                        }
+                    },
+                    cancel);
+                if (res.ok) {
+                    std::string full = res.data.is_object()
+                                           ? res.data.value("reply", res.data.value("text", streamed))
+                                           : streamed;
+                    if (full.empty()) full = streamed;
+                    if (!full.empty()) {
+                        out.ok = true;
+                        out.text = std::move(full);
+                        out.provider = res.provider_plugin_id.empty() ? "Magpie AI" : res.provider_plugin_id;
+                        return out;
+                    }
+                }
+            }
+
+            if (caps.has("media.lyrics.v1")) {
+                auto res = caps.callCancellable(
+                    "media.lyrics.v1",
+                    {
+                        {"action", "explain"},
+                        {"title", item_snap.title},
+                        {"artist", item_snap.creator},
+                        {"original", target.original},
+                        {"translation", target.translation},
+                        {"prev_line", prev_line},
+                        {"next_line", next_line},
+                        {"target_language", "zh-CN"},
+                    },
+                    cancel);
+                if (res.ok && res.data.is_object()) {
+                    const std::string exp = res.data.value("explanation", "");
+                    if (!exp.empty()) {
+                        out.ok = true;
+                        out.text = exp;
+                        out.provider = res.data.value("provider", "plugin-music");
+                        return out;
+                    }
+                }
+                out.error = res.error;
+            } else {
+                out.error = "未检测到 AI 能力插件（请启用 plugin-magpie-agent）";
+            }
+            return out;
+        },
+        [this, alive = alive_, req, cache_key](auto out) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (lyric_explain_request_ == req) {
+                lyric_explain_request_.reset();
+            }
+            lyric_explaining_ = false;
+            if (out.ok && !out.text.empty()) {
+                lyric_tutor_provider_ = "AI 精讲 · " + out.provider;
+                lyric_tutor_explanation_ = out.text;
+                lyric_explain_cache_[cache_key] = out.text;
+            } else {
+                lyric_tutor_provider_ = "精讲失败";
+                lyric_tutor_explanation_ =
+                    "未能获取 AI 精讲结果：" + (out.error.empty() ? "请检查 Magpie AI 网关或模型配置" : out.error);
+            }
+            if (lyric_tutor_status_label_) {
+                lyric_tutor_status_label_->setText(lyric_tutor_provider_);
+            }
+            if (lyric_tutor_body_label_) {
+                lyric_tutor_body_label_->setTextColor(
+                    out.ok ? ui::color("brls/text") : ui::color("status/warn_fg"));
+                lyric_tutor_body_label_->setText(lyric_tutor_explanation_);
+            } else if (sub_mode_ == SubMode::MusicLyrics) {
+                rebuildSubContent();
+            }
+        },
+        [this, alive = alive_, req]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (lyric_explain_request_ == req) {
+                lyric_explain_request_.reset();
+            }
+            lyric_explaining_ = false;
+        });
+}
+
+void MediaWorkbench::openWordLookupForLyric(size_t line_index) {
+    if (!has_active_item_ || line_index >= active_lyrics_.size()) return;
+    auto& k = HostKernel::instance();
+    SelectionContext sctx;
+    sctx.context_sentence = active_lyrics_[line_index].original;
+    sctx.source_title = active_item_.title;
+    if (!active_item_.kind.empty()) sctx.source_title += " · " + active_item_.kind;
+    if (!active_item_.creator.empty()) sctx.source_title += " · " + active_item_.creator;
+    sctx.source_id = active_item_.source_id;
+    sctx.domain = ContentDomain::Media;
+    if (k.isInitialized()) {
+        sctx.capabilities = &k.capabilities();
+        sctx.bus = &k.bus();
+        sctx.ui_tasks = &k.uiTasks();
+    }
+    SelectionActionPopover::show(std::move(sctx));
 }
 
 void MediaWorkbench::loadNasStatus(bool probe_remote) {
@@ -4210,6 +5220,14 @@ void MediaWorkbench::openExternalMedia(const nlohmann::json& payload) {
             ? MusicScope::Interactive : MusicScope::Daily;
         curation_date_ = target.extra.value("business_date", "");
         archive_all_ = false;
+    }
+    if (start_sec <= 0.0 && target.extra.is_object() &&
+        target.extra.value("is_season_group", false)) {
+        if (sub_mode_ != SubMode::Videos && sub_mode_ != SubMode::NasLibrary) {
+            setSubMode(SubMode::NasLibrary);
+        }
+        activateMediaItem(target);
+        return;
     }
     last_loaded_stream_key_.clear();
     selectItem(target, true);

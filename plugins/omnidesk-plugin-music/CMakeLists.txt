@@ -20,6 +20,7 @@ add_library(music_core OBJECT
     src/adam_client.cpp
     src/llm_translator.cpp
     src/music_engine.cpp
+    src/curation_bridge.cpp
     src/playlist_rpc.cpp
     src/ui_views.cpp
     src/plugin.cpp

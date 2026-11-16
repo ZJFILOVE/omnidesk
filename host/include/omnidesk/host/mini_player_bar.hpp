@@ -32,6 +32,7 @@ private:
     uint64_t sub_token_ = 0;
 
     std::string last_item_key_;
+    std::string last_lyric_text_;
     bool last_visible_ = false;
     bool last_paused_ = true;
     bool last_has_suspended_ = false;
@@ -43,6 +44,8 @@ private:
     brls::Box* thumb_box_ = nullptr;
     brls::Label* title_label_ = nullptr;
     brls::Label* meta_label_ = nullptr;
+    brls::Box* fluid_lyric_box_ = nullptr;
+    brls::Label* fluid_lyric_label_ = nullptr;
     brls::Label* time_label_ = nullptr;
     brls::Box* progress_fill_ = nullptr;
 

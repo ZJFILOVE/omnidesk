@@ -128,6 +128,24 @@ public:
                                       std::string& error,
                                       const std::shared_ptr<omnidesk::CancelToken>& cancel = nullptr);
 
+    // Lossless / MV Export & Cache Stats (Adam Go Engine /api/v1/export & /api/v1/cache/stats)
+    bool enqueueExportJob(const std::string& asset_id,
+                          const std::string& storefront,
+                          bool is_video,
+                          bool is_playlist,
+                          bool is_library_playlist,
+                          bool convert_to_flac,
+                          const std::string& output_dir,
+                          const std::string& hint_title,
+                          const std::string& hint_artist,
+                          const std::string& hint_artwork,
+                          ExportJobInfo& job_out,
+                          std::string& error);
+    bool listExportJobs(std::vector<ExportJobInfo>& jobs_out, std::string& error);
+    bool cancelExportJob(const std::string& job_id, std::string& error);
+    bool retryExportJob(const std::string& job_id, ExportJobInfo& job_out, std::string& error);
+    bool fetchCacheStats(nlohmann::json& out, std::string& error);
+
     // Helpers exposed for testing
     static bool isLoopbackPortOwnedByUid(uint16_t port, uint32_t expected_uid);
     static std::string decodeChunkedBody(const std::string& raw);

@@ -275,8 +275,24 @@ bool MusicPlugin::onLoad(omnidesk::PluginContext& ctx) {
         }
     });
 
+    ctx.subscribe("entity.recommend.updated", [weak = std::weak_ptr<MusicEngine>(engine_)](
+                                                  const std::string& /*topic*/,
+                                                  const nlohmann::json& /*payload*/) {
+        auto eng = weak.lock();
+        if (!eng || !eng->isAlive()) return;
+        eng->onExternalCurationUpdated();
+    });
+
+    ctx.subscribe("entity.music.playlist_synced", [weak = std::weak_ptr<MusicEngine>(engine_)](
+                                                      const std::string& /*topic*/,
+                                                      const nlohmann::json& /*payload*/) {
+        auto eng = weak.lock();
+        if (!eng || !eng->isAlive()) return;
+        eng->onExternalCurationUpdated();
+    });
+
     engine_->startBackgroundTasks();
-    ctx.logInfo("Loaded plugin-music (Apple Music Adam FairPlay ALAC + Bilingual Lyrics)");
+    ctx.logInfo("Loaded plugin-music (Apple Music Adam FairPlay ALAC + Bilingual Lyrics + AI Writeback)");
     return true;
 }
 

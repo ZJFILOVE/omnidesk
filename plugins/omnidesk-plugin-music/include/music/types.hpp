@@ -143,6 +143,80 @@ struct FeedOutcome {
     std::string error;
 };
 
+struct ExportJobInfo {
+    std::string job_id;
+    std::string asset_id;
+    std::string phase; // "queued" | "resolving" | "downloading" | "tagging" | "moving" | "done" | "failed" | "cancelled"
+    int percent = 0;
+    int queue_index = 0;
+    int priority = 0;
+    std::string title;
+    std::string artist;
+    std::string artwork_url;
+    int64_t bytes_done = 0;
+    int64_t bytes_total = 0;
+    std::string output;
+    std::string error;
+    std::string source; // "cache" | "playback" | "network"
+};
+
+struct CuratedTrackItem {
+    MusicTrack track;
+    std::string item_id;
+    std::string mode; // "daily_immutable" | "interactive_ephemeral"
+    std::string business_date;
+    int position = 0;
+    std::string canonical_id;
+    std::string why_recommended;
+    std::string listening_cue;
+    std::string previously_recommended_on;
+    std::string revisit_badge;
+};
+
+struct CuratedInteractiveSession {
+    std::string session_id;
+    std::string title;
+    std::string user_prompt;
+    std::string repeat_policy = "allow_any";
+    std::vector<CuratedTrackItem> tracks;
+};
+
+struct CurationWorkspaceSnapshot {
+    std::vector<std::string> available_dates; // newest-first
+    std::string selected_date;
+    std::vector<CuratedTrackItem> daily_tracks;
+    std::vector<CuratedInteractiveSession> interactive_sessions; // newest-first
+    int total_hydrated_tracks = 0;
+    int total_dates = 0;
+
+    std::string protected_playlist_id = "p.YJXV7dEIeb3GzZX";
+    std::string protected_playlist_name = "ChatGPT Daily 5";
+    int protected_synced_dates = 0;
+    int protected_cumulative_tracks = 0;
+
+    std::string interactive_playlist_name = "OmniDesk AI 灵感电台";
+    std::string interactive_apple_playlist_id;
+    int interactive_playlist_tracks = 0;
+    bool interactive_cloud_synced = false;
+    bool has_live_write_auth = false;
+};
+
+struct InteractiveWritebackOutcome {
+    bool ok = false;
+    std::string session_id;
+    std::string title;
+    std::string prompt;
+    std::string error_code;
+    std::string error;
+    std::vector<CuratedTrackItem> tracks;
+    int revisit_count = 0;
+    bool feed_written = false;
+    bool playlist_cloud_synced = false;
+    bool playlist_local_staged = false;
+    std::string target_playlist_name;
+    std::string target_apple_playlist_id;
+};
+
 struct EngineStatusSnapshot {
     bool initialized = false;
     bool engine_reachable = false;

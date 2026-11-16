@@ -263,33 +263,65 @@ BIO* makeNosigpipeSocketBio(int fd) {
     return bio;
 }
 
+std::string jStr(const nlohmann::json& j, const char* key, const std::string& def = "") {
+    if (!j.is_object() || !j.contains(key)) return def;
+    const auto& v = j[key];
+    if (v.is_string()) return v.get<std::string>();
+    if (v.is_number_integer()) return std::to_string(v.get<long long>());
+    return def;
+}
+
+int jInt(const nlohmann::json& j, const char* key, int def = 0) {
+    if (!j.is_object() || !j.contains(key)) return def;
+    const auto& v = j[key];
+    if (v.is_number_integer()) return v.get<int>();
+    if (v.is_number_float()) return static_cast<int>(v.get<double>());
+    return def;
+}
+
+int64_t jInt64(const nlohmann::json& j, const char* key, int64_t def = 0) {
+    if (!j.is_object() || !j.contains(key)) return def;
+    const auto& v = j[key];
+    if (v.is_number_integer()) return v.get<int64_t>();
+    if (v.is_number_float()) return static_cast<int64_t>(v.get<double>());
+    return def;
+}
+
+bool jBool(const nlohmann::json& j, const char* key, bool def = false) {
+    if (!j.is_object() || !j.contains(key)) return def;
+    const auto& v = j[key];
+    if (v.is_boolean()) return v.get<bool>();
+    if (v.is_number_integer()) return v.get<int>() != 0;
+    return def;
+}
+
 DrmStatus parseDrmSnapshot(const nlohmann::json& j) {
     DrmStatus st;
     if (!j.is_object()) return st;
     st.engine_reachable = true;
-    st.available = j.value("available", true);
+    st.available = jBool(j, "available", true);
     if (j.contains("backend") && j["backend"].is_object()) {
-        st.backend = j["backend"].value("selected", "");
+        st.backend = jStr(j["backend"], "selected");
     }
     if (j.contains("state") && j["state"].is_object()) {
         const auto& s = j["state"];
-        st.manager_state = s.value("manager", "unknown");
-        st.process_state = s.value("process", "unknown");
-        st.auth_state = s.value("authentication", "unknown");
-        st.fairplay_state = s.value("fairplay", "unknown");
-        st.session_state = s.value("session", "unknown");
+        st.manager_state = jStr(s, "manager", "unknown");
+        st.process_state = jStr(s, "process", "unknown");
+        st.auth_state = jStr(s, "authentication", "unknown");
+        st.fairplay_state = jStr(s, "fairplay", "unknown");
+        st.session_state = jStr(s, "session", "unknown");
     }
     if (j.contains("capabilities") && j["capabilities"].is_object()) {
         const auto& c = j["capabilities"];
-        st.cap_cbcs = c.value("cbcs", false);
-        st.cap_alac = c.value("alac", false);
-        st.cap_atmos = c.value("atmos", false);
-        st.cap_hi_res = c.value("hiRes", false);
+        st.cap_cbcs = jBool(c, "cbcs", false);
+        st.cap_alac = jBool(c, "alac", false);
+        st.cap_atmos = jBool(c, "atmos", false);
+        st.cap_hi_res = jBool(c, "hiRes", false);
     }
     if (j.contains("challenge") && j["challenge"].is_object()) {
-        st.challenge_prompt = j["challenge"].value("prompt", j["challenge"].value("message", ""));
+        st.challenge_prompt = jStr(j["challenge"], "prompt", jStr(j["challenge"], "message"));
     }
-    st.message = j.value("message", "");
+    st.message = jStr(j, "message");
     return st;
 }
 
@@ -1153,7 +1185,7 @@ PlaybackSessionInfo AdamClient::createPlaybackSession(const std::string& asset_i
     }
 
     auto j = nlohmann::json::parse(r.body, nullptr, false);
-    if (!j.is_object() || j.value("sessionId", "").empty()) {
+    if (!j.is_object() || jStr(j, "sessionId").empty()) {
         info.error = "播放会话响应无效";
         return info;
     }
@@ -1166,25 +1198,25 @@ PlaybackSessionInfo AdamClient::createPlaybackSession(const std::string& asset_i
     std::string base = "https://127.0.0.1:" + std::to_string(port);
 
     info.ok = true;
-    info.session_id = j.value("sessionId", "");
-    info.asset_id = j.value("assetId", asset_id);
-    info.storefront = j.value("storefront", "");
-    info.type = j.value("type", video ? "mv" : "song");
-    info.codec = j.value("codec", "");
-    info.sample_rate = j.value("sampleRate", 0);
-    info.bit_depth = j.value("bitDepth", 0);
-    info.bit_rate = j.value("bitRate", 0);
-    info.channel_count = j.value("channelCount", 0);
-    info.spatial_audio = j.value("spatialAudio", "");
-    info.title = j.value("title", "");
-    info.artist = j.value("artistName", "");
-    info.album = j.value("albumName", "");
-    info.cover_url = formatArtworkUrl(j.value("artworkUrl", ""), 500);
-    info.duration_sec = j.value("durationMs", 0) / 1000.0;
+    info.session_id = jStr(j, "sessionId");
+    info.asset_id = jStr(j, "assetId", asset_id);
+    info.storefront = jStr(j, "storefront");
+    info.type = jStr(j, "type", video ? "mv" : "song");
+    info.codec = jStr(j, "codec");
+    info.sample_rate = jInt(j, "sampleRate", 0);
+    info.bit_depth = jInt(j, "bitDepth", 0);
+    info.bit_rate = jInt(j, "bitRate", 0);
+    info.channel_count = jInt(j, "channelCount", 0);
+    info.spatial_audio = jStr(j, "spatialAudio");
+    info.title = jStr(j, "title");
+    info.artist = jStr(j, "artistName");
+    info.album = jStr(j, "albumName");
+    info.cover_url = formatArtworkUrl(jStr(j, "artworkUrl"), 500);
+    info.duration_sec = jInt64(j, "durationMs", 0) / 1000.0;
 
     std::string audio_rel = "/api/v1/playback/" + info.session_id + "/audio";
     if (j.contains("streams") && j["streams"].is_object()) {
-        std::string sa = j["streams"].value("audio", "");
+        std::string sa = jStr(j["streams"], "audio");
         if (!sa.empty()) audio_rel = sa;
     }
     info.audio_url = (audio_rel.rfind("http", 0) == 0) ? audio_rel : (base + audio_rel);
@@ -1217,21 +1249,21 @@ bool AdamClient::fetchMetadata(const std::string& asset_id,
     if (r.ok) {
         auto j = nlohmann::json::parse(r.body, nullptr, false);
         if (j.is_object()) {
-            out.id = j.value("id", asset_id);
-            out.kind = j.value("type", "song");
-            out.title = j.value("title", "");
-            out.artist = j.value("artistName", "");
-            out.album = j.value("albumName", "");
-            out.duration_sec = j.value("durationMs", 0) / 1000.0;
-            out.cover_url = formatArtworkUrl(j.value("artworkUrl", ""), 500);
-            out.has_lyrics = j.value("hasLyrics", false);
+            out.id = jStr(j, "id", asset_id);
+            out.kind = jStr(j, "type", "song");
+            out.title = jStr(j, "title");
+            out.artist = jStr(j, "artistName");
+            out.album = jStr(j, "albumName");
+            out.duration_sec = jInt64(j, "durationMs", 0) / 1000.0;
+            out.cover_url = formatArtworkUrl(jStr(j, "artworkUrl"), 500);
+            out.has_lyrics = jBool(j, "hasLyrics", false);
             out.storefront = eff_sf;
             if (j.contains("availableStreams") && j["availableStreams"].is_array() &&
                 !j["availableStreams"].empty()) {
                 const auto& s0 = j["availableStreams"][0];
-                std::string c = s0.value("codec", "");
-                int sr = s0.value("sampleRate", 0);
-                int bd = s0.value("bitDepth", 0);
+                std::string c = jStr(s0, "codec");
+                int sr = jInt(s0, "sampleRate", 0);
+                int bd = jInt(s0, "bitDepth", 0);
                 if (bd > 0 && sr > 0) {
                     out.is_lossless = true;
                     out.is_hires = (sr > 48000 || bd > 16);
@@ -1756,14 +1788,16 @@ bool AdamClient::syncLibraryFromApple(nlohmann::json& stats_out, std::string& er
         if (!j.is_object() || !j.contains("data") || !j["data"].is_array()) break;
         for (const auto& item : j["data"]) {
             if (!item.is_object()) continue;
-            const auto& attr = item.value("attributes", nlohmann::json::object());
+            const auto& attr = (item.contains("attributes") && item["attributes"].is_object())
+                                   ? item["attributes"]
+                                   : nlohmann::json::object();
             playlists.push_back({
-                {"lid", item.value("id", "")},
-                {"name", attr.value("name", "")},
-                {"trackCount", attr.value("trackCount", 0)},
+                {"lid", jStr(item, "id")},
+                {"name", jStr(attr, "name")},
+                {"trackCount", jInt(attr, "trackCount", 0)},
             });
         }
-        next_pl = j.value("next", "");
+        next_pl = jStr(j, "next");
     }
 
     // Fetch library songs (up to 5 pages of 100)
@@ -1775,23 +1809,25 @@ bool AdamClient::syncLibraryFromApple(nlohmann::json& stats_out, std::string& er
         if (!j.is_object() || !j.contains("data") || !j["data"].is_array()) break;
         for (const auto& item : j["data"]) {
             if (!item.is_object()) continue;
-            const auto& attr = item.value("attributes", nlohmann::json::object());
+            const auto& attr = (item.contains("attributes") && item["attributes"].is_object())
+                                   ? item["attributes"]
+                                   : nlohmann::json::object();
             std::string cid;
             if (attr.contains("playParams") && attr["playParams"].is_object()) {
-                cid = attr["playParams"].value("catalogId", "");
+                cid = jStr(attr["playParams"], "catalogId");
             }
             songs.push_back({
-                {"lid", item.value("id", "")},
+                {"lid", jStr(item, "id")},
                 {"cid", cid},
-                {"name", attr.value("name", "")},
-                {"artist", attr.value("artistName", "")},
-                {"album", attr.value("albumName", "")},
-                {"ms", attr.value("durationInMillis", 0)},
-                {"track", attr.value("trackNumber", 0)},
-                {"disc", attr.value("discNumber", 0)},
+                {"name", jStr(attr, "name")},
+                {"artist", jStr(attr, "artistName")},
+                {"album", jStr(attr, "albumName")},
+                {"ms", jInt64(attr, "durationInMillis", 0)},
+                {"track", jInt(attr, "trackNumber", 0)},
+                {"disc", jInt(attr, "discNumber", 0)},
             });
         }
-        next_songs = j.value("next", "");
+        next_songs = jStr(j, "next");
     }
 
     nlohmann::json ingest = {
@@ -1814,29 +1850,31 @@ void AdamClient::parseResourceNode(const nlohmann::json& node,
                                    std::vector<ContainerItem>& containers,
                                    std::vector<MusicTrack>& tracks) {
     if (!node.is_object()) return;
-    std::string type = node.value("type", "");
-    std::string id = node.value("id", "");
-    const auto attr = node.value("attributes", nlohmann::json::object());
+    std::string type = jStr(node, "type");
+    std::string id = jStr(node, "id");
+    const auto attr = (node.contains("attributes") && node["attributes"].is_object())
+                          ? node["attributes"]
+                          : nlohmann::json::object();
 
     if (type == "songs" || type == "music-videos" || type == "library-songs") {
         MusicTrack tr;
         tr.id = id;
         if (attr.contains("playParams") && attr["playParams"].is_object()) {
-            std::string cid = attr["playParams"].value("catalogId", "");
+            std::string cid = jStr(attr["playParams"], "catalogId");
             if (!cid.empty()) {
                 tr.library_id = id;
                 tr.id = cid;
             }
         }
         tr.kind = (type == "music-videos") ? "mv" : "song";
-        tr.title = attr.value("name", "");
-        tr.artist = attr.value("artistName", "");
-        tr.album = attr.value("albumName", "");
-        tr.duration_sec = attr.value("durationInMillis", 0) / 1000.0;
-        tr.has_lyrics = attr.value("hasLyrics", false);
+        tr.title = jStr(attr, "name");
+        tr.artist = jStr(attr, "artistName");
+        tr.album = jStr(attr, "albumName");
+        tr.duration_sec = jInt64(attr, "durationInMillis", 0) / 1000.0;
+        tr.has_lyrics = jBool(attr, "hasLyrics", false);
         tr.storefront = default_sf;
         if (attr.contains("artwork") && attr["artwork"].is_object()) {
-            tr.cover_url = formatArtworkUrl(attr["artwork"].value("url", ""), 500);
+            tr.cover_url = formatArtworkUrl(jStr(attr["artwork"], "url"), 500);
         }
         if (attr.contains("audioTraits")) applyAudioTraits(attr["audioTraits"], tr);
         if (tr.kind == "mv") tr.quality_label = "MV";
@@ -1849,16 +1887,16 @@ void AdamClient::parseResourceNode(const nlohmann::json& node,
         ContainerItem c;
         c.id = id;
         c.type = type;
-        c.name = attr.value("name", "");
-        c.subtitle = attr.value("artistName", attr.value("curatorName", ""));
+        c.name = jStr(attr, "name");
+        c.subtitle = jStr(attr, "artistName", jStr(attr, "curatorName"));
         if (c.subtitle.empty() && attr.contains("genreNames") && attr["genreNames"].is_array() &&
             !attr["genreNames"].empty() && attr["genreNames"][0].is_string()) {
             c.subtitle = attr["genreNames"][0].get<std::string>();
         }
-        c.track_count = attr.value("trackCount", 0);
+        c.track_count = jInt(attr, "trackCount", 0);
         c.storefront = default_sf;
         if (attr.contains("artwork") && attr["artwork"].is_object()) {
-            c.cover_url = formatArtworkUrl(attr["artwork"].value("url", ""), 500);
+            c.cover_url = formatArtworkUrl(jStr(attr["artwork"], "url"), 500);
         }
         if (!c.id.empty() && !c.name.empty()) containers.push_back(std::move(c));
         return;
@@ -2443,11 +2481,11 @@ bool AdamClient::fetchLibraryPlaylistCatalogIdsFromAmp(const std::string& playli
             }
             complete_ids.push_back(*identities.begin());
         }
-        if (j.contains("next") && !j["next"].is_string()) {
+        if (j.contains("next") && !j["next"].is_null() && !j["next"].is_string()) {
             error = "Invalid playlist pagination";
             return false;
         }
-        path = j.value("next", "");
+        path = jStr(j, "next");
         const std::string expected = "/v1/me/library/playlists/" + playlist_id + "/tracks?";
         if (!path.empty() && path.rfind(expected, 0) != 0) {
             error = "Unexpected playlist pagination path or host";
@@ -2493,6 +2531,183 @@ bool AdamClient::fetchLibraryPlaylistFromAmp(const std::string& playlist_id,
         error = "Live playlist identity, name or edit permission could not be verified";
         return false;
     }
+}
+
+namespace {
+
+ExportJobInfo parseExportJobJson(const nlohmann::json& j) {
+    ExportJobInfo job;
+    if (!j.is_object()) return job;
+    job.job_id = jStr(j, "jobId");
+    job.asset_id = jStr(j, "assetId");
+    job.phase = jStr(j, "phase", "queued");
+    job.percent = jInt(j, "percent", 0);
+    job.queue_index = jInt(j, "queueIndex", 0);
+    job.priority = jInt(j, "priority", 0);
+    job.title = jStr(j, "title");
+    job.artist = jStr(j, "artistName");
+    job.artwork_url = formatArtworkUrl(jStr(j, "artworkUrl"), 300);
+    job.bytes_done = jInt64(j, "bytesDone", 0);
+    job.bytes_total = jInt64(j, "bytesTotal", 0);
+    job.output = jStr(j, "output");
+    job.error = jStr(j, "error");
+    job.source = jStr(j, "source");
+    return job;
+}
+
+} // namespace
+
+bool AdamClient::enqueueExportJob(const std::string& asset_id,
+                                  const std::string& storefront,
+                                  bool is_video,
+                                  bool is_playlist,
+                                  bool is_library_playlist,
+                                  bool convert_to_flac,
+                                  const std::string& output_dir,
+                                  const std::string& hint_title,
+                                  const std::string& hint_artist,
+                                  const std::string& hint_artwork,
+                                  ExportJobInfo& job_out,
+                                  std::string& error) {
+    job_out = ExportJobInfo{};
+    error.clear();
+    if (trimCopy(asset_id).empty()) {
+        error = "导出任务缺少曲目/歌单 assetId";
+        return false;
+    }
+    if (!ensureEngineRunning(error)) {
+        return false;
+    }
+
+    std::string dev = getDeveloperToken(false);
+    std::string mut = resolveMediaUserTokenWithFallback();
+    std::string eff_sf = effectiveStorefront(storefront);
+    std::string out_dir = trimCopy(output_dir).empty()
+                              ? expandUserPath("~/Music/AppleMusic")
+                              : expandUserPath(trimCopy(output_dir));
+    std::error_code ec;
+    fs::create_directories(out_dir, ec);
+
+    std::string lang = "zh-CN";
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        if (!cfg_.language.empty()) lang = cfg_.language;
+    }
+
+    nlohmann::json req = {
+        {"assetId", trimCopy(asset_id)},
+        {"storefront", eff_sf},
+        {"language", lang},
+        {"outputDir", out_dir},
+        {"filenameTemplate", "{album_artist}/{album}/{track_number:02d} - {title}"},
+        {"capabilities", {
+            {"lossless", !is_video},
+            {"atmos", false},
+            {"video", is_video},
+            {"playlist", is_playlist},
+            {"libraryPlaylist", is_library_playlist},
+        }},
+        {"options", {
+            {"embedArtwork", true},
+            {"artworkSize", 3000},
+            {"embedLyrics", true},
+            {"lrcFormat", "lrc"},
+            {"lrcType", "lyrics"},
+            {"saveLrcSidecar", true},
+            {"overwritePolicy", "skip"},
+            {"convertToFlac", convert_to_flac && !is_video},
+            {"keepOriginal", false},
+        }},
+    };
+    if (!dev.empty()) req["token"] = dev;
+    if (!mut.empty()) req["mut"] = mut;
+    if (!hint_title.empty()) req["hintTitle"] = hint_title;
+    if (!hint_artist.empty()) req["hintArtist"] = hint_artist;
+    if (!hint_artwork.empty()) req["hintArtwork"] = hint_artwork;
+
+    HttpResponse r = engineRequest("POST", "/api/v1/export", req.dump(),
+                                   "application/json", "application/json", 15000);
+    if (!r.ok) {
+        error = r.error.empty() ? "提交无损导出任务失败" : r.error;
+        return false;
+    }
+    auto j = nlohmann::json::parse(r.body, nullptr, false);
+    if (!j.is_object()) {
+        error = "导出任务响应格式无效";
+        return false;
+    }
+    job_out = parseExportJobJson(j);
+    return true;
+}
+
+bool AdamClient::listExportJobs(std::vector<ExportJobInfo>& jobs_out, std::string& error) {
+    jobs_out.clear();
+    error.clear();
+    if (!isPortReachable()) {
+        return true;
+    }
+    HttpResponse r = engineRequest("GET", "/api/v1/export", "", "application/json", "application/json", 5000);
+    if (!r.ok) {
+        error = r.error;
+        return false;
+    }
+    auto j = nlohmann::json::parse(r.body, nullptr, false);
+    if (j.is_array()) {
+        for (const auto& item : j) {
+            if (item.is_object()) jobs_out.push_back(parseExportJobJson(item));
+        }
+    } else if (j.is_object() && j.contains("jobs") && j["jobs"].is_array()) {
+        for (const auto& item : j["jobs"]) {
+            if (item.is_object()) jobs_out.push_back(parseExportJobJson(item));
+        }
+    }
+    return true;
+}
+
+bool AdamClient::cancelExportJob(const std::string& job_id, std::string& error) {
+    error.clear();
+    if (trimCopy(job_id).empty()) {
+        error = "缺少 jobId";
+        return false;
+    }
+    HttpResponse r = engineRequest("DELETE", "/api/v1/export/" + LrclibClient::urlEncode(trimCopy(job_id)));
+    if (!r.ok) {
+        error = r.error;
+        return false;
+    }
+    return true;
+}
+
+bool AdamClient::retryExportJob(const std::string& job_id, ExportJobInfo& job_out, std::string& error) {
+    job_out = ExportJobInfo{};
+    error.clear();
+    if (trimCopy(job_id).empty()) {
+        error = "缺少 jobId";
+        return false;
+    }
+    HttpResponse r = engineRequest("POST", "/api/v1/export/" + LrclibClient::urlEncode(trimCopy(job_id)) + "/retry", "{}");
+    if (!r.ok) {
+        error = r.error;
+        return false;
+    }
+    auto j = nlohmann::json::parse(r.body, nullptr, false);
+    if (j.is_object()) job_out = parseExportJobJson(j);
+    return true;
+}
+
+bool AdamClient::fetchCacheStats(nlohmann::json& out, std::string& error) {
+    out = nlohmann::json::object();
+    error.clear();
+    HttpResponse r = engineRequest("GET", "/api/v1/cache/stats", "", "application/json", "application/json", 4000);
+    if (!r.ok) {
+        error = r.error;
+        return false;
+    }
+    out = nlohmann::json::parse(r.body, nullptr, false);
+    if (!out.is_object()) {
+        out = nlohmann::json::object();
+    }
+    return true;
 }
 
 } // namespace music_plugin
