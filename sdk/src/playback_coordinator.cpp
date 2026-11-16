@@ -92,8 +92,8 @@ bool writeFileAtomic0600(const std::string& path, const std::string& content) {
         fs::create_directories(p.parent_path(), ec);
         if (ec) return false;
     }
-    const std::string tmp = path + ".tmp." + std::to_string(::getpid());
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    std::string tmp = path + ".tmp.XXXXXX";
+    int fd = ::mkstemp(tmp.data());
     if (fd < 0) return false;
     size_t off = 0;
     while (off < content.size()) {
@@ -106,6 +106,7 @@ bool writeFileAtomic0600(const std::string& path, const std::string& content) {
         off += static_cast<size_t>(n);
     }
     ::fsync(fd);
+    ::fchmod(fd, 0600);
     ::close(fd);
     if (::rename(tmp.c_str(), path.c_str()) != 0) {
         ::unlink(tmp.c_str());

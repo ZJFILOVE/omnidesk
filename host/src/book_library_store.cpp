@@ -164,10 +164,12 @@ bool writeJsonFileAtomicUnlocked(const std::string& path, const nlohmann::json& 
         fs::create_directories(dst.parent_path(), ec);
         if (ec) return false;
     }
-    fs::path tmp = dst.parent_path() / (".tmp." + dst.filename().string() + "." + std::to_string(::getpid()));
+    std::string tmp_name =
+        (dst.parent_path() / (".tmp." + dst.filename().string() + ".XXXXXX")).string();
     std::string payload = j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = ::mkstemp(tmp_name.data());
     if (fd < 0) return false;
+    const fs::path tmp(tmp_name);
     size_t written = 0;
     while (written < payload.size()) {
         ssize_t n = ::write(fd, payload.data() + written, payload.size() - written);

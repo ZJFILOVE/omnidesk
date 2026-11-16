@@ -124,7 +124,7 @@ void printHelp() {
     std::cout <<
         "OmniDesk Desktop Workbench\n\n"
         "Usage:\n"
-        "  omnidesk [--domain store|media|text|book] [--headless-check] [--smoke-ms <ms>]\n";
+        "  omnidesk [--domain store|media|text|book|ai|settings] [--headless-check] [--smoke-ms <ms>]\n";
 }
 
 bool parseSmokeMs(const std::string& raw, int& out_ms) {
@@ -173,6 +173,7 @@ int main(int argc, char** argv) {
             if (d == "media") initial_ws = omnidesk::host::WorkspaceId::Media;
             else if (d == "text") initial_ws = omnidesk::host::WorkspaceId::Text;
             else if (d == "book") initial_ws = omnidesk::host::WorkspaceId::Book;
+            else if (d == "ai") initial_ws = omnidesk::host::WorkspaceId::AiChat;
             else if (d == "settings") initial_ws = omnidesk::host::WorkspaceId::Settings;
             else initial_ws = omnidesk::host::WorkspaceId::Store;
         }

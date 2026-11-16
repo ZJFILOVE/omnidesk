@@ -214,14 +214,14 @@ bool writeStateObject(const fs::path& path, const nlohmann::json& state, std::st
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     ::chmod(path.parent_path().c_str(), 0700);
-    fs::path tmp = path;
-    tmp += ".tmp." + std::to_string(::getpid());
-    ::unlink(tmp.c_str());
-    int fd = ::open(tmp.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+    std::string tmp_name = path.string() + ".tmp.XXXXXX";
+    int fd = ::mkstemp(tmp_name.data());
     if (fd < 0) {
         error = "Cannot create temporary state file";
         return false;
     }
+    const fs::path tmp(tmp_name);
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
     ::fchmod(fd, 0600);
     const std::string data = state.dump(2) + "\n";
     size_t written = 0;

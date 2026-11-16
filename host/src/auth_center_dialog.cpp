@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -397,9 +398,10 @@ std::string buildCookieHeaderFromItems(const std::vector<CookieItem>& items) {
 bool writeFileAtomic0600(const fs::path& path, const std::string& content) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
-    const fs::path tmp = path.string() + ".tmp." + std::to_string(::getpid());
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    std::string tmp_name = path.string() + ".tmp.XXXXXX";
+    int fd = ::mkstemp(tmp_name.data());
     if (fd < 0) return false;
+    const fs::path tmp(tmp_name);
     size_t written = 0;
     while (written < content.size()) {
         ssize_t n = ::write(fd, content.data() + written, content.size() - written);
