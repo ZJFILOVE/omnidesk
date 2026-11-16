@@ -216,6 +216,45 @@ std::string toLowerCopy(std::string s) {
     return s;
 }
 
+bool sameVocabCard(const VocabCard& a, const VocabCard& b) {
+    return a.word == b.word && a.lemma == b.lemma && a.phonetic == b.phonetic &&
+           a.etymology == b.etymology && a.meaning == b.meaning &&
+           a.context_sentence == b.context_sentence && a.source_book == b.source_book &&
+           a.interval_days == b.interval_days && a.repetitions == b.repetitions &&
+           a.ease_factor == b.ease_factor;
+}
+
+void mergeRefreshedVocab(std::vector<VocabCard>& current,
+                         std::vector<VocabCard> loaded,
+                         const std::vector<VocabCard>& previous) {
+    std::unordered_map<std::string, const VocabCard*> previous_by_key;
+    previous_by_key.reserve(previous.size());
+    for (const auto& card : previous) {
+        previous_by_key[toLowerCopy(card.word)] = &card;
+    }
+
+    std::unordered_map<std::string, size_t> loaded_by_key;
+    loaded_by_key.reserve(loaded.size());
+    for (size_t i = 0; i < loaded.size(); ++i) {
+        loaded_by_key[toLowerCopy(loaded[i].word)] = i;
+    }
+
+    std::vector<VocabCard> merged = std::move(loaded);
+    for (const auto& local : current) {
+        const std::string key = toLowerCopy(local.word);
+        const auto previous_it = previous_by_key.find(key);
+        const bool changed = previous_it == previous_by_key.end() ||
+                             !sameVocabCard(local, *previous_it->second);
+        const auto loaded_it = loaded_by_key.find(key);
+        if (loaded_it == loaded_by_key.end()) {
+            merged.push_back(local);
+        } else if (changed) {
+            merged[loaded_it->second] = local;
+        }
+    }
+    current = std::move(merged);
+}
+
 std::string extractTranslationText(const std::string& raw) {
     const std::string open_tag = "<translation>";
     const std::string close_tag = "</translation>";
@@ -1515,7 +1554,10 @@ BookWorkbench::BookWorkbench(std::function<void(const std::string&)> on_entity_f
         library_sub_token_ = k.bus().subscribe("entity.book.library_changed", "host.book_workbench",
             [this, alive = alive_](const std::string&, const nlohmann::json&) {
                 brls::sync([this, alive]() {
-                    if (!alive->load(std::memory_order_acquire) || suppress_library_bus_) return;
+                    if (!alive->load(std::memory_order_acquire) ||
+                        suppress_library_bus_.load(std::memory_order_acquire)) {
+                        return;
+                    }
                     BookLibraryStore::instance().reload();
                     cached_excerpts_ = BookLibraryStore::instance().listAllMergedExcerpts();
                     if (sub_mode_ == SubMode::Bookshelf || sub_mode_ == SubMode::Notebook) {
@@ -1567,9 +1609,10 @@ void BookWorkbench::refresh() {
     library_request_->cancel();
     library_request_ = CancelToken::create();
     auto& kernel = HostKernel::instance();
+    const uint64_t vocab_seq_before_load = vocab_mutation_seq_;
+    const std::vector<VocabCard> vocab_snapshot = vocab_cards_;
     books_.clear();
     preview_books_.clear();
-    vocab_cards_.clear();
 
     if (kernel.isInitialized()) {
         const auto sources = kernel.domains().bookSources();
@@ -1602,10 +1645,14 @@ void BookWorkbench::refresh() {
                     }
                     return payload;
                 },
-                [this, alive = alive_, sources](auto payload) {
+                [this, alive = alive_, sources, vocab_snapshot, vocab_seq_before_load](auto payload) {
                     if (!alive->load(std::memory_order_acquire)) return;
                     books_ = std::move(payload.books);
-                    vocab_cards_ = std::move(payload.vocab);
+                    if (vocab_mutation_seq_ == vocab_seq_before_load) {
+                        vocab_cards_ = std::move(payload.vocab);
+                    } else {
+                        mergeRefreshedVocab(vocab_cards_, std::move(payload.vocab), vocab_snapshot);
+                    }
                     cached_excerpts_ = std::move(payload.excerpts);
                     mergeHostVocabFallback();
 
@@ -1705,11 +1752,11 @@ void BookWorkbench::scheduleMissingPdfCovers() {
         [this, alive = alive_, req](auto results) {
             if (!alive->load(std::memory_order_acquire) || cover_request_ != req) return;
             if (results.empty()) return;
-            suppress_library_bus_ = true;
+            beginLibraryBusSuppression();
             for (const auto& r : results) {
                 BookLibraryStore::instance().updateCachedCoverAndPages(r.pdf_path, r.cover_path, r.total_pages);
             }
-            suppress_library_bus_ = false;
+            endLibraryBusSuppression();
             BookLibraryStore::instance().enrichAndMergeLibraryBooks(books_);
             if (sub_mode_ == SubMode::Bookshelf || sub_mode_ == SubMode::Notebook) {
                 rebuildContent();
@@ -2121,9 +2168,9 @@ void BookWorkbench::renderBookshelf() {
                     [this, alive, active_gid](std::string new_name) {
                         brls::sync([this, alive, active_gid, new_name = std::move(new_name)]() {
                             if (!alive->load(std::memory_order_acquire) || new_name.empty()) return;
-                            suppress_library_bus_ = true;
+                            beginLibraryBusSuppression();
                             BookLibraryStore::instance().renameGroup(active_gid, new_name);
-                            suppress_library_bus_ = false;
+                            endLibraryBusSuppression();
                             rebuildContent();
                         });
                     },
@@ -2136,9 +2183,9 @@ void BookWorkbench::renderBookshelf() {
         auto* del_btn = ui::makeButton("删除此分组", [this, alive = alive_, active_gid]() {
             brls::sync([this, alive, active_gid]() {
                 if (!alive->load(std::memory_order_acquire)) return;
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().deleteGroup(active_gid);
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 group_filter_ = "__all__";
                 brls::Application::notify("已删除分组（组内书籍已归入未分组）");
                 rebuildContent();
@@ -2369,9 +2416,9 @@ void BookWorkbench::renderBookshelf() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 const auto selected_books = collectBatchSelectedBooks();
                 if (selected_books.empty()) return;
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().setBooksStatus(selected_books, "reading");
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 BookLibraryStore::instance().enrichAndMergeLibraryBooks(books_);
                 batch_selected_keys_.clear();
                 batch_mode_ = false;
@@ -2383,9 +2430,9 @@ void BookWorkbench::renderBookshelf() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 const auto selected_books = collectBatchSelectedBooks();
                 if (selected_books.empty()) return;
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().setBooksStatus(selected_books, "finished");
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 BookLibraryStore::instance().enrichAndMergeLibraryBooks(books_);
                 batch_selected_keys_.clear();
                 batch_mode_ = false;
@@ -2397,9 +2444,9 @@ void BookWorkbench::renderBookshelf() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 const auto selected_books = collectBatchSelectedBooks();
                 if (selected_books.empty()) return;
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().setBooksPinned(selected_books, true);
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 batch_selected_keys_.clear();
                 batch_mode_ = false;
                 rebuildContent();
@@ -2410,9 +2457,9 @@ void BookWorkbench::renderBookshelf() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 const auto selected_books = collectBatchSelectedBooks();
                 if (selected_books.empty()) return;
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().setBooksRemovedFromShelf(selected_books, true);
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 batch_selected_keys_.clear();
                 batch_mode_ = false;
                 brls::Application::notify("已移出书架（原始本地文件完好保留）");
@@ -2726,9 +2773,9 @@ void BookWorkbench::renderNotebook() {
         [this, alive = alive_](const std::string& id) {
             brls::sync([this, alive, id]() {
                 if (!alive->load(std::memory_order_acquire)) return;
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().deleteExcerpt(id);
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 cached_excerpts_ = BookLibraryStore::instance().listAllMergedExcerpts();
                 finishRefresh();
             });
@@ -2747,10 +2794,10 @@ void BookWorkbench::openBook(const BookItem& book) {
     selected_word_idx_ = 0;
     custom_focus_word_.clear();
     if (book.source_id != "plugin-ai-curator") {
-        suppress_library_bus_ = true;
+        beginLibraryBusSuppression();
         BookLibraryStore::instance().touchBookRead(
             book, std::max(1, book.current_page), std::max(1, book.total_pages), "");
-        suppress_library_bus_ = false;
+        endLibraryBusSuppression();
         BookLibraryStore::instance().enrichAndMergeLibraryBooks(books_);
     }
     loadSpread(book.current_page);
@@ -2916,11 +2963,11 @@ void BookWorkbench::loadSpread(int page_num) {
                         }
                         active_spread_ = std::move(spread);
                         if (active_book_.source_id != "plugin-ai-curator") {
-                            suppress_library_bus_ = true;
+                            beginLibraryBusSuppression();
                             BookLibraryStore::instance().touchBookRead(
                                 active_book_, active_book_.current_page,
                                 active_book_.total_pages, active_spread_.chapter_title);
-                            suppress_library_bus_ = false;
+                            endLibraryBusSuppression();
                             BookLibraryStore::instance().enrichAndMergeLibraryBooks(books_);
                         }
                         if (HostKernel::instance().isInitialized()) {
@@ -4304,10 +4351,10 @@ void BookWorkbench::interpretCurrentSentence(const std::string& sentence) {
                 if (!interp.empty()) {
                     sentence_note_cache_[skey] = interp;
                     if (!has_ebook || !res.data.contains("note")) {
-                        suppress_library_bus_ = true;
+                        beginLibraryBusSuppression();
                         BookLibraryStore::instance().addExcerpt(
                             target_book, page_num, chap, sentence, "", interp);
-                        suppress_library_bus_ = false;
+                        endLibraryBusSuppression();
                     }
                     cached_excerpts_ = BookLibraryStore::instance().listAllMergedExcerpts();
                     status_label_->setText("已完成长难句上下文精读并收入「笔记本 · 书摘」");
@@ -4359,6 +4406,7 @@ void BookWorkbench::addWordToVocab(const std::string& word, const std::string& c
         card.source_book = active_book_.title;
         vocab_cards_.push_back(std::move(card));
     }
+    ++vocab_mutation_seq_;
     saveHostVocabFallback();
 
     if (HostKernel::instance().isInitialized()) {
@@ -4407,6 +4455,7 @@ void BookWorkbench::reviewCurrentVocabCard(int quality, int selected_days) {
     const int final_reps = card.repetitions;
     const double final_ef = card.ease_factor;
 
+    ++vocab_mutation_seq_;
     saveHostVocabFallback();
 
     if (HostKernel::instance().isInitialized()) {
@@ -4490,6 +4539,28 @@ void BookWorkbench::saveHostVocabFallback() const {
         });
     }
     k.config().savePluginConfig("host-book-vocab", {{"cards", std::move(arr)}});
+}
+
+void BookWorkbench::beginLibraryBusSuppression() {
+    ++suppress_library_bus_depth_;
+    suppress_library_bus_.store(true, std::memory_order_release);
+}
+
+void BookWorkbench::endLibraryBusSuppression() {
+    if (suppress_library_bus_depth_ == 0) return;
+    --suppress_library_bus_depth_;
+    if (suppress_library_bus_depth_ != 0) return;
+
+    const uint64_t generation = ++suppress_library_bus_generation_;
+    auto alive = alive_;
+    brls::sync([this, alive, generation]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (suppress_library_bus_depth_ != 0 ||
+            suppress_library_bus_generation_ != generation) {
+            return;
+        }
+        suppress_library_bus_.store(false, std::memory_order_release);
+    });
 }
 
 void BookWorkbench::openExternalBook(const nlohmann::json& payload) {
@@ -4589,9 +4660,9 @@ void BookWorkbench::openExternalBook(const nlohmann::json& payload) {
     if (!curator_request && !file_path.empty()) {
         std::error_code ec;
         if (std::filesystem::exists(file_path, ec)) {
-            suppress_library_bus_ = true;
+            beginLibraryBusSuppression();
             BookLibraryStore::instance().registerImportedFile(file_path);
-            suppress_library_bus_ = false;
+            endLibraryBusSuppression();
         }
     }
 
@@ -4654,12 +4725,12 @@ void BookWorkbench::openExternalBook(const nlohmann::json& payload) {
                 } else {
                     loadSpread(page);
                 }
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().touchBookRead(
                     active_book_, std::max(1, active_spread_.page_number),
                     std::max(1, std::max(active_spread_.total_pages, active_book_.total_pages)),
                     active_spread_.chapter_title);
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 if (on_entity_focus_) {
                     on_entity_focus_(active_book_.title + " · P." +
                                      std::to_string(active_spread_.page_number) + "/" +
@@ -4720,12 +4791,12 @@ void BookWorkbench::openExternalBook(const nlohmann::json& payload) {
                 } else {
                     loadSpread(page);
                 }
-                suppress_library_bus_ = true;
+                beginLibraryBusSuppression();
                 BookLibraryStore::instance().touchBookRead(
                     active_book_, std::max(1, active_spread_.page_number),
                     std::max(1, std::max(active_spread_.total_pages, active_book_.total_pages)),
                     active_spread_.chapter_title);
-                suppress_library_bus_ = false;
+                endLibraryBusSuppression();
                 if (on_entity_focus_) {
                     on_entity_focus_(active_book_.title + " · P." +
                                      std::to_string(active_spread_.page_number) + "/" +
@@ -4845,9 +4916,9 @@ void BookWorkbench::promptCreateGroup() {
             [this, alive = alive_](std::string name) {
                 brls::sync([this, alive, name = std::move(name)]() {
                     if (!alive->load(std::memory_order_acquire) || name.empty()) return;
-                    suppress_library_bus_ = true;
+                    beginLibraryBusSuppression();
                     const auto g = BookLibraryStore::instance().createGroup(name);
-                    suppress_library_bus_ = false;
+                    endLibraryBusSuppression();
                     if (!g.id.empty()) {
                         group_filter_ = g.id;
                         brls::Application::notify("已创建书架分组: " + g.name);
@@ -4886,9 +4957,9 @@ void BookWorkbench::promptBatchMoveGroup(const std::vector<BookItem>& selected_b
         brls::Application::popActivity();
         brls::sync([this, alive, selected_books, gid, gname]() {
             if (!alive->load(std::memory_order_acquire)) return;
-            suppress_library_bus_ = true;
+            beginLibraryBusSuppression();
             BookLibraryStore::instance().setBooksGroup(selected_books, gid);
-            suppress_library_bus_ = false;
+            endLibraryBusSuppression();
             batch_selected_keys_.clear();
             batch_mode_ = false;
             group_filter_ = gid.empty() ? "__ungrouped__" : gid;
@@ -4918,13 +4989,13 @@ void BookWorkbench::promptBatchMoveGroup(const std::vector<BookItem>& selected_b
                     brls::sync([this, alive, selected_books, name = std::move(name)]() {
                         if (!alive->load(std::memory_order_acquire) || name.empty()) return;
                         brls::Application::popActivity();
-                        suppress_library_bus_ = true;
+                        beginLibraryBusSuppression();
                         const auto g = BookLibraryStore::instance().createGroup(name);
                         if (!g.id.empty()) {
                             BookLibraryStore::instance().setBooksGroup(selected_books, g.id);
                             group_filter_ = g.id;
                         }
-                        suppress_library_bus_ = false;
+                        endLibraryBusSuppression();
                         batch_selected_keys_.clear();
                         batch_mode_ = false;
                         rebuildContent();
@@ -4963,11 +5034,11 @@ void BookWorkbench::importSelectedLocalPaths(const std::vector<std::string>& pat
     const bool has_ebook = kernel.isInitialized() && kernel.capabilities().has("doc.open.ebook.v1");
     const bool has_pdf = kernel.isInitialized() && kernel.capabilities().has("book.bilingual_pdf.v1");
 
-    suppress_library_bus_ = true;
+    beginLibraryBusSuppression();
     for (const auto& p : paths) {
         BookLibraryStore::instance().registerImportedFile(p, target_gid);
     }
-    suppress_library_bus_ = false;
+    endLibraryBusSuppression();
 
     if (open_first && paths.size() == 1) {
         openExternalBook({{"file_path", paths.front()}, {"page", 1}});

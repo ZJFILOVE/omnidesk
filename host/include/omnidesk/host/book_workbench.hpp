@@ -91,6 +91,8 @@ private:
     void reviewCurrentVocabCard(int quality, int selected_days);
     void mergeHostVocabFallback();
     void saveHostVocabFallback() const;
+    void beginLibraryBusSuppression();
+    void endLibraryBusSuppression();
 
     std::function<void(const std::string&)> on_entity_focus_;
     std::function<void()> on_open_marketplace_;
@@ -131,6 +133,7 @@ private:
     int rendered_pdf_page_num_ = 0;
     std::string rendered_pdf_orig_png_;
     std::vector<VocabCard> vocab_cards_;
+    uint64_t vocab_mutation_seq_ = 0;
     size_t vocab_idx_ = 0;
     bool vocab_revealed_ = false;
     int selected_word_idx_ = 0;
@@ -145,7 +148,9 @@ private:
     uint64_t recommend_sub_token_ = 0;
     uint64_t books_changed_sub_token_ = 0;
     uint64_t library_sub_token_ = 0;
-    bool suppress_library_bus_ = false;
+    std::atomic<bool> suppress_library_bus_{false};
+    uint64_t suppress_library_bus_depth_ = 0;
+    uint64_t suppress_library_bus_generation_ = 0;
     bool reset_stage_scroll_next_ = false;
     brls::VoidEvent::Subscription resize_sub_;
     int last_bookshelf_cols_ = 0;
