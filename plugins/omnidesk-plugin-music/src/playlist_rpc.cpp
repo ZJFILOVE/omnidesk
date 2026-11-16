@@ -502,10 +502,20 @@ bool invokePythonWritebackWorker(const omnidesk::PluginContext& ctx,
 
 bool runProcess(const fs::path& cwd, const std::vector<std::string>& args, std::string& stdout_out, std::string& error) {
     stdout_out.clear();
+    if (args.empty() || args[0].empty()) {
+        error = "empty command";
+        return false;
+    }
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+
     int out_pipe[2]{-1, -1};
     int err_pipe[2]{-1, -1};
-    if (::pipe(out_pipe) != 0 || ::pipe(err_pipe) != 0) {
+    if (::pipe2(out_pipe, O_CLOEXEC) != 0 || ::pipe2(err_pipe, O_CLOEXEC) != 0) {
         if (out_pipe[0] >= 0) { ::close(out_pipe[0]); ::close(out_pipe[1]); }
+        if (err_pipe[0] >= 0) { ::close(err_pipe[0]); ::close(err_pipe[1]); }
         error = "pipe failed";
         return false;
     }
@@ -517,35 +527,109 @@ bool runProcess(const fs::path& cwd, const std::vector<std::string>& args, std::
         return false;
     }
     if (pid == 0) {
+        ::setpgid(0, 0);
         if (!cwd.empty() && ::chdir(cwd.c_str()) != 0) ::_exit(126);
         int null_fd = ::open("/dev/null", O_RDONLY);
         if (null_fd >= 0) { ::dup2(null_fd, STDIN_FILENO); ::close(null_fd); }
         ::dup2(out_pipe[1], STDOUT_FILENO);
         ::dup2(err_pipe[1], STDERR_FILENO);
-        ::close(out_pipe[0]); ::close(out_pipe[1]);
-        ::close(err_pipe[0]); ::close(err_pipe[1]);
-        std::vector<char*> argv;
-        for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
-        argv.push_back(nullptr);
+        ::fcntl(STDOUT_FILENO, F_SETFD, 0);
+        ::fcntl(STDERR_FILENO, F_SETFD, 0);
+        ::close(out_pipe[0]);
+        ::close(err_pipe[0]);
+        if (out_pipe[1] != STDOUT_FILENO && out_pipe[1] != STDERR_FILENO) ::close(out_pipe[1]);
+        if (err_pipe[1] != STDOUT_FILENO && err_pipe[1] != STDERR_FILENO) ::close(err_pipe[1]);
         ::execv(argv[0], argv.data());
         ::_exit(127);
     }
+    ::setpgid(pid, pid);
     ::close(out_pipe[1]);
     ::close(err_pipe[1]);
-    auto drain = [](int fd, std::string& target) {
-        char buffer[4096];
-        while (target.size() < kMaxFileBytes) {
-            ssize_t count = ::read(fd, buffer, sizeof(buffer));
-            if (count <= 0) break;
-            target.append(buffer, static_cast<size_t>(count));
-        }
-        ::close(fd);
-    };
+
+    for (int fd : {out_pipe[0], err_pipe[0]}) {
+        int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
     std::string stderr_out;
-    drain(out_pipe[0], stdout_out);
-    drain(err_pipe[0], stderr_out);
+    bool child_done = false;
     int status = 0;
-    ::waitpid(pid, &status, 0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60000);
+
+    auto kill_child = [&]() {
+        if (!child_done) {
+            ::kill(-pid, SIGKILL);
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            child_done = true;
+        }
+        if (out_pipe[0] >= 0) { ::close(out_pipe[0]); out_pipe[0] = -1; }
+        if (err_pipe[0] >= 0) { ::close(err_pipe[0]); err_pipe[0] = -1; }
+    };
+
+    auto drain = [](int& fd, std::string& target) {
+        char buffer[4096];
+        while (fd >= 0 && target.size() < kMaxFileBytes) {
+            ssize_t count = ::read(fd, buffer, sizeof(buffer));
+            if (count > 0) {
+                target.append(buffer, static_cast<size_t>(count));
+            } else if (count == 0) {
+                ::close(fd);
+                fd = -1;
+                break;
+            } else {
+                if (errno == EINTR) continue;
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    ::close(fd);
+                    fd = -1;
+                }
+                break;
+            }
+        }
+        if (target.size() >= kMaxFileBytes && fd >= 0) {
+            ::close(fd);
+            fd = -1;
+        }
+    };
+
+    while (out_pipe[0] >= 0 || err_pipe[0] >= 0 || !child_done) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            kill_child();
+            error = "process timed out";
+            return false;
+        }
+
+        if (!child_done) {
+            pid_t waited = ::waitpid(pid, &status, WNOHANG);
+            if (waited == pid) child_done = true;
+        }
+
+        struct pollfd pfds[2]{};
+        nfds_t nfds = 0;
+        int out_idx = -1;
+        int err_idx = -1;
+        if (out_pipe[0] >= 0) {
+            out_idx = static_cast<int>(nfds);
+            pfds[nfds++] = {out_pipe[0], POLLIN, 0};
+        }
+        if (err_pipe[0] >= 0) {
+            err_idx = static_cast<int>(nfds);
+            pfds[nfds++] = {err_pipe[0], POLLIN, 0};
+        }
+        if (nfds > 0) {
+            ::poll(pfds, nfds, 40);
+        } else if (!child_done) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (out_idx >= 0 && (pfds[out_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+            drain(out_pipe[0], stdout_out);
+        }
+        if (err_idx >= 0 && (pfds[err_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+            drain(err_pipe[0], stderr_out);
+        }
+    }
+
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         error = trim(stderr_out).empty() ? trim(stdout_out) : trim(stderr_out);
         return false;

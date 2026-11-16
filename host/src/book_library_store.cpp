@@ -1,6 +1,7 @@
 #include "omnidesk/host/book_library_store.hpp"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -252,8 +253,30 @@ bool runCommandCapture(const std::vector<std::string>& args,
                        std::string& out_stdout,
                        int timeout_ms = 8000) {
     if (args.empty()) return false;
+    std::string exec_path = args[0];
+    if (exec_path.find('/') == std::string::npos) {
+        exec_path.clear();
+        if (const char* path_env = std::getenv("PATH")) {
+            std::stringstream path_stream(path_env);
+            std::string dir;
+            while (std::getline(path_stream, dir, ':')) {
+                if (dir.empty()) continue;
+                std::string candidate = dir + "/" + args[0];
+                if (::access(candidate.c_str(), X_OK) == 0) {
+                    exec_path = std::move(candidate);
+                    break;
+                }
+            }
+        }
+        if (exec_path.empty()) return false;
+    }
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+
     int pipefd[2]{-1, -1};
-    if (::pipe(pipefd) != 0) return false;
+    if (::pipe2(pipefd, O_CLOEXEC) != 0) return false;
 
     pid_t pid = ::fork();
     if (pid < 0) {
@@ -262,22 +285,21 @@ bool runCommandCapture(const std::vector<std::string>& args,
         return false;
     }
     if (pid == 0) {
+        ::setpgid(0, 0);
         ::close(pipefd[0]);
         ::dup2(pipefd[1], STDOUT_FILENO);
+        ::fcntl(STDOUT_FILENO, F_SETFD, 0);
         int devnull = ::open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
             ::dup2(devnull, STDERR_FILENO);
             ::close(devnull);
         }
-        ::close(pipefd[1]);
-        std::vector<char*> argv;
-        argv.reserve(args.size() + 1);
-        for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
-        argv.push_back(nullptr);
-        ::execvp(argv[0], argv.data());
+        if (pipefd[1] != STDOUT_FILENO) ::close(pipefd[1]);
+        ::execv(exec_path.c_str(), argv.data());
         _exit(127);
     }
 
+    ::setpgid(pid, pid);
     ::close(pipefd[1]);
     int flags = ::fcntl(pipefd[0], F_GETFL, 0);
     if (flags >= 0) ::fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
@@ -313,6 +335,7 @@ bool runCommandCapture(const std::vector<std::string>& args,
     ::close(pipefd[0]);
 
     if (!exited) {
+        ::kill(-pid, SIGKILL);
         ::kill(pid, SIGKILL);
         ::waitpid(pid, &status, 0);
         return false;

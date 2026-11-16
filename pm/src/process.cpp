@@ -12,6 +12,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+extern char** environ;
+
 namespace omnidesk::pm {
 
 std::string findExecutableInPath(const std::string& name) {
@@ -57,8 +59,41 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
         return res;
     }
 
+    const std::string exec_path = findExecutableInPath(argv[0]);
+    if (exec_path.empty()) {
+        res.error = "Executable not found: " + argv[0];
+        return res;
+    }
+    std::vector<char*> c_argv;
+    c_argv.reserve(argv.size() + 1);
+    for (const auto& arg : argv) {
+        c_argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    c_argv.push_back(nullptr);
+
+    std::vector<std::string> env_storage;
+    if (environ) {
+        for (char** env = environ; *env; ++env) {
+            std::string entry = *env;
+            const size_t eq = entry.find('=');
+            if (eq != std::string::npos && extra_env.count(entry.substr(0, eq)) > 0) {
+                continue;
+            }
+            env_storage.push_back(std::move(entry));
+        }
+    }
+    for (const auto& [key, value] : extra_env) {
+        env_storage.push_back(key + "=" + value);
+    }
+    std::vector<char*> c_env;
+    c_env.reserve(env_storage.size() + 1);
+    for (auto& entry : env_storage) {
+        c_env.push_back(entry.data());
+    }
+    c_env.push_back(nullptr);
+
     int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    if (pipe2(pipefd, O_CLOEXEC) != 0) {
         res.error = std::string("pipe() failed: ") + std::strerror(errno);
         return res;
     }
@@ -84,6 +119,8 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
+        fcntl(STDOUT_FILENO, F_SETFD, 0);
+        fcntl(STDERR_FILENO, F_SETFD, 0);
         if (pipefd[1] != STDOUT_FILENO && pipefd[1] != STDERR_FILENO) {
             close(pipefd[1]);
         }
@@ -103,22 +140,8 @@ ProcessResult runProcess(const std::vector<std::string>& argv,
             }
         }
 
-        for (const auto& [k, v] : extra_env) {
-            setenv(k.c_str(), v.c_str(), 1);
-        }
-
-        std::vector<char*> c_argv;
-        c_argv.reserve(argv.size() + 1);
-        for (const auto& arg : argv) {
-            c_argv.push_back(const_cast<char*>(arg.c_str()));
-        }
-        c_argv.push_back(nullptr);
-
-        execvp(argv[0].c_str(), c_argv.data());
-        const int err = errno;
-        std::string errmsg = "execvp(" + argv[0] + ") failed: " + std::strerror(err) + "\n";
-        (void)write(STDERR_FILENO, errmsg.data(), errmsg.size());
-        _exit(err == ENOENT ? 127 : 126);
+        execve(exec_path.c_str(), c_argv.data(), c_env.data());
+        _exit(errno == ENOENT ? 127 : 126);
     }
 
     // Parent process
