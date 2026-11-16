@@ -1351,14 +1351,12 @@ InstallResult PluginInstaller::stageBuildAndActivate(const std::string& source_d
     out.version = manifest.version;
     out.commit_sha = commit_sha;
 
-    const std::string cmake_bin =
-        findTool("OMNIDESK_CMAKE_BIN", "/tmp/omnidesk-toolchain/bin/cmake", "cmake");
+    const std::string cmake_bin = findTool("OMNIDESK_CMAKE_BIN", "", "cmake");
     if (cmake_bin.empty()) {
         out.error = "cmake executable not found";
         return out;
     }
-    const std::string ninja_bin =
-        findTool("OMNIDESK_NINJA_BIN", "/tmp/omnidesk-toolchain/bin/ninja", "ninja");
+    const std::string ninja_bin = findTool("OMNIDESK_NINJA_BIN", "", "ninja");
 
     const fs::path build_dir = fs::path(stagingDir()) / ("build-" + manifest.id + "-" + uniqueTag());
     std::error_code ec;

@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -24,12 +25,24 @@ namespace fs = std::filesystem;
         }                                                                                          \
     } while (0)
 
-static const char* kRealObsidianVault =
-    "/home/zhu/.local/share/omnidesk/curation/repos/obsidian-vault";
-static const char* kRealMusicDaily =
-    "/home/zhu/.local/share/omnidesk/curation/repos/music-daily";
+static std::string envPathOrDefault(const char* key, const char* fallback) {
+    if (const char* env = std::getenv(key); env && *env) return env;
+    return fallback;
+}
 
 int main() {
+    const std::string real_obsidian_vault = envPathOrDefault(
+        "OMNIDESK_OBSIDIAN_VAULT_DIR",
+        "/home/zhu/.local/share/omnidesk/curation/repos/obsidian-vault");
+    const std::string real_music_daily = envPathOrDefault(
+        "OMNIDESK_MUSIC_DAILY_DIR",
+        "/home/zhu/.local/share/omnidesk/curation/repos/music-daily");
+    if (!fs::exists(real_obsidian_vault) || !fs::exists(real_music_daily)) {
+        std::cout << "[SKIP] Real archive fixtures unavailable; set OMNIDESK_OBSIDIAN_VAULT_DIR "
+                     "and OMNIDESK_MUSIC_DAILY_DIR to run the integration suite.\n";
+        return 0;
+    }
+
     const fs::path temp_root =
         fs::temp_directory_path() / ("omnidesk-ai-curator-test-" + std::to_string(::getpid()));
     fs::remove_all(temp_root);
@@ -69,8 +82,8 @@ int main() {
         });
 
     config_store.savePluginConfig("plugin-ai-curator", {
-        {"obsidian_vault_dir", kRealObsidianVault},
-        {"music_daily_dir", kRealMusicDaily},
+        {"obsidian_vault_dir", real_obsidian_vault},
+        {"music_daily_dir", real_music_daily},
         {"auto_rehydrate_on_load", false},
         {"auto_pull_remote", false},
     });
@@ -99,13 +112,10 @@ int main() {
     });
 
     // 1. Real Archive Rehydration
-    CHECK(fs::exists(kRealObsidianVault));
-    CHECK(fs::exists(kRealMusicDaily));
-
     auto boot = caps.call("recommend.feed.v1", {
         {"action", "bootstrap_and_rehydrate"},
-        {"obsidian_vault_dir", kRealObsidianVault},
-        {"music_daily_dir", kRealMusicDaily},
+        {"obsidian_vault_dir", real_obsidian_vault},
+        {"music_daily_dir", real_music_daily},
         {"pull_remote", false},
         {"clone_if_missing", false},
     });
@@ -128,8 +138,8 @@ int main() {
     const auto t0 = std::chrono::steady_clock::now();
     auto boot2 = caps.call("recommend.feed.v1", {
         {"action", "bootstrap_and_rehydrate"},
-        {"obsidian_vault_dir", kRealObsidianVault},
-        {"music_daily_dir", kRealMusicDaily},
+        {"obsidian_vault_dir", real_obsidian_vault},
+        {"music_daily_dir", real_music_daily},
         {"pull_remote", false},
     });
     const auto boot2_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

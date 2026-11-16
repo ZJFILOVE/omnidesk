@@ -22,7 +22,10 @@
     "verify_cmd": "ctest --output-on-failure"
   },
   "provides": [
-    "recommend.feed.v1"
+    "recommend.feed.v1",
+    "media.source.v1",
+    "text.source.v1",
+    "book.source.v1"
   ],
   "consumes": [
     "vocab.sm2.v1",
