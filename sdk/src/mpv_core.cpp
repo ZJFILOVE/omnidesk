@@ -424,6 +424,30 @@ struct MPVCore::Impl {
         emitStateLocked(snap, cbs);
     }
 
+    bool ensureRenderContextLocked() {
+        if (render_ctx) return true;
+        if (!mpv) return false;
+        if (!SDL_GL_GetCurrentContext()) return false;
+
+        int advanced_control = 1;
+        mpv_opengl_init_params gl_init{sdlGetProcAddress, nullptr};
+        mpv_render_param params[] = {
+            {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
+            {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init},
+            {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced_control},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+        mpv_render_context* rctx = nullptr;
+        if (mpv_render_context_create(&rctx, mpv, params) < 0 || !rctx) {
+            if (rctx) mpv_render_context_free(rctx);
+            state.last_error = "mpv_render_context_create failed";
+            return false;
+        }
+        render_ctx = rctx;
+        mpv_render_context_set_update_callback(render_ctx, &Impl::onMpvRenderUpdate, this);
+        return true;
+    }
+
     void ensureFboSize(int w, int h, NVGcontext* vg) {
         if (w <= 0 || h <= 0) return;
         if (fbo != 0 && fbo_w == w && fbo_h == h && nvg_ctx == vg) return;
@@ -649,89 +673,69 @@ bool MPVCore::ensureInitialized() {
     std::optional<MediaRequestOptions> pending;
     {
         std::lock_guard lock(impl_->mutex);
-        if (impl_->state.initialized && impl_->mpv && impl_->render_ctx) {
-            return true;
+        if (!impl_->mpv) {
+            std::setlocale(LC_NUMERIC, "C");
+            mpv_handle* handle = mpv_create();
+            if (!handle) {
+                impl_->state.last_error = "mpv_create failed";
+                return false;
+            }
+
+            mpv_set_option_string(handle, "vo", "libmpv");
+            mpv_set_option_string(handle, "hwdec", "auto-safe");
+            mpv_set_option_string(handle, "idle", "yes");
+            mpv_set_option_string(handle, "keep-open", "yes");
+            mpv_set_option_string(handle, "hr-seek", "yes");
+            mpv_set_option_string(handle, "ytdl", "no");
+            mpv_set_option_string(handle, "cache", "yes");
+            mpv_set_option_string(handle, "demuxer-max-bytes", "150MiB");
+            mpv_set_option_string(handle, "demuxer-max-back-bytes", "64MiB");
+            mpv_set_option_string(handle, "audio-channels", "stereo");
+            mpv_set_option_string(
+                handle,
+                "reset-on-next-file",
+                "speed,pause,http-header-fields,referrer,user-agent,stream-lavf-o,force-seekable");
+            mpv_set_option_string(handle, "terminal", "no");
+            mpv_request_log_messages(handle, "error");
+
+            if (mpv_initialize(handle) < 0) {
+                mpv_terminate_destroy(handle);
+                impl_->state.last_error = "mpv_initialize failed";
+                return false;
+            }
+
+            mpv_observe_property(handle, 1, "playback-time", MPV_FORMAT_DOUBLE);
+            mpv_observe_property(handle, 2, "duration", MPV_FORMAT_DOUBLE);
+            mpv_observe_property(handle, 3, "pause", MPV_FORMAT_FLAG);
+            mpv_observe_property(handle, 4, "playback-abort", MPV_FORMAT_FLAG);
+            mpv_observe_property(handle, 5, "paused-for-cache", MPV_FORMAT_FLAG);
+            mpv_observe_property(handle, 6, "speed", MPV_FORMAT_DOUBLE);
+            mpv_observe_property(handle, 7, "volume", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 8, "video-params/w", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 9, "video-params/h", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 10, "hwdec-current", MPV_FORMAT_STRING);
+            mpv_observe_property(handle, 11, "estimated-vf-fps", MPV_FORMAT_DOUBLE);
+            mpv_observe_property(handle, 12, "video-bitrate", MPV_FORMAT_DOUBLE);
+            mpv_observe_property(handle, 13, "decoder-frame-drop-count", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 14, "frame-drop-count", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 15, "video-codec", MPV_FORMAT_STRING);
+            mpv_observe_property(handle, 16, "audio-codec", MPV_FORMAT_STRING);
+            mpv_observe_property(handle, 17, "audio-params/samplerate", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 18, "audio-params/channel-count", MPV_FORMAT_INT64);
+            mpv_observe_property(handle, 19, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
+            mpv_observe_property(handle, 20, "eof-reached", MPV_FORMAT_FLAG);
+
+            impl_->mpv = handle;
+            impl_->state.initialized = true;
+            impl_->state.last_error.clear();
+
+            mpv_set_wakeup_callback(handle, Impl::onMpvWakeup, impl_.get());
+
+            int64_t vol = impl_->state.volume;
+            mpv_set_option(handle, "volume", MPV_FORMAT_INT64, &vol);
+        } else if (!impl_->render_ctx && SDL_GL_GetCurrentContext()) {
+            impl_->ensureRenderContextLocked();
         }
-        if (!SDL_GL_GetCurrentContext()) {
-            return false;
-        }
-
-        std::setlocale(LC_NUMERIC, "C");
-        mpv_handle* handle = mpv_create();
-        if (!handle) {
-            impl_->state.last_error = "mpv_create failed";
-            return false;
-        }
-
-        mpv_set_option_string(handle, "vo", "libmpv");
-        mpv_set_option_string(handle, "hwdec", "auto-safe");
-        mpv_set_option_string(handle, "idle", "yes");
-        mpv_set_option_string(handle, "keep-open", "yes");
-        mpv_set_option_string(handle, "hr-seek", "yes");
-        mpv_set_option_string(handle, "ytdl", "no");
-        mpv_set_option_string(handle, "cache", "yes");
-        mpv_set_option_string(handle, "demuxer-max-bytes", "150MiB");
-        mpv_set_option_string(handle, "demuxer-max-back-bytes", "64MiB");
-        mpv_set_option_string(handle, "audio-channels", "stereo");
-        mpv_set_option_string(
-            handle,
-            "reset-on-next-file",
-            "speed,pause,http-header-fields,referrer,user-agent,stream-lavf-o,force-seekable");
-        mpv_set_option_string(handle, "terminal", "no");
-        mpv_request_log_messages(handle, "error");
-
-        if (mpv_initialize(handle) < 0) {
-            mpv_terminate_destroy(handle);
-            impl_->state.last_error = "mpv_initialize failed";
-            return false;
-        }
-
-        mpv_observe_property(handle, 1, "playback-time", MPV_FORMAT_DOUBLE);
-        mpv_observe_property(handle, 2, "duration", MPV_FORMAT_DOUBLE);
-        mpv_observe_property(handle, 3, "pause", MPV_FORMAT_FLAG);
-        mpv_observe_property(handle, 4, "playback-abort", MPV_FORMAT_FLAG);
-        mpv_observe_property(handle, 5, "paused-for-cache", MPV_FORMAT_FLAG);
-        mpv_observe_property(handle, 6, "speed", MPV_FORMAT_DOUBLE);
-        mpv_observe_property(handle, 7, "volume", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 8, "video-params/w", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 9, "video-params/h", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 10, "hwdec-current", MPV_FORMAT_STRING);
-        mpv_observe_property(handle, 11, "estimated-vf-fps", MPV_FORMAT_DOUBLE);
-        mpv_observe_property(handle, 12, "video-bitrate", MPV_FORMAT_DOUBLE);
-        mpv_observe_property(handle, 13, "decoder-frame-drop-count", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 14, "frame-drop-count", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 15, "video-codec", MPV_FORMAT_STRING);
-        mpv_observe_property(handle, 16, "audio-codec", MPV_FORMAT_STRING);
-        mpv_observe_property(handle, 17, "audio-params/samplerate", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 18, "audio-params/channel-count", MPV_FORMAT_INT64);
-        mpv_observe_property(handle, 19, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
-        mpv_observe_property(handle, 20, "eof-reached", MPV_FORMAT_FLAG);
-
-        int advanced_control = 1;
-        mpv_opengl_init_params gl_init{sdlGetProcAddress, nullptr};
-        mpv_render_param params[] = {
-            {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
-            {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init},
-            {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced_control},
-            {MPV_RENDER_PARAM_INVALID, nullptr},
-        };
-        mpv_render_context* rctx = nullptr;
-        if (mpv_render_context_create(&rctx, handle, params) < 0) {
-            mpv_terminate_destroy(handle);
-            impl_->state.last_error = "mpv_render_context_create failed";
-            return false;
-        }
-
-        impl_->mpv = handle;
-        impl_->render_ctx = rctx;
-        impl_->state.initialized = true;
-        impl_->state.last_error.clear();
-
-        mpv_set_wakeup_callback(handle, Impl::onMpvWakeup, impl_.get());
-        mpv_render_context_set_update_callback(rctx, Impl::onMpvRenderUpdate, impl_.get());
-
-        int64_t vol = impl_->state.volume;
-        mpv_set_option(handle, "volume", MPV_FORMAT_INT64, &vol);
 
         if (impl_->pending_load) {
             pending = std::move(impl_->pending_load);
@@ -1077,6 +1081,10 @@ void MPVCore::drawVideo(NVGcontext* vg, float x, float y, float width, float hei
 
     if (!ensureInitialized()) {
         return;
+    }
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (!impl_->ensureRenderContextLocked()) return;
     }
 
     const float scale = brls::Application::windowScale > 0 ? brls::Application::windowScale : 1.0f;
