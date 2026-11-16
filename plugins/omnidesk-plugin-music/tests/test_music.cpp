@@ -69,6 +69,41 @@ int testAudioOnlyLoadfileOptions() {
     return 0;
 }
 
+int testLyricsCacheKeyValidation(const fs::path& tmp) {
+    music_plugin::LyricsCacheStore cache((tmp / "lyrics-cache").string());
+    REQUIRE(cache.trackDir("../escape").empty());
+    REQUIRE(cache.trackDir("..").empty());
+    REQUIRE(cache.trackDir("/tmp/escape").empty());
+    REQUIRE(cache.trackDir(".hidden").empty());
+    REQUIRE(cache.trackDir("safe-key_1.2").find("lyrics/safe-key_1.2") != std::string::npos);
+
+    music_plugin::LyricBundle bundle;
+    bundle.signature = "../escape";
+    bundle.track.id = "123";
+    REQUIRE(!cache.saveLyrics(bundle));
+    REQUIRE(!cache.loadLyrics("../escape").has_value());
+    return 0;
+}
+
+int testAdamRequestValidation() {
+    music_plugin::AdamClient adam;
+    adam.setDeveloperTokenForTesting("test-token");
+    adam.setMediaUserToken("test-mut");
+
+    std::string lrc;
+    std::string error;
+    REQUIRE(!adam.fetchNativeLyrics("1\r\nX-Injected: 1", "cn", lrc, error));
+    REQUIRE(error.find("invalid") != std::string::npos);
+
+    music_plugin::MusicConfig cfg;
+    cfg.language = "zh-CN\r\nX-Injected: 1";
+    adam.configure(cfg);
+    error.clear();
+    REQUIRE(!adam.fetchNativeLyrics("1", "cn", lrc, error));
+    REQUIRE(error.find("invalid") != std::string::npos);
+    return 0;
+}
+
 class MockAdamTlsServer {
 public:
     MockAdamTlsServer() = default;
@@ -1569,6 +1604,8 @@ int main(int argc, char** argv) {
 
     int rc = 0;
     if (rc == 0) rc = testAudioOnlyLoadfileOptions();
+    if (rc == 0) rc = testLyricsCacheKeyValidation(tmp);
+    if (rc == 0) rc = testAdamRequestValidation();
     if (rc == 0) rc = testLrcAndBilingualParser();
     if (rc == 0) rc = testLrclibExactMatch();
     if (rc == 0) rc = testMockAdamAndLlmPipeline(tmp);

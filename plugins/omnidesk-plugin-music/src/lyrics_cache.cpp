@@ -2,6 +2,7 @@
 #include "music/lrc_parser.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -15,6 +16,18 @@ namespace music_plugin {
 namespace {
 
 constexpr size_t kMaxCacheFileBytes = 2 * 1024 * 1024;
+
+bool isSafeCacheKey(const std::string& key) {
+    if (key.empty() || key.size() > 128 || key == "." || key == ".." || key.front() == '.') {
+        return false;
+    }
+    for (unsigned char c : key) {
+        if (!std::isalnum(c) && c != '-' && c != '_' && c != '.') {
+            return false;
+        }
+    }
+    return true;
+}
 
 std::string utf16ToUtf8(const std::string& raw) {
     if (raw.size() < 2) return "";
@@ -53,7 +66,7 @@ void LyricsCacheStore::setBaseDir(std::string base_dir) {
 }
 
 std::string LyricsCacheStore::trackDir(const std::string& signature) const {
-    if (base_dir_.empty() || signature.empty()) return "";
+    if (base_dir_.empty() || !isSafeCacheKey(signature)) return "";
     return (fs::path(base_dir_) / "lyrics" / signature).string();
 }
 
@@ -307,7 +320,10 @@ size_t LyricsCacheStore::countCachedTracks() const {
     if (!fs::is_directory(p, ec)) return 0;
     size_t count = 0;
     for (const auto& entry : fs::directory_iterator(p, fs::directory_options::skip_permission_denied, ec)) {
-        if (entry.is_directory(ec) && fs::exists(entry.path() / "lyrics.json", ec)) ++count;
+        if (entry.is_directory(ec) && isSafeCacheKey(entry.path().filename().string()) &&
+            fs::exists(entry.path() / "lyrics.json", ec)) {
+            ++count;
+        }
     }
     return count;
 }

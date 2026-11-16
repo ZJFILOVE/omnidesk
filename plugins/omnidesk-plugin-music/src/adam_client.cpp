@@ -63,6 +63,32 @@ std::string trimCopy(const std::string& s) {
     return s.substr(b, e - b);
 }
 
+bool isSafeHttpMethod(const std::string& method) {
+    if (method.empty() || method.size() > 16) return false;
+    for (unsigned char c : method) {
+        if (!std::isupper(c)) return false;
+    }
+    return true;
+}
+
+bool isSafeHttpRequestTarget(const std::string& target) {
+    if (target.empty() || target.front() != '/') return false;
+    for (unsigned char c : target) {
+        if (c <= 0x20 || c == 0x7f) return false;
+    }
+    return true;
+}
+
+bool isSafeHttpHeaderValue(const std::string& value) {
+    for (unsigned char c : value) {
+        if (c == '\r' || c == '\n' || c == '\0' || c == 0x7f ||
+            (c < 0x20 && c != '\t')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string unquoteCopy(std::string s) {
     s = trimCopy(s);
     if (s.size() >= 2 &&
@@ -598,12 +624,23 @@ HttpResponse AdamClient::engineRequest(const std::string& method,
                                        const std::string& accept,
                                        int timeout_ms) {
     HttpResponse resp;
+    if (!isSafeHttpMethod(method) || !isSafeHttpRequestTarget(path) ||
+        !isSafeHttpHeaderValue(content_type) || !isSafeHttpHeaderValue(accept)) {
+        resp.error = "Adam request rejected: invalid method or request headers";
+        return resp;
+    }
+
     uint16_t port = 20025;
     std::string lang = "zh-CN";
     {
         std::lock_guard<std::mutex> lk(cfg_mutex_);
         port = static_cast<uint16_t>(cfg_.engine_port);
         lang = cfg_.language;
+    }
+    if (!isSafeHttpHeaderValue(lang) ||
+        (!api_token_env_.empty() && !isSafeHttpHeaderValue(api_token_env_))) {
+        resp.error = "Adam request rejected: invalid configured header value";
+        return resp;
     }
 
     if (!isLoopbackPortOwnedByUid(port, static_cast<uint32_t>(::geteuid()))) {
