@@ -1,5 +1,6 @@
 #include "omnidesk/host/host_settings_view.hpp"
 
+#include "omnidesk/host/auth_center_dialog.hpp"
 #include "omnidesk/host/curation_calendar_dialog.hpp"
 #include "omnidesk/host/curation_scheduler_dialog.hpp"
 #include "omnidesk/host/desktop_ui.hpp"
@@ -9,10 +10,12 @@
 namespace omnidesk::host {
 
 HostSettingsView::HostSettingsView(std::function<void()> on_theme_toggled,
-                                   std::function<void()> on_open_store)
+                                   std::function<void()> on_open_store,
+                                   std::function<void()> on_open_auth_center)
     : brls::Box(brls::Axis::COLUMN),
       on_theme_toggled_(std::move(on_theme_toggled)),
-      on_open_store_(std::move(on_open_store)) {
+      on_open_store_(std::move(on_open_store)),
+      on_open_auth_center_(std::move(on_open_auth_center)) {
     setGrow(1.0f);
     setPadding(22, 24, 18, 24);
     setBackgroundColor(ui::color("brls/background"));
@@ -29,11 +32,23 @@ HostSettingsView::HostSettingsView(std::function<void()> on_theme_toggled,
     scroll->setContentView(body_);
     addView(scroll);
 
+    auth_sub_token_ = AuthCenterManager::instance().subscribeChanges([this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire) && getVisibility() == brls::Visibility::VISIBLE) {
+                refresh();
+            }
+        });
+    });
+
     refresh();
 }
 
 HostSettingsView::~HostSettingsView() {
     alive_->store(false, std::memory_order_release);
+    if (auth_sub_token_ != 0) {
+        AuthCenterManager::instance().unsubscribeChanges(auth_sub_token_);
+        auth_sub_token_ = 0;
+    }
     if (catalog_request_) {
         catalog_request_->cancel();
     }
@@ -45,6 +60,58 @@ void HostSettingsView::refresh() {
     auto& kernel = HostKernel::instance();
     if (!kernel.isInitialized()) return;
 
+    // 0. Unified Account Auth & Automatic Browser Cookie Center
+    auto* auth_card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
+    auth_card->setMarginBottom(14);
+    auth_card->addView(ui::makeLabel("统一账号登录授权与浏览器自动 Cookie 中心", 18.5f, "brls/text"));
+
+    const auto auth_reports = AuthCenterManager::instance().inspectAll();
+    const auto auth_counts = AuthCenterManager::instance().summarizeCounts(auth_reports);
+    std::string auth_summary =
+        "需鉴权模块共 " + std::to_string(auth_counts.total_auth_plugins) + " 项  ·  ✓ 已登录授权 " +
+        std::to_string(auth_counts.authenticated_count) + " 项";
+    if (auth_counts.guest_cookie_warning_count > 0) {
+        auth_summary += "  ·  ⚠ 仅匿名访客 Cookie (假登录) " +
+                        std::to_string(auth_counts.guest_cookie_warning_count) + " 项";
+    }
+    if (auth_counts.missing_required_count > 0) {
+        auth_summary += "  ·  ✕ 待配置 " + std::to_string(auth_counts.missing_required_count) + " 项";
+    }
+    auth_summary +=
+        "\n集中查看全平台真实登录状态（告别匿名 Cookie 假绿灯），对所有 Cookie 类站点支持一键弹出 Chrome 登录并自动提取保存 Cookie（含 HttpOnly）。";
+
+    auto* auth_desc = ui::makeLabel(
+        auth_summary,
+        15.0f,
+        auth_counts.guest_cookie_warning_count > 0 ? "status/warn_fg" : "font/grey",
+        1.55f);
+    auth_desc->setMarginTop(8);
+    auth_desc->setMarginBottom(12);
+    auth_card->addView(auth_desc);
+
+    auto* auth_btn_row = new brls::Box(brls::Axis::ROW);
+    auto* open_auth_btn = ui::makeButton(
+        "打开统一授权与自动获取 Cookie 中心 ▸",
+        [this]() {
+            if (on_open_auth_center_) {
+                on_open_auth_center_();
+            } else {
+                AuthCenterDialog::open();
+            }
+        },
+        true, 38.0f);
+    open_auth_btn->setMarginRight(10);
+    auth_btn_row->addView(open_auth_btn);
+
+    auth_btn_row->addView(ui::makeButton(
+        "前往插件市场参数设置",
+        [this]() {
+            if (on_open_store_) on_open_store_();
+        },
+        false, 38.0f));
+    auth_card->addView(auth_btn_row);
+    body_->addView(auth_card);
+
     // 1. Appearance card
     auto* theme_card = ui::makeCard("desktop/surface", 20.0f, 12.0f);
     theme_card->setMarginBottom(14);
@@ -52,7 +119,7 @@ void HostSettingsView::refresh() {
     auto* t_desc = ui::makeLabel(
         std::string("当前主题: ") +
             (kernel.isDarkTheme() ? "Graphite 深色石墨 (#181718)" : "Paper 暖调纸感 (#F6F5F3)") +
-            " · 支持随时按键盘 `t` 瞬时切换",
+            " · 按 `t` 瞬时切换主题 · `Ctrl+1..4` 核心台 · `Alt+<字母>` 插件工作区 · `Ctrl+,` 系统设置",
         15.0f, "font/grey", 1.5f);
     t_desc->setMarginTop(8);
     t_desc->setMarginBottom(12);
@@ -67,7 +134,7 @@ void HostSettingsView::refresh() {
                                   true, 38.0f);
     toggle->setMarginRight(10);
     btn_row->addView(toggle);
-    btn_row->addView(ui::makeButton("查看键盘快捷键 (?)", []() {
+    btn_row->addView(ui::makeButton("查看全键盘快捷键 (?)", []() {
         DesktopInputController::showShortcutsHelp();
     }, false, 38.0f));
     theme_card->addView(btn_row);
@@ -126,7 +193,7 @@ void HostSettingsView::refresh() {
     open_sched_btn->setMarginRight(10);
     sched_row->addView(open_sched_btn);
 
-    sched_row->addView(ui::makeButton("📅 推荐日历", []() {
+    sched_row->addView(ui::makeButton("推荐日历", []() {
         CurationCalendarDialog::open();
     }, false, 38.0f));
     sched_card->addView(sched_row);

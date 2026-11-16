@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <sstream>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
@@ -62,6 +63,67 @@ std::string trimCopy(const std::string& s) {
     return s.substr(b, e - b);
 }
 
+std::string unquoteCopy(std::string s) {
+    s = trimCopy(s);
+    if (s.size() >= 2 &&
+        ((s.front() == '"' && s.back() == '"') || (s.front() == '\'' && s.back() == '\''))) {
+        s = trimCopy(s.substr(1, s.size() - 2));
+    }
+    return s;
+}
+
+std::string mapNumericStorefrontId(const std::string& raw) {
+    std::string trimmed = unquoteCopy(raw);
+    if (trimmed.empty()) return "";
+    size_t pos = 0;
+    while (pos < trimmed.size() && std::isdigit(static_cast<unsigned char>(trimmed[pos]))) {
+        ++pos;
+    }
+    if (pos == 0) {
+        std::string low = toLowerCopy(trimmed);
+        if (low.size() == 2 && std::isalpha(static_cast<unsigned char>(low[0])) &&
+            std::isalpha(static_cast<unsigned char>(low[1]))) {
+            return low;
+        }
+        return "";
+    }
+    const std::string code = trimmed.substr(0, pos);
+    static const std::unordered_map<std::string, std::string> kMap = {
+        {"143465", "cn"}, {"143441", "us"}, {"143462", "jp"}, {"143463", "hk"},
+        {"143470", "tw"}, {"143444", "gb"}, {"143464", "sg"}, {"143466", "kr"},
+        {"143442", "fr"}, {"143443", "de"}, {"143455", "ca"}, {"143460", "au"},
+        {"143450", "it"}, {"143454", "es"}, {"143452", "nl"}, {"143456", "se"},
+        {"143459", "ch"}, {"143503", "br"}, {"143468", "mx"}, {"143467", "in"},
+        {"143473", "my"}, {"143475", "th"}, {"143474", "ph"}, {"143476", "id"},
+        {"143471", "vn"}, {"143515", "mo"},
+    };
+    auto it = kMap.find(code);
+    return (it != kMap.end()) ? it->second : "";
+}
+
+std::string readSmallOwnedTextFile(const fs::path& p, size_t min_len, size_t max_len) {
+    int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return "";
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != ::geteuid() ||
+        st.st_size < 0 || static_cast<size_t>(st.st_size) > max_len) {
+        ::close(fd);
+        return "";
+    }
+    std::string buf(static_cast<size_t>(st.st_size), '\0');
+    size_t total = 0;
+    while (total < buf.size()) {
+        ssize_t n = ::read(fd, buf.data() + total, buf.size() - total);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        total += static_cast<size_t>(n);
+    }
+    ::close(fd);
+    buf.resize(total);
+    buf = unquoteCopy(buf);
+    return (buf.size() >= min_len) ? buf : "";
+}
+
 std::string formatArtworkUrl(std::string tpl, int size = 500) {
     if (tpl.empty()) return "";
     std::string s = std::to_string(size);
@@ -74,6 +136,8 @@ std::string formatArtworkUrl(std::string tpl, int size = 500) {
     };
     replaceAll("{w}", s);
     replaceAll("{h}", s);
+    replaceAll("{c}", "bb");
+    replaceAll("{f}", "jpg");
     return tpl;
 }
 
@@ -89,13 +153,17 @@ int connectLoopbackTimeout(uint16_t port, int timeout_ms) {
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (rc < 0 && errno != EINPROGRESS) {
+    if (rc < 0 && errno != EINPROGRESS && errno != EINTR) {
         ::close(fd);
         return -1;
     }
     if (rc != 0) {
-        struct pollfd pfd{fd, POLLOUT, 0};
-        if (::poll(&pfd, 1, timeout_ms) <= 0) {
+        int prc = 0;
+        do {
+            struct pollfd pfd{fd, POLLOUT, 0};
+            prc = ::poll(&pfd, 1, timeout_ms);
+        } while (prc < 0 && errno == EINTR);
+        if (prc <= 0) {
             ::close(fd);
             return -1;
         }
@@ -129,28 +197,28 @@ std::vector<uint8_t> getPeerDerCert(SSL* ssl) {
 
 
 int nosigpipeBioWrite(BIO* b, const char* data, int len) {
-    int fd = 0;
+    int fd = -1;
     BIO_get_fd(b, &fd);
     BIO_clear_retry_flags(b);
-    ssize_t n = ::send(fd, data, static_cast<size_t>(len), MSG_NOSIGNAL);
+    ssize_t n = -1;
+    do {
+        n = ::send(fd, data, static_cast<size_t>(len), MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
     if (n <= 0) {
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-            BIO_set_retry_write(b);
-        }
         return -1;
     }
     return static_cast<int>(n);
 }
 
 int nosigpipeBioRead(BIO* b, char* data, int len) {
-    int fd = 0;
+    int fd = -1;
     BIO_get_fd(b, &fd);
     BIO_clear_retry_flags(b);
-    ssize_t n = ::recv(fd, data, static_cast<size_t>(len), 0);
+    ssize_t n = -1;
+    do {
+        n = ::recv(fd, data, static_cast<size_t>(len), 0);
+    } while (n < 0 && errno == EINTR);
     if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            BIO_set_retry_read(b);
-        }
         return -1;
     }
     return static_cast<int>(n);
@@ -601,14 +669,35 @@ HttpResponse AdamClient::engineRequest(const std::string& method,
     }
     req << "\r\n" << body;
     std::string req_str = req.str();
-    SSL_write(ssl, req_str.data(), static_cast<int>(req_str.size()));
+    size_t total_written = 0;
+    while (total_written < req_str.size()) {
+        int wn = SSL_write(ssl,
+                           req_str.data() + total_written,
+                           static_cast<int>(req_str.size() - total_written));
+        if (wn > 0) {
+            total_written += static_cast<size_t>(wn);
+            continue;
+        }
+        int ssl_err = SSL_get_error(ssl, wn);
+        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+            continue;
+        }
+        break;
+    }
 
     std::string raw;
     char buf[8192];
     while (raw.size() < kMaxHttpBytes) {
         int n = SSL_read(ssl, buf, sizeof(buf));
-        if (n <= 0) break;
-        raw.append(buf, static_cast<size_t>(n));
+        if (n > 0) {
+            raw.append(buf, static_cast<size_t>(n));
+            continue;
+        }
+        int ssl_err = SSL_get_error(ssl, n);
+        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+            continue;
+        }
+        break;
     }
     SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); ::close(fd);
 
@@ -760,6 +849,109 @@ bool AdamClient::hasDeveloperToken() const {
     return !cachedOrEnvDeveloperToken().empty() || localWrapperAuthEnabled();
 }
 
+bool AdamClient::allowLocalAdamDrmFallback() const {
+    if (ampApiBaseUrl() != "https://amp-api.music.apple.com") {
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(cfg_mutex_);
+    return cfg_.auto_launch_engine || cfg_.engine_port == 20025 || cfg_.engine_data_dir_explicit;
+}
+
+std::string AdamClient::discoverLocalAdamMusicToken() const {
+    if (!allowLocalAdamDrmFallback()) return "";
+
+    std::string engine_data_dir;
+    bool explicit_dir = false;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        engine_data_dir = cfg_.engine_data_dir;
+        explicit_dir = cfg_.engine_data_dir_explicit;
+    }
+
+    std::vector<fs::path> drm_dirs;
+    if (!engine_data_dir.empty()) {
+        fs::path ed(engine_data_dir);
+        if (ed.has_parent_path()) {
+            drm_dirs.push_back(ed.parent_path() / "drm" / "files");
+        }
+        std::string cfg_raw = readSmallOwnedTextFile(ed / "config.yaml", 1, 65536);
+        if (!cfg_raw.empty()) {
+            std::istringstream iss(cfg_raw);
+            std::string line;
+            while (std::getline(iss, line)) {
+                size_t colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                std::string k = toLowerCopy(trimCopy(line.substr(0, colon)));
+                std::string v = unquoteCopy(line.substr(colon + 1));
+                if (k == "media-user-token" && v.size() >= 16) {
+                    return v;
+                }
+                if (k == "drm-base-dir" && !v.empty()) {
+                    drm_dirs.emplace_back(expandUserPath(v));
+                }
+            }
+        }
+    }
+    if (!explicit_dir) {
+        std::string def_drm = expandUserPath("~/.config/adam/drm/files");
+        if (!def_drm.empty()) drm_dirs.emplace_back(def_drm);
+    }
+
+    for (const auto& d : drm_dirs) {
+        std::string tok = readSmallOwnedTextFile(d / "MUSIC_TOKEN", 16, 16384);
+        if (!tok.empty()) return tok;
+    }
+    return "";
+}
+
+std::string AdamClient::discoverLocalAdamStorefront() const {
+    if (!allowLocalAdamDrmFallback()) return "";
+
+    std::string engine_data_dir;
+    bool explicit_dir = false;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        engine_data_dir = cfg_.engine_data_dir;
+        explicit_dir = cfg_.engine_data_dir_explicit;
+    }
+
+    std::vector<fs::path> drm_dirs;
+    std::string cfg_sf;
+    if (!engine_data_dir.empty()) {
+        fs::path ed(engine_data_dir);
+        if (ed.has_parent_path()) {
+            drm_dirs.push_back(ed.parent_path() / "drm" / "files");
+        }
+        std::string cfg_raw = readSmallOwnedTextFile(ed / "config.yaml", 1, 65536);
+        if (!cfg_raw.empty()) {
+            std::istringstream iss(cfg_raw);
+            std::string line;
+            while (std::getline(iss, line)) {
+                size_t colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                std::string k = toLowerCopy(trimCopy(line.substr(0, colon)));
+                std::string v = unquoteCopy(line.substr(colon + 1));
+                if (k == "drm-base-dir" && !v.empty()) {
+                    drm_dirs.emplace_back(expandUserPath(v));
+                } else if (k == "storefront" && v.size() == 2) {
+                    cfg_sf = toLowerCopy(v);
+                }
+            }
+        }
+    }
+    if (!explicit_dir) {
+        std::string def_drm = expandUserPath("~/.config/adam/drm/files");
+        if (!def_drm.empty()) drm_dirs.emplace_back(def_drm);
+    }
+
+    for (const auto& d : drm_dirs) {
+        std::string raw_sf = readSmallOwnedTextFile(d / "STOREFRONT_ID", 2, 128);
+        std::string mapped = mapNumericStorefrontId(raw_sf);
+        if (!mapped.empty()) return mapped;
+    }
+    return cfg_sf;
+}
+
 std::string AdamClient::resolveMediaUserTokenWithFallback() const {
     std::string mut = mediaUserToken();
     if (!mut.empty()) return mut;
@@ -767,7 +959,7 @@ std::string AdamClient::resolveMediaUserTokenWithFallback() const {
         mut = trimCopy(env_mut);
         if (!mut.empty()) return mut;
     }
-    return mut;
+    return discoverLocalAdamMusicToken();
 }
 
 std::string AdamClient::resolveMediaUserToken() const {
@@ -814,7 +1006,7 @@ void AdamClient::setAmpApiBaseUrlForTesting(const std::string& base_url) {
 
 bool AdamClient::pushTokensToEngine(std::string& error) {
     std::string dev = getDeveloperToken(false);
-    std::string mut = mediaUserToken();
+    std::string mut = resolveMediaUserTokenWithFallback();
     if (dev.empty() && mut.empty()) {
         error = "暂无可推送的 Developer JWT / media-user-token";
         return false;
@@ -831,9 +1023,22 @@ bool AdamClient::pushTokensToEngine(std::string& error) {
 }
 
 std::string AdamClient::effectiveStorefront(const std::string& override_sf) const {
-    if (!override_sf.empty()) return override_sf;
-    std::lock_guard<std::mutex> lk(cfg_mutex_);
-    return cfg_.storefront.empty() ? "us" : cfg_.storefront;
+    if (!override_sf.empty()) return toLowerCopy(override_sf);
+    bool sf_explicit = false;
+    std::string cfg_sf;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        sf_explicit = cfg_.storefront_explicit;
+        cfg_sf = cfg_.storefront;
+    }
+    if (sf_explicit && !cfg_sf.empty()) {
+        return cfg_sf;
+    }
+    std::string drm_sf = discoverLocalAdamStorefront();
+    if (!drm_sf.empty()) {
+        return drm_sf;
+    }
+    return cfg_sf.empty() ? "us" : cfg_sf;
 }
 
 DrmStatus AdamClient::getDrmStatus() {
@@ -926,7 +1131,7 @@ PlaybackSessionInfo AdamClient::createPlaybackSession(const std::string& asset_i
     }
 
     std::string dev = getDeveloperToken(false);
-    std::string mut = mediaUserToken();
+    std::string mut = resolveMediaUserTokenWithFallback();
     nlohmann::json req = {
         {"assetId", asset_id},
         {"capabilities", {
@@ -974,6 +1179,7 @@ PlaybackSessionInfo AdamClient::createPlaybackSession(const std::string& asset_i
     info.title = j.value("title", "");
     info.artist = j.value("artistName", "");
     info.album = j.value("albumName", "");
+    info.cover_url = formatArtworkUrl(j.value("artworkUrl", ""), 500);
     info.duration_sec = j.value("durationMs", 0) / 1000.0;
 
     std::string audio_rel = "/api/v1/playback/" + info.session_id + "/audio";
@@ -1000,41 +1206,196 @@ bool AdamClient::fetchMetadata(const std::string& asset_id,
                                std::string& error) {
     std::string dummy_err;
     pushTokensToEngine(dummy_err);
+    const std::string eff_sf = effectiveStorefront(storefront);
     std::string path = "/api/v1/metadata/" + asset_id;
-    if (!storefront.empty()) path += "?sf=" + storefront;
+    if (!eff_sf.empty()) path += "?sf=" + eff_sf;
     HttpResponse r = engineRequest("GET", path);
-    if (!r.ok) {
+    if (r.status == 404 && !eff_sf.empty()) {
+        const std::string alt_sf = (eff_sf == "cn") ? "us" : "cn";
+        r = engineRequest("GET", "/api/v1/metadata/" + asset_id + "?sf=" + alt_sf);
+    }
+    if (r.ok) {
+        auto j = nlohmann::json::parse(r.body, nullptr, false);
+        if (j.is_object()) {
+            out.id = j.value("id", asset_id);
+            out.kind = j.value("type", "song");
+            out.title = j.value("title", "");
+            out.artist = j.value("artistName", "");
+            out.album = j.value("albumName", "");
+            out.duration_sec = j.value("durationMs", 0) / 1000.0;
+            out.cover_url = formatArtworkUrl(j.value("artworkUrl", ""), 500);
+            out.has_lyrics = j.value("hasLyrics", false);
+            out.storefront = eff_sf;
+            if (j.contains("availableStreams") && j["availableStreams"].is_array() &&
+                !j["availableStreams"].empty()) {
+                const auto& s0 = j["availableStreams"][0];
+                std::string c = s0.value("codec", "");
+                int sr = s0.value("sampleRate", 0);
+                int bd = s0.value("bitDepth", 0);
+                if (bd > 0 && sr > 0) {
+                    out.is_lossless = true;
+                    out.is_hires = (sr > 48000 || bd > 16);
+                    out.quality_label = c + " " + std::to_string(bd) + "bit/" + std::to_string(sr / 1000) + "kHz";
+                } else if (!c.empty()) {
+                    out.quality_label = c;
+                }
+            }
+            if (!out.title.empty() || !out.cover_url.empty()) {
+                error.clear();
+                return true;
+            }
+        }
+    } else {
         error = r.error;
-        return false;
     }
-    auto j = nlohmann::json::parse(r.body, nullptr, false);
-    if (!j.is_object()) {
-        error = "metadata JSON invalid";
-        return false;
-    }
-    out.id = j.value("id", asset_id);
-    out.kind = j.value("type", "song");
-    out.title = j.value("title", "");
-    out.artist = j.value("artistName", "");
-    out.album = j.value("albumName", "");
-    out.duration_sec = j.value("durationMs", 0) / 1000.0;
-    out.cover_url = j.value("artworkUrl", "");
-    out.has_lyrics = j.value("hasLyrics", false);
-    if (j.contains("availableStreams") && j["availableStreams"].is_array() &&
-        !j["availableStreams"].empty()) {
-        const auto& s0 = j["availableStreams"][0];
-        std::string c = s0.value("codec", "");
-        int sr = s0.value("sampleRate", 0);
-        int bd = s0.value("bitDepth", 0);
-        if (bd > 0 && sr > 0) {
-            out.is_lossless = true;
-            out.is_hires = (sr > 48000 || bd > 16);
-            out.quality_label = c + " " + std::to_string(bd) + "bit/" + std::to_string(sr / 1000) + "kHz";
-        } else if (!c.empty()) {
-            out.quality_label = c;
+
+    // Fallback to Apple Music AMP catalog API across effective + alternate storefront
+    if (allowLocalAdamDrmFallback() || ampApiBaseUrl() != "https://amp-api.music.apple.com" ||
+        !cachedOrEnvDeveloperToken().empty()) {
+        std::string lang;
+        {
+            std::lock_guard<std::mutex> lk(cfg_mutex_);
+            lang = cfg_.language;
+        }
+        std::vector<std::string> sfs;
+        if (!eff_sf.empty()) sfs.push_back(eff_sf);
+        const std::string user_sf = effectiveStorefront();
+        if (!user_sf.empty() && std::find(sfs.begin(), sfs.end(), user_sf) == sfs.end()) {
+            sfs.push_back(user_sf);
+        }
+        for (const char* fb : {"cn", "us"}) {
+            if (std::find(sfs.begin(), sfs.end(), fb) == sfs.end()) sfs.emplace_back(fb);
+        }
+        for (const auto& cand_sf : sfs) {
+            HttpResponse ar = ampApiGet(
+                "/v1/catalog/" + cand_sf + "/songs/" + LrclibClient::urlEncode(asset_id) +
+                    "?l=" + LrclibClient::urlEncode(lang),
+                false);
+            if (!ar.ok) continue;
+            auto aj = nlohmann::json::parse(ar.body, nullptr, false);
+            if (!aj.is_object() || !aj.contains("data") || !aj["data"].is_array() || aj["data"].empty()) {
+                continue;
+            }
+            std::vector<ContainerItem> dc;
+            std::vector<MusicTrack> dt;
+            parseResourceNode(aj["data"][0], cand_sf, dc, dt);
+            if (!dt.empty()) {
+                out = std::move(dt.front());
+                error.clear();
+                return true;
+            }
         }
     }
-    return true;
+
+    if (error.empty()) error = "未找到曲目元数据";
+    return false;
+}
+
+bool AdamClient::fetchBatchMetadata(const std::vector<std::pair<std::string, std::string>>& id_and_sf,
+                                    std::unordered_map<std::string, MusicTrack>& out,
+                                    std::string& error) {
+    out.clear();
+    if (id_and_sf.empty()) return true;
+
+    std::string lang;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        lang = cfg_.language;
+    }
+    const std::string default_sf = effectiveStorefront();
+
+    std::unordered_map<std::string, std::vector<std::string>> by_sf;
+    for (const auto& [raw_id, raw_sf] : id_and_sf) {
+        std::string id = trimCopy(raw_id);
+        if (id.empty()) continue;
+        bool digits = std::all_of(id.begin(), id.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; });
+        if (!digits) continue;
+        std::string sf = effectiveStorefront(raw_sf);
+        if (sf.empty()) sf = default_sf.empty() ? "us" : default_sf;
+        auto& vec = by_sf[sf];
+        if (std::find(vec.begin(), vec.end(), id) == vec.end()) {
+            vec.push_back(std::move(id));
+        }
+    }
+    if (by_sf.empty()) return true;
+
+    auto queryBatchForSf = [&](const std::string& sf, const std::vector<std::string>& ids) {
+        for (size_t offset = 0; offset < ids.size(); offset += 50) {
+            const size_t end = std::min(ids.size(), offset + 50);
+            std::string joined;
+            for (size_t i = offset; i < end; ++i) {
+                if (!joined.empty()) joined.push_back(',');
+                joined += ids[i];
+            }
+            HttpResponse r = ampApiGet(
+                "/v1/catalog/" + sf + "/songs?ids=" + joined + "&l=" + LrclibClient::urlEncode(lang),
+                false);
+            if (!r.ok) {
+                if (error.empty()) error = r.error;
+                continue;
+            }
+            auto j = nlohmann::json::parse(r.body, nullptr, false);
+            if (!j.is_object() || !j.contains("data") || !j["data"].is_array()) continue;
+            std::vector<ContainerItem> dc;
+            std::vector<MusicTrack> dt;
+            for (const auto& item : j["data"]) {
+                parseResourceNode(item, sf, dc, dt);
+            }
+            for (auto& tr : dt) {
+                if (!tr.id.empty()) {
+                    out[tr.id] = std::move(tr);
+                }
+            }
+        }
+    };
+
+    const bool can_use_amp =
+        !cachedOrEnvDeveloperToken().empty() ||
+        allowLocalAdamDrmFallback() ||
+        ampApiBaseUrl() != "https://amp-api.music.apple.com";
+
+    if (can_use_amp) {
+        for (const auto& [sf, ids] : by_sf) {
+            queryBatchForSf(sf, ids);
+        }
+
+        // Retry any unresolved IDs against alternate storefront (cn <-> us)
+        std::unordered_map<std::string, std::vector<std::string>> retry_by_sf;
+        for (const auto& [sf, ids] : by_sf) {
+            std::string alt_sf = !default_sf.empty() && default_sf != sf ? default_sf : (sf == "cn" ? "us" : "cn");
+            for (const auto& id : ids) {
+                if (out.find(id) == out.end()) {
+                    auto& vec = retry_by_sf[alt_sf];
+                    if (std::find(vec.begin(), vec.end(), id) == vec.end()) {
+                        vec.push_back(id);
+                    }
+                }
+            }
+        }
+        for (const auto& [alt_sf, ids] : retry_by_sf) {
+            queryBatchForSf(alt_sf, ids);
+        }
+    }
+
+    // Fallback to local Go engine metadata endpoint for remaining unresolved items (up to 25)
+    size_t engine_fb_count = 0;
+    for (const auto& [sf, ids] : by_sf) {
+        for (const auto& id : ids) {
+            if (out.find(id) != out.end()) continue;
+            if (engine_fb_count >= 25) break;
+            ++engine_fb_count;
+            MusicTrack tr;
+            std::string merr;
+            if (fetchMetadata(id, sf, tr, merr) && !tr.id.empty()) {
+                out[id] = std::move(tr);
+            } else if (error.empty() && !merr.empty()) {
+                error = merr;
+            }
+        }
+    }
+
+    if (!out.empty()) error.clear();
+    return !out.empty() || error.empty();
 }
 
 bool AdamClient::fetchNativeLyrics(const std::string& asset_id,
@@ -1077,18 +1438,89 @@ bool AdamClient::fetchLibraryStatus(nlohmann::json& out, std::string& error) {
 std::vector<ContainerItem> AdamClient::fetchLibraryPlaylists(std::string& error) {
     std::vector<ContainerItem> out;
     HttpResponse r = engineRequest("GET", "/api/v1/library/playlists");
-    if (!r.ok) { error = r.error; return out; }
-    auto j = nlohmann::json::parse(r.body, nullptr, false);
-    if (!j.is_object() || !j.contains("playlists") || !j["playlists"].is_array()) return out;
-    for (const auto& p : j["playlists"]) {
-        if (!p.is_object()) continue;
-        ContainerItem c;
-        c.id = p.value("lid", "");
-        c.type = "library-playlists";
-        c.name = p.value("name", c.id);
-        c.track_count = p.value("trackCount", 0);
-        c.subtitle = std::to_string(c.track_count) + " 首歌曲";
-        if (!c.id.empty()) out.push_back(std::move(c));
+    if (r.ok) {
+        auto j = nlohmann::json::parse(r.body, nullptr, false);
+        if (j.is_object() && j.contains("playlists") && j["playlists"].is_array()) {
+            for (const auto& p : j["playlists"]) {
+                if (!p.is_object()) continue;
+                ContainerItem c;
+                c.id = p.value("lid", "");
+                c.type = "library-playlists";
+                c.name = p.value("name", c.id);
+                c.track_count = p.value("trackCount", 0);
+                c.cover_url = formatArtworkUrl(p.value("artworkUrl", ""), 500);
+                c.subtitle = c.track_count > 0
+                                 ? (std::to_string(c.track_count) + " 首歌曲")
+                                 : "Apple Music 资料库歌单";
+                if (!c.id.empty()) out.push_back(std::move(c));
+            }
+        }
+    } else {
+        error = r.error;
+    }
+
+    const bool all_missing_covers = !out.empty() &&
+        std::all_of(out.begin(), out.end(), [](const ContainerItem& c) { return c.cover_url.empty(); });
+    const bool can_enrich_from_amp =
+        allowLocalAdamDrmFallback() || ampApiBaseUrl() != "https://amp-api.music.apple.com";
+
+    if ((out.empty() || (all_missing_covers && can_enrich_from_amp)) &&
+        !resolveMediaUserTokenWithFallback().empty()) {
+        if (allowLocalAdamDrmFallback() && cachedOrEnvDeveloperToken().empty()) {
+            getDeveloperToken(false);
+        }
+        if (!cachedOrEnvDeveloperToken().empty()) {
+            std::string lang;
+            {
+                std::lock_guard<std::mutex> lk(cfg_mutex_);
+                lang = cfg_.language;
+            }
+            const std::string eff_sf = effectiveStorefront();
+            std::string next_pl = "/v1/me/library/playlists?limit=100&l=" + LrclibClient::urlEncode(lang);
+            std::vector<ContainerItem> amp_playlists;
+            std::vector<MusicTrack> dummy_tracks;
+            for (int page = 0; page < 3 && !next_pl.empty(); ++page) {
+                HttpResponse ar = ampApiGet(next_pl, true);
+                if (!ar.ok) {
+                    if (out.empty() && error.empty()) error = ar.error;
+                    break;
+                }
+                error.clear();
+                auto aj = nlohmann::json::parse(ar.body, nullptr, false);
+                if (!aj.is_object() || !aj.contains("data") || !aj["data"].is_array()) break;
+                for (const auto& item : aj["data"]) {
+                    size_t before = amp_playlists.size();
+                    parseResourceNode(item, eff_sf, amp_playlists, dummy_tracks);
+                    if (amp_playlists.size() > before && amp_playlists.back().subtitle.empty()) {
+                        amp_playlists.back().subtitle =
+                            amp_playlists.back().track_count > 0
+                                ? (std::to_string(amp_playlists.back().track_count) + " 首歌曲")
+                                : "Apple Music 资料库歌单";
+                    }
+                }
+                next_pl = aj.value("next", "");
+            }
+            if (!amp_playlists.empty()) {
+                if (out.empty()) {
+                    out = std::move(amp_playlists);
+                } else {
+                    std::unordered_map<std::string, ContainerItem> by_id;
+                    for (auto& ap : amp_playlists) by_id[ap.id] = std::move(ap);
+                    for (auto& c : out) {
+                        auto it = by_id.find(c.id);
+                        if (it != by_id.end()) {
+                            if (c.cover_url.empty() && !it->second.cover_url.empty()) {
+                                c.cover_url = it->second.cover_url;
+                            }
+                            if (c.track_count <= 0 && it->second.track_count > 0) {
+                                c.track_count = it->second.track_count;
+                                c.subtitle = std::to_string(c.track_count) + " 首歌曲";
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     return out;
 }
@@ -1097,6 +1529,44 @@ std::vector<MusicTrack> AdamClient::fetchLibraryPlaylistTracks(const std::string
     std::string dummy_err;
     pushTokensToEngine(dummy_err);
     std::vector<MusicTrack> out;
+
+    if (!playlist_id.empty() && !resolveMediaUserTokenWithFallback().empty()) {
+        if (allowLocalAdamDrmFallback() && cachedOrEnvDeveloperToken().empty()) {
+            getDeveloperToken(false);
+        }
+        if (!cachedOrEnvDeveloperToken().empty()) {
+            std::string lang;
+            {
+                std::lock_guard<std::mutex> lk(cfg_mutex_);
+                lang = cfg_.language;
+            }
+            const std::string eff_sf = effectiveStorefront();
+            std::string next_url = "/v1/me/library/playlists/" + LrclibClient::urlEncode(playlist_id) +
+                                   "/tracks?limit=100&l=" + LrclibClient::urlEncode(lang);
+            std::vector<ContainerItem> dummy_containers;
+            bool amp_ok = false;
+            for (int page = 0; page < 5 && !next_url.empty(); ++page) {
+                HttpResponse ar = ampApiGet(next_url, true);
+                if (!ar.ok) break;
+                amp_ok = true;
+                auto aj = nlohmann::json::parse(ar.body, nullptr, false);
+                if (!aj.is_object() || !aj.contains("data") || !aj["data"].is_array()) break;
+                for (const auto& item : aj["data"]) {
+                    size_t before = out.size();
+                    parseResourceNode(item, eff_sf, dummy_containers, out);
+                    if (out.size() > before && out.back().quality_label.empty()) {
+                        out.back().quality_label = "ALAC Lossless";
+                    }
+                }
+                next_url = aj.value("next", "");
+            }
+            if (amp_ok) {
+                error.clear();
+                return out;
+            }
+        }
+    }
+
     HttpResponse r = engineRequest("GET", "/api/v1/library/playlists/" + playlist_id + "/tracks");
     if (!r.ok) { error = r.error; return out; }
     auto j = nlohmann::json::parse(r.body, nullptr, false);
@@ -1267,6 +1737,10 @@ bool AdamClient::syncLibraryFromApple(nlohmann::json& stats_out, std::string& er
     nlohmann::json songs = nlohmann::json::array();
     nlohmann::json albums = nlohmann::json::array();
 
+    if (allowLocalAdamDrmFallback() && cachedOrEnvDeveloperToken().empty()) {
+        getDeveloperToken(false);
+    }
+
     std::string lang;
     {
         std::lock_guard<std::mutex> lk(cfg_mutex_);
@@ -1407,15 +1881,102 @@ void AdamClient::parseResourceNode(const nlohmann::json& node,
 FeedOutcome AdamClient::fetchRecommendations(const std::string& kind, int limit) {
     FeedOutcome out;
     out.feed_id = kind;
+
+    std::string lang;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        lang = cfg_.language;
+    }
+    const std::string sf = effectiveStorefront();
+
+    auto deduplicateOutcome = [](FeedOutcome& fo) {
+        std::unordered_set<std::string> seen_c;
+        std::vector<ContainerItem> uniq_c;
+        uniq_c.reserve(fo.containers.size());
+        for (auto& c : fo.containers) {
+            std::string key = c.type + ":" + c.id;
+            if (seen_c.insert(std::move(key)).second) {
+                uniq_c.push_back(std::move(c));
+            }
+        }
+        fo.containers = std::move(uniq_c);
+
+        std::unordered_set<std::string> seen_t;
+        std::vector<MusicTrack> uniq_t;
+        uniq_t.reserve(fo.tracks.size());
+        for (auto& t : fo.tracks) {
+            if (seen_t.insert(t.id).second) {
+                if (t.quality_label.empty() && t.kind != "mv") {
+                    t.quality_label = "ALAC Lossless";
+                }
+                uniq_t.push_back(std::move(t));
+            }
+        }
+        fo.tracks = std::move(uniq_t);
+    };
+
+    if (kind == "recently-played-tracks") {
+        const int eff_limit = std::clamp(limit, 1, 30);
+        if (allowLocalAdamDrmFallback() && cachedOrEnvDeveloperToken().empty()) {
+            getDeveloperToken(false);
+        }
+        HttpResponse ar = ampApiGet(
+            "/v1/me/recent/played/tracks?limit=" + std::to_string(eff_limit) +
+                "&l=" + LrclibClient::urlEncode(lang),
+            true);
+        if (!ar.ok) {
+            out.error = ar.error;
+            return out;
+        }
+        auto aj = nlohmann::json::parse(ar.body, nullptr, false);
+        if (!aj.is_object() || !aj.contains("data") || !aj["data"].is_array()) {
+            out.error = "最近播放曲目响应格式无效";
+            return out;
+        }
+        for (const auto& item : aj["data"]) {
+            parseResourceNode(item, sf, out.containers, out.tracks);
+        }
+        deduplicateOutcome(out);
+        out.ok = true;
+        return out;
+    }
+
     std::string dummy_err;
     pushTokensToEngine(dummy_err);
 
+    // Apple Music AMP API enforces limit <= 10 on heavy-rotation and recent/played
+    int eff_limit = std::clamp(limit, 1, 15);
     std::string path = "/api/v1/recommendations";
-    if (kind == "heavy-rotation") path = "/api/v1/recommendations/heavy-rotation";
-    else if (kind == "recently-played") path = "/api/v1/recommendations/recently-played";
-    path += "?limit=" + std::to_string(std::clamp(limit, 1, 50));
+    if (kind == "heavy-rotation") {
+        path = "/api/v1/recommendations/heavy-rotation";
+        eff_limit = std::clamp(limit, 1, 10);
+    } else if (kind == "recently-played") {
+        path = "/api/v1/recommendations/recently-played";
+        eff_limit = std::clamp(limit, 1, 10);
+    }
+    path += "?limit=" + std::to_string(eff_limit);
 
-    HttpResponse r = engineRequest("GET", path, "", "application/json", "application/json", 12000);
+    HttpResponse r = engineRequest("GET", path, "", "application/json", "application/json", 25000);
+    if (!r.ok && !resolveMediaUserTokenWithFallback().empty()) {
+        if (allowLocalAdamDrmFallback() && cachedOrEnvDeveloperToken().empty()) {
+            getDeveloperToken(false);
+        }
+        if (!cachedOrEnvDeveloperToken().empty()) {
+            std::string amp_path = "/v1/me/recommendations?limit=" + std::to_string(eff_limit) +
+                                   "&l=" + LrclibClient::urlEncode(lang);
+            if (kind == "heavy-rotation") {
+                amp_path = "/v1/me/history/heavy-rotation?limit=" + std::to_string(eff_limit) +
+                           "&l=" + LrclibClient::urlEncode(lang);
+            } else if (kind == "recently-played") {
+                amp_path = "/v1/me/recent/played?limit=" + std::to_string(eff_limit) +
+                           "&l=" + LrclibClient::urlEncode(lang);
+            }
+            HttpResponse ar = ampApiGet(amp_path, true);
+            if (ar.ok) {
+                r = std::move(ar);
+            }
+        }
+    }
     if (!r.ok) {
         out.error = r.error;
         return out;
@@ -1425,10 +1986,10 @@ FeedOutcome AdamClient::fetchRecommendations(const std::string& kind, int limit)
         out.error = "推荐响应格式无效";
         return out;
     }
-    std::string sf = effectiveStorefront();
     for (const auto& item : j["data"]) {
         parseResourceNode(item, sf, out.containers, out.tracks);
     }
+    deduplicateOutcome(out);
     out.ok = true;
     return out;
 }
@@ -1441,7 +2002,19 @@ bool AdamClient::fetchCatalogAlbum(const std::string& album_id,
     std::string dummy_err;
     pushTokensToEngine(dummy_err);
     std::string eff_sf = effectiveStorefront(sf);
+    std::string lang;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        lang = cfg_.language;
+    }
     HttpResponse r = engineRequest("GET", "/api/v1/catalog/albums/" + album_id + "?sf=" + eff_sf);
+    if (!r.ok && (allowLocalAdamDrmFallback() || !cachedOrEnvDeveloperToken().empty())) {
+        HttpResponse ar = ampApiGet(
+            "/v1/catalog/" + eff_sf + "/albums/" + LrclibClient::urlEncode(album_id) +
+                "?include=tracks&l=" + LrclibClient::urlEncode(lang),
+            false);
+        if (ar.ok) r = std::move(ar);
+    }
     if (!r.ok) { error = r.error; return false; }
     auto j = nlohmann::json::parse(r.body, nullptr, false);
     if (!j.is_object() || !j.contains("data") || !j["data"].is_array() || j["data"].empty()) {
@@ -1459,6 +2032,9 @@ bool AdamClient::fetchCatalogAlbum(const std::string& album_id,
             parseResourceNode(tr_node, eff_sf, c_tmp, tracks_out);
         }
     }
+    for (auto& tr : tracks_out) {
+        if (tr.cover_url.empty() && !album_out.cover_url.empty()) tr.cover_url = album_out.cover_url;
+    }
     return true;
 }
 
@@ -1470,7 +2046,31 @@ bool AdamClient::fetchCatalogPlaylist(const std::string& playlist_id,
     std::string dummy_err;
     pushTokensToEngine(dummy_err);
     std::string eff_sf = effectiveStorefront(sf);
-    HttpResponse r = engineRequest("GET", "/api/v1/catalog/playlists/" + playlist_id + "?sf=" + eff_sf);
+    std::string lang;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        lang = cfg_.language;
+    }
+
+    const bool is_personal_mix = (playlist_id.rfind("pl.pm-", 0) == 0);
+    HttpResponse r;
+    if (is_personal_mix && (allowLocalAdamDrmFallback() || !cachedOrEnvDeveloperToken().empty())) {
+        // Go engine's /api/v1/catalog/playlists omits Music-User-Token, which breaks personal mixes.
+        r = ampApiGet(
+            "/v1/catalog/" + eff_sf + "/playlists/" + LrclibClient::urlEncode(playlist_id) +
+                "?include=tracks&l=" + LrclibClient::urlEncode(lang),
+            false);
+    }
+    if (!r.ok) {
+        r = engineRequest("GET", "/api/v1/catalog/playlists/" + playlist_id + "?sf=" + eff_sf);
+    }
+    if (!r.ok && (allowLocalAdamDrmFallback() || !cachedOrEnvDeveloperToken().empty())) {
+        HttpResponse ar = ampApiGet(
+            "/v1/catalog/" + eff_sf + "/playlists/" + LrclibClient::urlEncode(playlist_id) +
+                "?include=tracks&l=" + LrclibClient::urlEncode(lang),
+            false);
+        if (ar.ok) r = std::move(ar);
+    }
     if (!r.ok) { error = r.error; return false; }
     auto j = nlohmann::json::parse(r.body, nullptr, false);
     if (!j.is_object() || !j.contains("data") || !j["data"].is_array() || j["data"].empty()) {
@@ -1488,6 +2088,9 @@ bool AdamClient::fetchCatalogPlaylist(const std::string& playlist_id,
             parseResourceNode(tr_node, eff_sf, c_tmp, tracks_out);
         }
     }
+    if (pl_out.cover_url.empty() && !tracks_out.empty() && !tracks_out.front().cover_url.empty()) {
+        pl_out.cover_url = tracks_out.front().cover_url;
+    }
     return true;
 }
 
@@ -1500,7 +2103,19 @@ bool AdamClient::fetchCatalogArtist(const std::string& artist_id,
     std::string dummy_err;
     pushTokensToEngine(dummy_err);
     std::string eff_sf = effectiveStorefront(sf);
+    std::string lang;
+    {
+        std::lock_guard<std::mutex> lk(cfg_mutex_);
+        lang = cfg_.language;
+    }
     HttpResponse r = engineRequest("GET", "/api/v1/catalog/artists/" + artist_id + "?sf=" + eff_sf);
+    if (!r.ok && (allowLocalAdamDrmFallback() || !cachedOrEnvDeveloperToken().empty())) {
+        HttpResponse ar = ampApiGet(
+            "/v1/catalog/" + eff_sf + "/artists/" + LrclibClient::urlEncode(artist_id) +
+                "?include=albums,songs&l=" + LrclibClient::urlEncode(lang),
+            false);
+        if (ar.ok) r = std::move(ar);
+    }
     if (!r.ok) { error = r.error; return false; }
     auto j = nlohmann::json::parse(r.body, nullptr, false);
     if (!j.is_object() || !j.contains("data") || !j["data"].is_array() || j["data"].empty()) {

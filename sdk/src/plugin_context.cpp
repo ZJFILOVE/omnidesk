@@ -97,10 +97,11 @@ bool PluginContext::registerWorkerMediaSource(const std::string& worker_id,
 bool PluginContext::registerWorkerTextSource(const std::string& worker_id,
                                              const std::string& source_id,
                                              const std::string& display_name,
-                                             const std::string& category) {
+                                             const std::string& category,
+                                             std::vector<TextChannel> channels) {
     if (!workers_ || worker_id.empty() || source_id.empty()) return false;
     auto src = std::make_shared<WorkerTextSource>(
-        *workers_, worker_id, plugin_id_, source_id, display_name, category);
+        *workers_, worker_id, plugin_id_, source_id, display_name, category, std::move(channels));
     domains_.registerTextSource(plugin_id_, std::move(src));
     return true;
 }

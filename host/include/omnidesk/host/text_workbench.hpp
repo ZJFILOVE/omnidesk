@@ -15,6 +15,8 @@
 
 namespace omnidesk::host {
 
+class RecyclingGrid;
+
 /**
  * Domain 2 Workbench ("文字 · 社区 · 科学期刊"):
  * High-readability typographic feed + bilingual reader + collapsible nested CommentTreeView
@@ -26,9 +28,11 @@ public:
                   std::function<void()> on_open_marketplace);
     ~TextWorkbench() override;
 
-    void refresh();
+    void refresh(bool force_remote = true);
     void promptSearch();
     void openExternalArticle(const nlohmann::json& payload);
+    void applyDateFilter(const std::string& date, const std::string& domain = "");
+    bool isShowingAuthPrompt() const;
 
 private:
     enum class BilingualMode {
@@ -40,15 +44,19 @@ private:
     void rebuildCategoryPills();
     void rebuildChannelPills();
     void rebuildFeed();
+    void rebuildFeedFooter();
     void rebuildReader();
     void renderCommentNode(brls::Box* parent, const CommentNode& node, int depth);
     void openArticle(const TextFeedItem& item);
     void showArticle(TextArticle article);
     void translateActiveArticle();
     void openActiveInChrome();
+    void openLoginInChrome(const std::string& url, const std::string& title, bool external_window = false);
+    void syncCookiesAndRefresh();
     void handoffJournalToBabelDoc();
     void promptDateFilter();
-    void loadCurrentFeed();
+    void loadCurrentFeed(bool force_refresh = false);
+    void loadMoreFeed();
     void finishRefresh();
     void loadProvenance();
 
@@ -71,14 +79,20 @@ private:
         std::vector<TextFeedItem> items;
         std::vector<TextChannel> channels;
         std::vector<std::pair<std::string, std::string>> recipes;
+        int page = 1;
+        bool has_more = true;
     };
     std::unordered_map<std::string, CachedTextFeed> feed_cache_;
+    int current_page_ = 1;
+    bool loading_more_ = false;
+    bool has_more_ = true;
     TextArticle active_article_;
     std::string active_article_source_id_;
     bool has_article_ = false;
     bool translating_ = false;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<CancelToken> feed_request_ = CancelToken::create();
+    std::shared_ptr<CancelToken> load_more_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> article_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> action_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> translate_request_;
@@ -88,7 +102,8 @@ private:
     brls::Box* channel_bar_ = nullptr;
     brls::Button* date_filter_btn_ = nullptr;
     brls::Label* status_label_ = nullptr;
-    brls::Box* feed_box_ = nullptr;
+    RecyclingGrid* feed_grid_ = nullptr;
+    brls::ScrollingFrame* reader_scroll_ = nullptr;
     brls::Box* reader_box_ = nullptr;
     brls::Box* reader_article_box_ = nullptr;
     CommentTreeView* comment_tree_ = nullptr;

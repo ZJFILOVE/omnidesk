@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <vector>
 #include "omnidesk/sdk.hpp"
+#include "omnidesk/host/recycling_grid.hpp"
+#include <yoga/Yoga.h>
 
 #define TEST_CHECK(cond)                                                               \
     do {                                                                               \
@@ -321,7 +323,7 @@ int main() {
         mpv.setChapters({});
     }
 
-    // 9. ImageCache (WebP + PNG decode + persistent disk LRU eviction + file:// async fetch)
+    // 9. ImageCache (WebP/PNG/SVG scaled decode + atomic disk LRU + in-flight coalescing)
     {
         static const uint8_t kWebp1x1[] = {
             0x52,0x49,0x46,0x46,0x1c,0x00,0x00,0x00,0x57,0x45,0x42,0x50,0x56,0x50,0x38,0x4c,0x10,0x00,
@@ -333,6 +335,9 @@ int main() {
             0x0d,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0xf8,0xcf,0xd0,0xf0,0x1f,0x00,0x06,0x00,0x02,0x7f,
             0x21,0x02,0x73,0x3b,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82
         };
+        static const char kSvg400x200[] =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"400\" height=\"200\" viewBox=\"0 0 400 200\">"
+            "<rect width=\"400\" height=\"200\" fill=\"#ff0080\"/></svg>";
 
         auto dw = omnidesk::ImageCache::decodeBytes(kWebp1x1, sizeof(kWebp1x1));
         TEST_CHECK(dw.ok && dw.width == 1 && dw.height == 1 && dw.rgba.size() == 4);
@@ -342,35 +347,73 @@ int main() {
         TEST_CHECK(dp.ok && dp.width == 1 && dp.height == 1 && dp.rgba.size() == 4);
         TEST_CHECK(dp.rgba[0] == 255 && dp.rgba[1] == 0 && dp.rgba[2] == 128 && dp.rgba[3] == 255);
 
+        auto dsvg_full = omnidesk::ImageCache::decodeBytes(
+            reinterpret_cast<const uint8_t*>(kSvg400x200), sizeof(kSvg400x200) - 1);
+        TEST_CHECK(dsvg_full.ok && dsvg_full.width == 400 && dsvg_full.height == 200);
+        auto dsvg_thumb = omnidesk::ImageCache::decodeBytes(
+            reinterpret_cast<const uint8_t*>(kSvg400x200), sizeof(kSvg400x200) - 1, 100, 100);
+        TEST_CHECK(dsvg_thumb.ok && dsvg_thumb.width == 100 && dsvg_thumb.height == 50);
+        TEST_CHECK(dsvg_thumb.rgba.size() == static_cast<size_t>(100 * 50 * 4));
+
         omnidesk::ImageCacheConfig ic_cfg;
         ic_cfg.cache_dir = (tmp_root / "imgcache").string();
         ic_cfg.max_disk_bytes = 128;
         omnidesk::ImageCache cache(ic_cfg);
 
-        std::vector<uint8_t> blob1(60, 0x11), blob2(60, 0x22), blob3(60, 0x33);
+        std::vector<uint8_t> blob1(60, 0x11), blob2(60, 0x22), blob3(60, 0x33), blob3_small(24, 0x44);
         TEST_CHECK(cache.putCachedRawBytes("k1", blob1.data(), blob1.size()));
+        TEST_CHECK(cache.diskUsageBytes() == 60);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
         TEST_CHECK(cache.putCachedRawBytes("k2", blob2.data(), blob2.size()));
+        TEST_CHECK(cache.diskUsageBytes() == 120);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
         TEST_CHECK(cache.putCachedRawBytes("k3", blob3.data(), blob3.size()));
         TEST_CHECK(cache.diskUsageBytes() <= 128);
         TEST_CHECK(cache.getCachedRawBytes("k3").has_value());
+        const size_t before_overwrite = cache.diskUsageBytes();
+        TEST_CHECK(cache.putCachedRawBytes("k3", blob3_small.data(), blob3_small.size()));
+        TEST_CHECK(cache.diskUsageBytes() + (60 - 24) == before_overwrite);
 
-        const fs::path webp_file = tmp_root / "test.webp";
+        const fs::path svg_file = tmp_root / "coalesce.svg";
         {
-            std::ofstream ofs(webp_file, std::ios::binary);
-            ofs.write(reinterpret_cast<const char*>(kWebp1x1), sizeof(kWebp1x1));
+            std::ofstream ofs(svg_file, std::ios::binary);
+            ofs.write(kSvg400x200, sizeof(kSvg400x200) - 1);
         }
-        std::atomic<bool> decoded_done{false};
-        omnidesk::DecodedImage fetched;
-        cache.fetchDecoded("file://" + webp_file.string(), [&](omnidesk::DecodedImage img) {
-            fetched = std::move(img);
-            decoded_done.store(true);
-        });
-        for (int w = 0; w < 100 && !decoded_done.load(); ++w) {
+        const std::string svg_url = "file://" + svg_file.string();
+
+        // Concurrent in-flight coalescing across cancelled + thumbnail + full-res subscribers
+        auto cancelled_tok = omnidesk::CancelToken::create();
+        cancelled_tok->cancel();
+        std::atomic<int> cancelled_calls{0};
+        std::atomic<int> completed_calls{0};
+        omnidesk::DecodedImage thumb_res;
+        omnidesk::DecodedImage thumb_res2;
+        omnidesk::DecodedImage full_res;
+
+        cache.fetchDecoded(svg_url, [&](omnidesk::DecodedImage) {
+            cancelled_calls.fetch_add(1);
+        }, {}, cancelled_tok, 96, 96);
+        cache.fetchDecoded(svg_url, [&](omnidesk::DecodedImage img) {
+            thumb_res = std::move(img);
+            completed_calls.fetch_add(1);
+        }, {}, nullptr, 96, 96);
+        cache.fetchDecoded(svg_url, [&](omnidesk::DecodedImage img) {
+            thumb_res2 = std::move(img);
+            completed_calls.fetch_add(1);
+        }, {}, nullptr, 96, 96);
+        cache.fetchDecoded(svg_url, [&](omnidesk::DecodedImage img) {
+            full_res = std::move(img);
+            completed_calls.fetch_add(1);
+        }, {}, nullptr, 0, 0);
+
+        for (int w = 0; w < 100 && completed_calls.load() < 3; ++w) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        TEST_CHECK(decoded_done.load() && fetched.ok && fetched.width == 1 && fetched.height == 1);
+        TEST_CHECK(cancelled_calls.load() == 0);
+        TEST_CHECK(completed_calls.load() == 3);
+        TEST_CHECK(thumb_res.ok && thumb_res.width <= 128 && thumb_res.height <= 64);
+        TEST_CHECK(thumb_res2.ok && thumb_res2.width == thumb_res.width && thumb_res2.height == thumb_res.height);
+        TEST_CHECK(full_res.ok && full_res.width == 400 && full_res.height == 200);
         cache.shutdown();
     }
 
@@ -2414,6 +2457,590 @@ for line in rx:
         fs::remove_all(srch_dir);
     }
 
-    std::cout << "test_sdk_bus: ALL PASSED (27/27 suites)\n";
+    // 28. CommonMark + GFM + Obsidian Markdown Parser & Excerpt Sanitizer
+    {
+        // Inline spans: bold, italic, snake_case safety, inline code, strike, highlight, links, wikilinks, math
+        const std::string inline_sample =
+            "Published in *Nature Chemical Biology* (`reviewer_synthesis`) with **anecdote：** "
+            "~~old~~ ==key== [DOI](https://doi.org/10.1038/s41589-026-0001-x) and "
+            "[[50-courses/English/Daily/2026-11-15|Daily 2026-11-15]] plus $x_1^2 + \\alpha$.";
+        const auto spans = omnidesk::parseMarkdownInlines(inline_sample);
+        bool saw_italic_journal = false;
+        bool saw_code_snake = false;
+        bool saw_cjk_bold = false;
+        bool saw_strike = false;
+        bool saw_highlight = false;
+        bool saw_doi_link = false;
+        bool saw_wikilink = false;
+        bool saw_math = false;
+        for (const auto& sp : spans) {
+            if (sp.italic && sp.text == "Nature Chemical Biology") saw_italic_journal = true;
+            if (sp.code && sp.text == "reviewer_synthesis") saw_code_snake = true;
+            if (sp.bold && sp.text == "anecdote：") saw_cjk_bold = true;
+            if (sp.strikethrough && sp.text == "old") saw_strike = true;
+            if (sp.highlight && sp.text == "key") saw_highlight = true;
+            if (sp.link_url == "https://doi.org/10.1038/s41589-026-0001-x" && sp.text == "DOI") saw_doi_link = true;
+            if (sp.link_url == "wikilink:50-courses/English/Daily/2026-11-15" && sp.text == "Daily 2026-11-15") {
+                saw_wikilink = true;
+            }
+            if (sp.math && sp.text.find("α") != std::string::npos) saw_math = true;
+        }
+        TEST_CHECK(saw_italic_journal);
+        TEST_CHECK(saw_code_snake);
+        TEST_CHECK(saw_cjk_bold);
+        TEST_CHECK(saw_strike);
+        TEST_CHECK(saw_highlight);
+        TEST_CHECK(saw_doi_link);
+        TEST_CHECK(saw_wikilink);
+        TEST_CHECK(saw_math);
+
+        // Bare snake_case outside backticks must NOT trigger emphasis
+        const auto snake_spans = omnidesk::parseMarkdownInlines("verification_method: creator_official_page");
+        for (const auto& sp : snake_spans) {
+            TEST_CHECK(!sp.italic && !sp.bold);
+        }
+        TEST_CHECK(omnidesk::stripMarkdownToPlainText("verification_method: creator_official_page") ==
+                   "verification_method: creator_official_page");
+
+        // Block-level AST: headings, Obsidian callouts (including foldable [!answer]-), loose & task lists, GFM table, code, math
+        const std::string doc_md = R"MD(# Weekly Long English — 2026-11-15
+
+> [!info] 来源与范围提醒
+> 本笔记基于 *Psyche* 长文整理。
+
+1. **The old question**
+   Why meaning feels elusive.
+
+2. **The reframing**
+   Treat meaning as a testable hypothesis.
+
+- [x] Read section 1
+- [ ] Write summary
+
+> [!answer]- 参考译文与解析
+> Meaningful work requires deliberate practice.
+
+| 项目 | 英文要求 |
+| :--- | ---: |
+| 复述 | 4-5 句 |
+| 立场 | 120 词 |
+
+```cpp
+int main() { return 0; }
+```
+
+$$
+\sum_{i=1}^{n} x_i = \beta
+$$
+)MD";
+        const auto blocks = omnidesk::parseMarkdownBlocks(doc_md);
+        bool has_h1 = false;
+        bool has_info_callout = false;
+        bool has_foldable_answer = false;
+        bool has_ordered_list = false;
+        bool has_task_list = false;
+        bool has_table = false;
+        bool has_code = false;
+        bool has_math_blk = false;
+        for (const auto& b : blocks) {
+            if (b.kind == omnidesk::MarkdownBlockKind::Heading && b.heading_level == 1) has_h1 = true;
+            if (b.kind == omnidesk::MarkdownBlockKind::Callout && b.callout_type == "info") {
+                has_info_callout = true;
+            }
+            if (b.kind == omnidesk::MarkdownBlockKind::Callout && b.callout_type == "answer" &&
+                b.callout_foldable && b.callout_default_collapsed) {
+                has_foldable_answer = true;
+            }
+            if (b.kind == omnidesk::MarkdownBlockKind::List && !b.list_items.empty() && b.list_items[0].ordered) {
+                if (b.list_items.size() == 2 && b.list_items[1].number == 2) has_ordered_list = true;
+            }
+            if (b.kind == omnidesk::MarkdownBlockKind::List && !b.list_items.empty() && b.list_items[0].task_state == 1) {
+                has_task_list = true;
+            }
+            if (b.kind == omnidesk::MarkdownBlockKind::Table && b.table_headers.size() == 2 &&
+                b.table_rows.size() == 2 &&
+                b.table_aligns[1] == omnidesk::MarkdownTableAlign::Right) {
+                has_table = true;
+            }
+            if (b.kind == omnidesk::MarkdownBlockKind::CodeBlock && b.code_lang == "cpp") has_code = true;
+            if (b.kind == omnidesk::MarkdownBlockKind::MathBlock && b.text.find("∑") != std::string::npos) {
+                has_math_blk = true;
+            }
+        }
+        TEST_CHECK(has_h1);
+        TEST_CHECK(has_info_callout);
+        TEST_CHECK(has_foldable_answer);
+        TEST_CHECK(has_ordered_list);
+        TEST_CHECK(has_task_list);
+        TEST_CHECK(has_table);
+        TEST_CHECK(has_code);
+        TEST_CHECK(has_math_blk);
+
+        // Excerpt sanitizer strips # headings and [!callout] header tags while preserving clean inline *emphasis*
+        const std::string ex = omnidesk::sanitizeMarkdownExcerpt(doc_md, 120);
+        TEST_CHECK(ex.find("# Weekly") == std::string::npos);
+        TEST_CHECK(ex.find("[!info]") == std::string::npos);
+        TEST_CHECK(ex.find("*Psyche*") != std::string::npos);
+    }
+
+    // 29. MPVCore loopback TLS/proxy options & PlaybackCoordinator deferred Apple Music resolution for AI-curated tracks
+    {
+        omnidesk::MediaRequestOptions loop_opts;
+        loop_opts.url = "https://127.0.0.1:20025/api/v1/playback/sess-1/audio";
+        const std::string loop_loadfile = omnidesk::MPVCore::buildLoadfileOptions(loop_opts);
+        TEST_CHECK(loop_loadfile.find("tls-verify=no") != std::string::npos);
+        TEST_CHECK(loop_loadfile.find("http-proxy=\"\"") != std::string::npos);
+        TEST_CHECK(loop_loadfile.find("network-timeout=30") != std::string::npos);
+
+        omnidesk::MediaRequestOptions ext_opts;
+        ext_opts.url = "https://cdn.example.com/audio.flac";
+        const std::string ext_loadfile = omnidesk::MPVCore::buildLoadfileOptions(ext_opts);
+        TEST_CHECK(ext_loadfile.find("tls-verify=no") == std::string::npos);
+        TEST_CHECK(ext_loadfile.find("network-timeout=10") != std::string::npos);
+
+        const std::string pb_dir =
+            (fs::temp_directory_path() / ("omnidesk_am_pb_test_" + std::to_string(::getpid()))).string();
+        fs::remove_all(pb_dir);
+        fs::create_directories(pb_dir);
+
+        omnidesk::CapabilityRegistry am_caps;
+        omnidesk::EntityBus am_bus;
+        omnidesk::JobCenter am_jobs(&am_bus, 1);
+        omnidesk::UiTaskRunner am_ui(2);
+        omnidesk::MPVCore am_mpv;
+
+        std::mutex resolved_mu;
+        std::vector<std::pair<std::string, std::string>> playurl_calls;
+        am_caps.registerCapability("media.source.v1", "plugin-music",
+            [&](const nlohmann::json& req) -> omnidesk::CapabilityResult {
+                const std::string act = req.value("action", "");
+                const std::string sid = req.value("id", "");
+                const std::string sf = req.value("storefront", "");
+                if (act == "playurl") {
+                    {
+                        std::lock_guard<std::mutex> lk(resolved_mu);
+                        playurl_calls.emplace_back(sid, sf);
+                    }
+                    return {true, {
+                        {"id", sid},
+                        {"storefront", sf},
+                        {"audio_url", "https://127.0.0.1:20025/api/v1/playback/sess-" + sid + "/audio"},
+                        {"cover_url", "https://is1-ssl.mzstatic.com/image/thumb/" + sid + "/600x600bb.jpg"},
+                        {"duration_sec", 342.0},
+                        {"quality_label", "ALAC 24bit/96kHz"},
+                        {"album", "De Todas las Flores"},
+                    }, "", "plugin-music", false};
+                }
+                if (act == "lyrics") {
+                    return {true, {
+                        {"id", sid},
+                        {"lines", nlohmann::json::array({
+                            {{"time_sec", 12.5}, {"original", "Canto a la vida"}, {"translation", "向生命歌唱"}},
+                        })},
+                    }, "", "plugin-music", false};
+                }
+                return {false, {}, "unsupported", "plugin-music", false};
+            });
+
+        auto& coord = omnidesk::PlaybackCoordinator::instance();
+        coord.configure(pb_dir + "/resume.json", &am_caps, &am_bus, &am_jobs, &am_ui, &am_mpv);
+
+        omnidesk::PlaybackTrack t1;
+        t1.item = {"am-cn-1643009587", "plugin-ai-curator", "Muerte", "Natalia Lafourcade",
+                   "music", "Apple Music CN", "", "https://music.apple.com/cn/song/1643009587",
+                   "ALAC", 0.0, 0.0, 0, false,
+                   {{"apple_music_song_id", "1643009587"}, {"storefront", "cn"}, {"curation_mode", "daily_immutable"}}};
+        t1.options.url = t1.item.play_url;
+
+        omnidesk::PlaybackTrack t2;
+        t2.item = {"ix-am-1833283533", "plugin-ai-curator", "Tobiume", "Susumu Yokota",
+                   "music", "Apple Music JP", "", "https://music.apple.com/jp/album/sakura/1833283500?i=1833283533",
+                   "ALAC", 0.0, 0.0, 0, false,
+                   {{"curation_mode", "interactive_ephemeral"}}};
+        t2.options.url = t2.item.play_url;
+
+        uint64_t lease = coord.playMusicQueue("host.media_workbench", {t1, t2}, 0);
+        TEST_CHECK(lease != 0);
+        // Must NEVER load the HTML catalog page into MPVCore
+        TEST_CHECK(am_mpv.state().current_url.find("music.apple.com") == std::string::npos);
+
+        for (int i = 0; i < 200; ++i) {
+            if (am_mpv.state().current_url.find("sess-1643009587/audio") != std::string::npos &&
+                !coord.state().active_track.lyrics.empty()) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        auto st1 = coord.state();
+        TEST_CHECK(st1.active_role == omnidesk::PlaybackRole::BackgroundMusic);
+        TEST_CHECK(am_mpv.state().current_url == "https://127.0.0.1:20025/api/v1/playback/sess-1643009587/audio");
+        TEST_CHECK(st1.active_track.item.cover_url.find("1643009587") != std::string::npos);
+        TEST_CHECK(st1.active_track.item.duration_sec > 300.0);
+        TEST_CHECK(st1.active_track.item.quality_label == "ALAC 24bit/96kHz");
+        TEST_CHECK(st1.active_track.lyrics.size() == 1 && st1.active_track.lyrics[0].translation == "向生命歌唱");
+
+        // Advance to second track with ?i=1833283533 and storefront jp
+        coord.nextTrack();
+        for (int i = 0; i < 200; ++i) {
+            if (am_mpv.state().current_url.find("sess-1833283533/audio") != std::string::npos) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST_CHECK(am_mpv.state().current_url == "https://127.0.0.1:20025/api/v1/playback/sess-1833283533/audio");
+        {
+            std::lock_guard<std::mutex> lk(resolved_mu);
+            TEST_CHECK(playurl_calls.size() == 2);
+            TEST_CHECK(playurl_calls[0].first == "1643009587" && playurl_calls[0].second == "cn");
+            TEST_CHECK(playurl_calls[1].first == "1833283533" && playurl_calls[1].second == "jp");
+        }
+
+        coord.shutdown();
+        am_mpv.shutdown();
+        am_ui.shutdown(1000);
+        am_jobs.shutdown(1000);
+        fs::remove_all(pb_dir);
+    }
+
+    // 30. WorkerMediaSource / WorkerTextSource metadata caching & reload invalidation
+    {
+        const fs::path meta_dir =
+            fs::temp_directory_path() / ("omnidesk_meta_cache_" + std::to_string(::getpid()));
+        fs::remove_all(meta_dir, ec);
+        fs::create_directories(meta_dir, ec);
+        const fs::path meta_script = meta_dir / "worker_meta_cache.py";
+        {
+            std::ofstream ofs(meta_script);
+            ofs << R"PY(
+import json, os, sys
+
+ver = os.environ.get("OMNIDESK_META_VER", "v1")
+for line in sys.stdin:
+    s = line.strip()
+    if not s:
+        continue
+    req = json.loads(s)
+    op = req.get("op", "")
+    sid = req.get("source_id", "")
+    if op == "media.categories":
+        cats = [] if sid == "empty-media" else ["video", f"cat-{ver}"]
+        print(json.dumps({"ok": True, "data": {"categories": cats}}), flush=True)
+    elif op == "text.channels":
+        chans = [] if sid == "empty-text" else [
+            {"id": "hot", "name": f"Hot-{ver}", "badge": "10", "requires_auth": False},
+            {"id": "latest", "name": "Latest", "badge": "", "requires_auth": False},
+        ]
+        print(json.dumps({"ok": True, "data": {"channels": chans}}), flush=True)
+    else:
+        print(json.dumps({"ok": False, "data": {}, "error": "unknown op"}), flush=True)
+)PY";
+        }
+        TEST_CHECK(fs::exists(meta_script));
+
+        omnidesk::WorkerSupervisor meta_sup;
+        omnidesk::WorkerSpec spec;
+        spec.worker_id = "meta-worker";
+        spec.plugin_id = "plugin-meta";
+        spec.executable = "python3";
+        spec.args = {"-u", meta_script.string()};
+        spec.env = {{"OMNIDESK_META_VER", "v1"}};
+        spec.idle_timeout_ms = 200;
+        spec.stop_grace_ms = 200;
+        TEST_CHECK(meta_sup.registerWorker(spec));
+
+        omnidesk::WorkerMediaSource msrc(meta_sup, "meta-worker", "plugin-meta", "m-src", "Media");
+        omnidesk::WorkerMediaSource msrc_empty(meta_sup, "meta-worker", "plugin-meta", "empty-media", "EmptyMedia");
+        omnidesk::WorkerTextSource tsrc(meta_sup, "meta-worker", "plugin-meta", "t-src", "Text", "multi");
+        omnidesk::WorkerTextSource tsrc_empty(meta_sup, "meta-worker", "plugin-meta", "empty-text", "EmptyText", "blog");
+
+        // First access triggers exactly 1 IPC per uncached source; repeated calls hit memory cache
+        auto cats1 = msrc.categories();
+        TEST_CHECK(cats1.size() == 2 && cats1[1] == "cat-v1");
+        const uint64_t reqs_after_m1 = meta_sup.status("meta-worker")->requests_served;
+        TEST_CHECK(reqs_after_m1 == 1);
+        for (int i = 0; i < 5; ++i) {
+            auto cats_cached = msrc.categories();
+            TEST_CHECK(cats_cached == cats1);
+        }
+        TEST_CHECK(meta_sup.status("meta-worker")->requests_served == reqs_after_m1);
+
+        auto chans1 = tsrc.channels();
+        TEST_CHECK(chans1.size() == 2 && chans1[0].id == "hot" && chans1[0].name == "Hot-v1");
+        const uint64_t reqs_after_t1 = meta_sup.status("meta-worker")->requests_served;
+        TEST_CHECK(reqs_after_t1 == 2);
+        for (int i = 0; i < 5; ++i) {
+            auto chans_cached = tsrc.channels();
+            TEST_CHECK(chans_cached.size() == 2 && chans_cached[0].name == "Hot-v1");
+        }
+        TEST_CHECK(meta_sup.status("meta-worker")->requests_served == reqs_after_t1);
+
+        // Empty array responses ("categories": [] / "channels": []) must also be cached cleanly
+        TEST_CHECK(msrc_empty.categories().empty());
+        TEST_CHECK(tsrc_empty.channels().empty());
+        const uint64_t reqs_after_empty = meta_sup.status("meta-worker")->requests_served;
+        TEST_CHECK(reqs_after_empty == 4);
+        TEST_CHECK(msrc_empty.categories().empty());
+        TEST_CHECK(tsrc_empty.channels().empty());
+        TEST_CHECK(meta_sup.status("meta-worker")->requests_served == reqs_after_empty);
+
+        // Let idle watchdog stop child process; reading cached metadata must NOT respawn child
+        for (int w = 0; w < 30; ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            if (!meta_sup.status("meta-worker")->running) break;
+        }
+        TEST_CHECK(!meta_sup.status("meta-worker")->running);
+        TEST_CHECK(msrc.categories().size() == 2);
+        TEST_CHECK(tsrc.channels().size() == 2);
+        TEST_CHECK(!meta_sup.status("meta-worker")->running);
+
+        // Explicit invalidateMetadataCache() forces a fresh IPC on next read
+        tsrc.invalidateMetadataCache();
+        TEST_CHECK(tsrc.channels().size() == 2);
+        TEST_CHECK(meta_sup.status("meta-worker")->requests_served == reqs_after_empty + 1);
+
+        // Re-registering the worker (simulating worker/plugin reload) automatically invalidates cache
+        spec.env = {{"OMNIDESK_META_VER", "v2"}};
+        TEST_CHECK(meta_sup.registerWorker(spec));
+        auto cats2 = msrc.categories();
+        auto chans2 = tsrc.channels();
+        TEST_CHECK(cats2.size() == 2 && cats2[1] == "cat-v2");
+        TEST_CHECK(chans2.size() == 2 && chans2[0].name == "Hot-v2");
+        TEST_CHECK(meta_sup.status("meta-worker")->requests_served == 2);
+        // Subsequent reads on v2 remain cached
+        TEST_CHECK(msrc.categories()[1] == "cat-v2");
+        TEST_CHECK(tsrc.channels()[0].name == "Hot-v2");
+        TEST_CHECK(meta_sup.status("meta-worker")->requests_served == 2);
+
+        meta_sup.stopAll();
+        fs::remove_all(meta_dir, ec);
+    }
+
+    // 31. SearchIndexService prepared-statement cache, file mtime skip & scoped incremental hydration
+    {
+        const fs::path inc_dir =
+            fs::temp_directory_path() / ("omnidesk_search_inc_" + std::to_string(::getpid()));
+        fs::remove_all(inc_dir, ec);
+        const fs::path vault_dir = inc_dir / "curation" / "repos" / "obsidian-vault" / "News" / "Daily";
+        const fs::path music_dir = inc_dir / "curation" / "repos" / "music-daily" / "recommendations";
+        fs::create_directories(vault_dir, ec);
+        fs::create_directories(music_dir, ec);
+
+        const fs::path note1 = vault_dir / "2026-11-10.md";
+        const fs::path note2 = vault_dir / "2026-11-11.md";
+        {
+            std::ofstream f1(note1);
+            f1 << "# Incremental Vault Alpha\nFirst archival note body with trigram searchable content.\n";
+            std::ofstream f2(note2);
+            f2 << "# Incremental Vault Beta\nSecond archival note body.\n";
+            std::ofstream fm(music_dir / "2026-11-10.json");
+            fm << R"({"date":"2026-11-10","tracks":[{"id":"trk-inc-1","title":"Nocturne Incremental","artist":"Ryuichi Sakamoto","review":"静谧钢琴音景"}]})";
+        }
+
+        omnidesk::DomainRegistry inc_dom;
+        omnidesk::CapabilityRegistry inc_caps;
+        omnidesk::SearchIndexService inc_idx;
+        TEST_CHECK(inc_idx.open((inc_dir / "search_inc.db").string()));
+
+        // Prepared statement compilation count stays bounded across repeated upserts & deletes
+        const size_t compiles_after_open = inc_idx.preparedCompileCount();
+        TEST_CHECK(compiles_after_open >= 8);
+        for (int i = 0; i < 40; ++i) {
+            omnidesk::SearchDocument d;
+            d.doc_id = "bench:" + std::to_string(i);
+            d.kind = "article";
+            d.domain = "text";
+            d.source_id = "plugin-bench";
+            d.title = "Prepared Cache Item " + std::to_string(i);
+            d.body = "Reusable sqlite3_stmt verification payload " + std::to_string(i);
+            TEST_CHECK(inc_idx.upsert(d));
+        }
+        const size_t compiles_after_upserts = inc_idx.preparedCompileCount();
+        TEST_CHECK(compiles_after_upserts == compiles_after_open);
+
+        // Re-upserting identical batch performs 0 SQLite row writes
+        omnidesk::SearchDocument same_doc;
+        same_doc.doc_id = "bench:0";
+        same_doc.kind = "article";
+        same_doc.domain = "text";
+        same_doc.source_id = "plugin-bench";
+        same_doc.title = "Prepared Cache Item 0";
+        same_doc.body = "Reusable sqlite3_stmt verification payload 0";
+        TEST_CHECK(inc_idx.upsert(same_doc));
+        TEST_CHECK(inc_idx.lastWriteCount() == 0);
+
+        for (int i = 0; i < 10; ++i) {
+            TEST_CHECK(inc_idx.remove("bench:" + std::to_string(i)));
+        }
+        TEST_CHECK(inc_idx.preparedCompileCount() == compiles_after_open);
+
+        // Initial archive + command hydration writes all new documents
+        const size_t h1 = inc_idx.hydrateEcosystem(&inc_dom, &inc_caps, inc_dir.string(), inc_dir.string());
+        TEST_CHECK(h1 >= 3);
+        TEST_CHECK(inc_idx.lastWriteCount() >= 3);
+
+        // Immediate second hydration with unchanged files + unchanged commands performs 0 DB/FTS5 writes
+        const size_t h2 = inc_idx.hydrateEcosystem(&inc_dom, &inc_caps, inc_dir.string(), inc_dir.string());
+        TEST_CHECK(h2 >= 3);
+        TEST_CHECK(inc_idx.lastWriteCount() == 0);
+
+        // Modify only note2 (changing size & content) and run scoped archive incremental hydration:
+        // note1 and 2026-11-10.json are skipped via source_file_state, so exactly 1 row is written!
+        {
+            std::ofstream f2(note2, std::ios::trunc);
+            f2 << "# Incremental Vault Beta Updated\nModified body with QuantumSuperpositionToken keyword and larger size.\n";
+        }
+        omnidesk::SearchHydrateOptions arch_only;
+        arch_only.scopes = omnidesk::kHydrateArchives;
+        const size_t h3 = inc_idx.hydrateIncremental(
+            &inc_dom, &inc_caps, inc_dir.string(), inc_dir.string(), arch_only);
+        TEST_CHECK(h3 >= 1);
+        TEST_CHECK(inc_idx.lastWriteCount() == 1);
+
+        omnidesk::SearchQueryOptions q_opts;
+        q_opts.query = "QuantumSuperpositionToken";
+        auto hits = inc_idx.search(q_opts);
+        TEST_CHECK(hits.size() == 1 && hits[0].title == "2026-11-11 · Daily");
+
+        inc_idx.close();
+        fs::remove_all(inc_dir, ec);
+    }
+
+    // 32. MarkdownRichTextView O(N) long-token wrapping & layout-time link_boxes hitTest without draw()
+    {
+        std::string huge_path(5200, 'a');
+        const std::string huge_url = "https://example.com/archive/" + huge_path;
+        const std::string md_text = "[" + huge_url + "](" + huge_url + ")";
+
+        omnidesk::MarkdownStyle st;
+        st.font_size = 16.0f;
+        st.line_height = 1.5f;
+        st.interactive_links = true;
+
+        auto* root = new brls::Box(brls::Axis::COLUMN);
+        root->setWidth(360.0f);
+        root->setHeight(2000.0f);
+        auto* rich = new omnidesk::MarkdownRichTextView(md_text, st);
+        root->addView(rich);
+
+        const auto t_start = std::chrono::steady_clock::now();
+        YGNodeCalculateLayout(root->getYGNode(), 360.0f, 2000.0f, YGDirectionLTR);
+        rich->onLayout();
+        YGNodeCalculateLayout(root->getYGNode(), 360.0f, 2000.0f, YGDirectionLTR);
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_start).count();
+
+        // O(N) wrapping of 5,200+ char unspaced token must finish in a few milliseconds and wrap across many lines
+        TEST_CHECK(elapsed_ms < 250);
+        TEST_CHECK(rich->getHeight() > 200.0f);
+
+        // Verify link_boxes are already populated during layout (before any NanoVG draw() call!)
+        brls::Point probe{rich->getX() + 24.0f, rich->getY() + 12.0f};
+        TEST_CHECK(rich->hitTest(probe) == rich);
+
+        delete root;
+    }
+
+    // 33. RecyclingGrid viewport virtualization, cell reuse pool & notifyDataChanged incremental pagination
+    {
+        class BenchCell final : public omnidesk::host::RecyclingGridCell {
+        public:
+            int bound_value = -1;
+            int prepare_calls = 0;
+            BenchCell() : RecyclingGridCell(brls::Axis::COLUMN) {
+                setFocusable(true);
+            }
+            void prepareForReuse() override { ++prepare_calls; }
+        };
+
+        class BenchDataSource final : public omnidesk::host::RecyclingGridDataSource {
+        public:
+            size_t count = 1000;
+            size_t bind_calls = 0;
+
+            size_t getItemCount() override { return count; }
+            omnidesk::host::RecyclingGridCell* cellForRow(
+                omnidesk::host::RecyclingGrid* recycler, size_t index) override {
+                auto* cell = static_cast<BenchCell*>(recycler->dequeueReusableCell("bench"));
+                cell->bound_value = static_cast<int>(index);
+                ++bind_calls;
+                return cell;
+            }
+        };
+
+        // 33a. Single-column virtualized feed list (1,000 items)
+        {
+            auto* grid = new omnidesk::host::RecyclingGrid();
+            grid->setWidth(960.0f);
+            grid->setHeight(600.0f);
+            grid->setSpanCount(1);
+            grid->setEstimatedRowHeight(110.0f);
+            grid->setEstimatedRowSpace(10.0f);
+            grid->setPreFetchLine(2);
+            grid->registerCell("bench", []() { return new BenchCell(); });
+
+            auto* ds = new BenchDataSource();
+            grid->setDataSource(ds, true);
+            YGNodeCalculateLayout(grid->getYGNode(), 960.0f, 600.0f, YGDirectionLTR);
+            grid->onLayout();
+
+            TEST_CHECK(grid->totalItemCount() == 1000);
+            TEST_CHECK(grid->mountedCellCount() >= 5 && grid->mountedCellCount() <= 14);
+            TEST_CHECK(grid->allocatedCellCount() <= 16);
+
+            // Scroll across multiple viewports through the 1,000-item list: cells must be recycled, not reallocated
+            for (float scroll_y : {1800.0f, 7200.0f, 24000.0f, 64000.0f, 110000.0f}) {
+                grid->setContentOffsetY(scroll_y, false);
+                grid->onLayout();
+                TEST_CHECK(grid->mountedCellCount() >= 5 && grid->mountedCellCount() <= 14);
+                TEST_CHECK(grid->allocatedCellCount() <= 20);
+            }
+            TEST_CHECK(grid->reusedCellCount() >= 20);
+
+            // Incremental pagination via notifyDataChanged preserves scroll offset without rebuilding visible cells
+            const float prev_offset = grid->getContentOffsetY();
+            const size_t binds_before = ds->bind_calls;
+            ds->count = 1250;
+            grid->notifyDataChanged();
+            TEST_CHECK(grid->totalItemCount() == 1250);
+            TEST_CHECK(std::abs(grid->getContentOffsetY() - prev_offset) < 1.0f);
+            TEST_CHECK(ds->bind_calls == binds_before);
+
+            delete grid;
+        }
+
+        // 33b. 4-column virtualized media/bookshelf grid (1,000 items -> ~20-32 mounted cells)
+        {
+            auto* grid = new omnidesk::host::RecyclingGrid();
+            grid->setWidth(1200.0f);
+            grid->setHeight(680.0f);
+            grid->setSpanCount(4);
+            grid->setEstimatedRowHeight(240.0f);
+            grid->setEstimatedRowSpace(14.0f);
+            grid->setColSpace(14.0f);
+            grid->setPreFetchLine(1);
+            grid->registerCell("bench", []() { return new BenchCell(); });
+
+            auto* ds = new BenchDataSource();
+            grid->setDataSource(ds, true);
+            YGNodeCalculateLayout(grid->getYGNode(), 1200.0f, 680.0f, YGDirectionLTR);
+            grid->onLayout();
+
+            TEST_CHECK(grid->totalItemCount() == 1000);
+            TEST_CHECK(grid->mountedCellCount() >= 12 && grid->mountedCellCount() <= 28);
+            TEST_CHECK(grid->allocatedCellCount() <= 32);
+
+            for (float scroll_y : {2000.0f, 9000.0f, 32000.0f}) {
+                grid->setContentOffsetY(scroll_y, false);
+                grid->onLayout();
+                TEST_CHECK(grid->mountedCellCount() >= 12 && grid->mountedCellCount() <= 28);
+                TEST_CHECK(grid->allocatedCellCount() <= 36);
+            }
+            TEST_CHECK(grid->reusedCellCount() >= 24);
+
+            delete grid;
+        }
+    }
+
+    std::cout << "test_sdk_bus: ALL PASSED (33/33 suites)\n";
     return 0;
 }

@@ -74,7 +74,8 @@ public:
     bool registerWorkerTextSource(const std::string& worker_id,
                                   const std::string& source_id,
                                   const std::string& display_name,
-                                  const std::string& category = "blog");
+                                  const std::string& category = "blog",
+                                  std::vector<TextChannel> channels = {});
     bool registerWorkerBookSource(const std::string& worker_id,
                                   const std::string& source_id,
                                   const std::string& display_name);

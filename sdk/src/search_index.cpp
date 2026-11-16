@@ -9,6 +9,7 @@
 #include <mutex>
 #include <sqlite3.h>
 #include <sstream>
+#include <unordered_set>
 
 #include "omnidesk/capabilities.hpp"
 #include "omnidesk/domain_registry.hpp"
@@ -23,6 +24,19 @@ int64_t nowUnixSec() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+bool statFileMtimeSize(const fs::path& p, int64_t& out_mtime_ns, int64_t& out_size) {
+    std::error_code ec;
+    const auto ftime = fs::last_write_time(p, ec);
+    if (ec) return false;
+    const auto fsize = fs::file_size(p, ec);
+    if (ec) return false;
+    out_mtime_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       ftime.time_since_epoch())
+                       .count();
+    out_size = static_cast<int64_t>(fsize);
+    return true;
 }
 
 size_t countUtf8Codepoints(const std::string& s) {
@@ -92,6 +106,29 @@ std::string colText(sqlite3_stmt* stmt, int col) {
     return txt ? reinterpret_cast<const char*>(txt) : std::string{};
 }
 
+bool colEqualsString(sqlite3_stmt* stmt, int col, const std::string& expected) {
+    const int bytes = sqlite3_column_bytes(stmt, col);
+    if (bytes < 0 || static_cast<size_t>(bytes) != expected.size()) {
+        return false;
+    }
+    if (bytes == 0) {
+        return true;
+    }
+    const unsigned char* txt = sqlite3_column_text(stmt, col);
+    return txt != nullptr && std::memcmp(txt, expected.data(), expected.size()) == 0;
+}
+
+struct StmtResetGuard {
+    sqlite3_stmt* stmt = nullptr;
+    explicit StmtResetGuard(sqlite3_stmt* s) : stmt(s) {}
+    ~StmtResetGuard() {
+        if (stmt) {
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+    }
+};
+
 nlohmann::json readJsonFileQuiet(const fs::path& p) {
     std::ifstream ifs(p);
     if (!ifs.is_open()) return nlohmann::json();
@@ -113,12 +150,37 @@ std::string readTextHead(const fs::path& p, size_t max_bytes = 6144) {
     return buf;
 }
 
+struct PendingFileState {
+    std::string file_path;
+    std::string source_id;
+    int64_t mtime_ns = 0;
+    int64_t file_size = 0;
+};
+
 } // namespace
 
 struct SearchIndexService::Impl {
     mutable std::mutex mutex;
     sqlite3* db = nullptr;
     std::string db_path;
+
+    // Precompiled cached statements (reused via sqlite3_reset + sqlite3_clear_bindings)
+    sqlite3_stmt* stmt_check_doc = nullptr;
+    sqlite3_stmt* stmt_upsert_doc = nullptr;
+    sqlite3_stmt* stmt_del_fts = nullptr;
+    sqlite3_stmt* stmt_ins_fts = nullptr;
+    sqlite3_stmt* stmt_del_doc = nullptr;
+    sqlite3_stmt* stmt_clear_src_fts = nullptr;
+    sqlite3_stmt* stmt_clear_src_docs = nullptr;
+    sqlite3_stmt* stmt_clear_src_files = nullptr;
+    sqlite3_stmt* stmt_clear_kind_fts = nullptr;
+    sqlite3_stmt* stmt_clear_kind_docs = nullptr;
+    sqlite3_stmt* stmt_stats = nullptr;
+    sqlite3_stmt* stmt_check_file = nullptr;
+    sqlite3_stmt* stmt_upsert_file = nullptr;
+
+    mutable size_t prepared_compile_count = 0;
+    size_t last_write_count = 0;
 
     bool execSql(const char* sql) {
         if (!db) return false;
@@ -128,58 +190,153 @@ struct SearchIndexService::Impl {
         return rc == SQLITE_OK;
     }
 
-    bool upsertDocLocked(const SearchDocument& doc) {
+    bool prepareCached(sqlite3_stmt*& slot, const char* sql) const {
+        if (slot) return true;
+        if (!db) return false;
+        if (sqlite3_prepare_v2(db, sql, -1, &slot, nullptr) != SQLITE_OK) {
+            slot = nullptr;
+            return false;
+        }
+        ++prepared_compile_count;
+        return true;
+    }
+
+    bool prepareHotStatementsLocked() {
+        return prepareCached(
+                   stmt_check_doc,
+                   "SELECT kind, domain, source_id, title, subtitle, body, tags, payload_json, updated_at "
+                   "FROM docs WHERE doc_id = ?1;") &&
+               prepareCached(
+                   stmt_upsert_doc,
+                   "INSERT OR REPLACE INTO docs "
+                   "(doc_id, kind, domain, source_id, title, subtitle, body, tags, payload_json, updated_at) "
+                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);") &&
+               prepareCached(stmt_del_fts, "DELETE FROM docs_fts WHERE doc_id = ?1;") &&
+               prepareCached(
+                   stmt_ins_fts,
+                   "INSERT INTO docs_fts (doc_id, kind, domain, title, subtitle, body, tags) "
+                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);") &&
+               prepareCached(stmt_del_doc, "DELETE FROM docs WHERE doc_id = ?1;") &&
+               prepareCached(
+                   stmt_clear_src_fts,
+                   "DELETE FROM docs_fts WHERE doc_id IN (SELECT doc_id FROM docs WHERE source_id = ?1);") &&
+               prepareCached(stmt_clear_src_docs, "DELETE FROM docs WHERE source_id = ?1;") &&
+               prepareCached(stmt_clear_src_files, "DELETE FROM source_file_state WHERE source_id = ?1;") &&
+               prepareCached(stmt_clear_kind_fts, "DELETE FROM docs_fts WHERE kind = ?1;") &&
+               prepareCached(stmt_clear_kind_docs, "DELETE FROM docs WHERE kind = ?1;") &&
+               prepareCached(stmt_stats, "SELECT kind, COUNT(*) FROM docs GROUP BY kind;") &&
+               prepareCached(
+                   stmt_check_file,
+                   "SELECT mtime_ns, file_size FROM source_file_state WHERE file_path = ?1;") &&
+               prepareCached(
+                   stmt_upsert_file,
+                   "INSERT OR REPLACE INTO source_file_state "
+                   "(file_path, source_id, mtime_ns, file_size) VALUES (?1, ?2, ?3, ?4);");
+    }
+
+    void finalizeStatementsLocked() {
+        auto fin = [](sqlite3_stmt*& s) {
+            if (s) {
+                sqlite3_finalize(s);
+                s = nullptr;
+            }
+        };
+        fin(stmt_check_doc);
+        fin(stmt_upsert_doc);
+        fin(stmt_del_fts);
+        fin(stmt_ins_fts);
+        fin(stmt_del_doc);
+        fin(stmt_clear_src_fts);
+        fin(stmt_clear_src_docs);
+        fin(stmt_clear_src_files);
+        fin(stmt_clear_kind_fts);
+        fin(stmt_clear_kind_docs);
+        fin(stmt_stats);
+        fin(stmt_check_file);
+        fin(stmt_upsert_file);
+    }
+
+    bool isFileUnchangedLocked(const std::string& file_path, int64_t mtime_ns, int64_t file_size) {
+        if (!db || !stmt_check_file) return false;
+        StmtResetGuard guard(stmt_check_file);
+        sqlite3_bind_text(stmt_check_file, 1, file_path.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt_check_file) != SQLITE_ROW) {
+            return false;
+        }
+        return sqlite3_column_int64(stmt_check_file, 0) == mtime_ns &&
+               sqlite3_column_int64(stmt_check_file, 1) == file_size;
+    }
+
+    bool upsertFileStateLocked(const PendingFileState& st) {
+        if (!db || !stmt_upsert_file) return false;
+        StmtResetGuard guard(stmt_upsert_file);
+        sqlite3_bind_text(stmt_upsert_file, 1, st.file_path.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt_upsert_file, 2, st.source_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt_upsert_file, 3, st.mtime_ns);
+        sqlite3_bind_int64(stmt_upsert_file, 4, st.file_size);
+        return sqlite3_step(stmt_upsert_file) == SQLITE_DONE;
+    }
+
+    bool upsertDocLocked(const SearchDocument& doc, bool* out_wrote = nullptr) {
+        if (out_wrote) *out_wrote = false;
         if (!db || doc.doc_id.empty()) return false;
-        const int64_t ts = doc.updated_at > 0 ? doc.updated_at : nowUnixSec();
+        if (!stmt_upsert_doc && !prepareHotStatementsLocked()) return false;
+
         const std::string payload_str = doc.payload.dump();
 
-        {
-            sqlite3_stmt* stmt = nullptr;
-            const char* sql =
-                "INSERT OR REPLACE INTO docs "
-                "(doc_id, kind, domain, source_id, title, subtitle, body, tags, payload_json, updated_at) "
-                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);";
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
-            sqlite3_bind_text(stmt, 1, doc.doc_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 2, doc.kind.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 3, doc.domain.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 4, doc.source_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 5, doc.title.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 6, doc.subtitle.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 7, doc.body.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 8, doc.tags.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 9, payload_str.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(stmt, 10, ts);
-            const int rc = sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
-            if (rc != SQLITE_DONE) return false;
-        }
-        {
-            sqlite3_stmt* del_stmt = nullptr;
-            if (sqlite3_prepare_v2(db, "DELETE FROM docs_fts WHERE doc_id = ?1;", -1, &del_stmt, nullptr) != SQLITE_OK) {
-                return false;
+        // Fast skip if the existing document already has identical indexed fields & payload.
+        if (stmt_check_doc) {
+            StmtResetGuard check_guard(stmt_check_doc);
+            sqlite3_bind_text(stmt_check_doc, 1, doc.doc_id.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt_check_doc) == SQLITE_ROW) {
+                const bool same_content =
+                    colEqualsString(stmt_check_doc, 0, doc.kind) &&
+                    colEqualsString(stmt_check_doc, 1, doc.domain) &&
+                    colEqualsString(stmt_check_doc, 2, doc.source_id) &&
+                    colEqualsString(stmt_check_doc, 3, doc.title) &&
+                    colEqualsString(stmt_check_doc, 4, doc.subtitle) &&
+                    colEqualsString(stmt_check_doc, 5, doc.body) &&
+                    colEqualsString(stmt_check_doc, 6, doc.tags) &&
+                    colEqualsString(stmt_check_doc, 7, payload_str);
+                if (same_content) {
+                    return true;
+                }
             }
-            sqlite3_bind_text(del_stmt, 1, doc.doc_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(del_stmt);
-            sqlite3_finalize(del_stmt);
+        }
+
+        const int64_t ts = doc.updated_at > 0 ? doc.updated_at : nowUnixSec();
+
+        {
+            StmtResetGuard g1(stmt_upsert_doc);
+            sqlite3_bind_text(stmt_upsert_doc, 1, doc.doc_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 2, doc.kind.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 3, doc.domain.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 4, doc.source_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 5, doc.title.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 6, doc.subtitle.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 7, doc.body.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 8, doc.tags.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_upsert_doc, 9, payload_str.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int64(stmt_upsert_doc, 10, ts);
+            if (sqlite3_step(stmt_upsert_doc) != SQLITE_DONE) return false;
         }
         {
-            sqlite3_stmt* fts_stmt = nullptr;
-            const char* fts_sql =
-                "INSERT INTO docs_fts (doc_id, kind, domain, title, subtitle, body, tags) "
-                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
-            if (sqlite3_prepare_v2(db, fts_sql, -1, &fts_stmt, nullptr) != SQLITE_OK) return false;
-            sqlite3_bind_text(fts_stmt, 1, doc.doc_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(fts_stmt, 2, doc.kind.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(fts_stmt, 3, doc.domain.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(fts_stmt, 4, doc.title.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(fts_stmt, 5, doc.subtitle.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(fts_stmt, 6, doc.body.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(fts_stmt, 7, doc.tags.c_str(), -1, SQLITE_TRANSIENT);
-            const int rc = sqlite3_step(fts_stmt);
-            sqlite3_finalize(fts_stmt);
-            if (rc != SQLITE_DONE) return false;
+            StmtResetGuard g2(stmt_del_fts);
+            sqlite3_bind_text(stmt_del_fts, 1, doc.doc_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(stmt_del_fts);
         }
+        {
+            StmtResetGuard g3(stmt_ins_fts);
+            sqlite3_bind_text(stmt_ins_fts, 1, doc.doc_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_ins_fts, 2, doc.kind.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_ins_fts, 3, doc.domain.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_ins_fts, 4, doc.title.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_ins_fts, 5, doc.subtitle.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_ins_fts, 6, doc.body.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt_ins_fts, 7, doc.tags.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt_ins_fts) != SQLITE_DONE) return false;
+        }
+        if (out_wrote) *out_wrote = true;
         return true;
     }
 };
@@ -204,10 +361,14 @@ SearchIndexService::~SearchIndexService() {
 
 bool SearchIndexService::open(const std::string& db_path) {
     std::lock_guard<std::mutex> lk(impl_->mutex);
+    impl_->finalizeStatementsLocked();
     if (impl_->db) {
         sqlite3_close_v2(impl_->db);
         impl_->db = nullptr;
     }
+    impl_->prepared_compile_count = 0;
+    impl_->last_write_count = 0;
+
     if (db_path != ":memory:") {
         std::error_code ec;
         fs::path p(db_path);
@@ -251,7 +412,15 @@ bool SearchIndexService::open(const std::string& db_path) {
             "  payload_json TEXT NOT NULL DEFAULT '{}',"
             "  updated_at INTEGER NOT NULL DEFAULT 0"
             ");"
-            "CREATE INDEX IF NOT EXISTS idx_docs_kind_domain ON docs(kind, domain, updated_at DESC);") &&
+            "CREATE INDEX IF NOT EXISTS idx_docs_kind_domain ON docs(kind, domain, updated_at DESC);"
+            "CREATE INDEX IF NOT EXISTS idx_docs_source_id ON docs(source_id);"
+            "CREATE TABLE IF NOT EXISTS source_file_state ("
+            "  file_path TEXT PRIMARY KEY,"
+            "  source_id TEXT NOT NULL,"
+            "  mtime_ns INTEGER NOT NULL,"
+            "  file_size INTEGER NOT NULL"
+            ");"
+            "CREATE INDEX IF NOT EXISTS idx_source_file_state_src ON source_file_state(source_id);") &&
         impl_->execSql(
             "CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5("
             "  doc_id UNINDEXED,"
@@ -264,7 +433,8 @@ bool SearchIndexService::open(const std::string& db_path) {
             "  tokenize='trigram'"
             ");");
 
-    if (!ok_tables) {
+    if (!ok_tables || !impl_->prepareHotStatementsLocked()) {
+        impl_->finalizeStatementsLocked();
         sqlite3_close_v2(impl_->db);
         impl_->db = nullptr;
         return false;
@@ -274,6 +444,7 @@ bool SearchIndexService::open(const std::string& db_path) {
 
 void SearchIndexService::close() {
     std::lock_guard<std::mutex> lk(impl_->mutex);
+    impl_->finalizeStatementsLocked();
     if (impl_->db) {
         sqlite3_close_v2(impl_->db);
         impl_->db = nullptr;
@@ -286,48 +457,59 @@ bool SearchIndexService::isOpen() const {
     return impl_->db != nullptr;
 }
 
+size_t SearchIndexService::lastWriteCount() const {
+    std::lock_guard<std::mutex> lk(impl_->mutex);
+    return impl_->last_write_count;
+}
+
+size_t SearchIndexService::preparedCompileCount() const {
+    std::lock_guard<std::mutex> lk(impl_->mutex);
+    return impl_->prepared_compile_count;
+}
+
 bool SearchIndexService::upsert(const SearchDocument& doc) {
     std::lock_guard<std::mutex> lk(impl_->mutex);
-    return impl_->upsertDocLocked(doc);
+    bool wrote = false;
+    const bool ok = impl_->upsertDocLocked(doc, &wrote);
+    impl_->last_write_count = wrote ? 1 : 0;
+    return ok;
 }
 
 size_t SearchIndexService::upsertBatch(const std::vector<SearchDocument>& docs) {
-    if (docs.empty()) return 0;
     std::lock_guard<std::mutex> lk(impl_->mutex);
-    if (!impl_->db) return 0;
+    impl_->last_write_count = 0;
+    if (docs.empty() || !impl_->db) return 0;
     if (!impl_->execSql("BEGIN IMMEDIATE;")) return 0;
     size_t count = 0;
+    size_t writes = 0;
     for (const auto& doc : docs) {
-        if (impl_->upsertDocLocked(doc)) {
+        bool wrote = false;
+        if (impl_->upsertDocLocked(doc, &wrote)) {
             ++count;
+            if (wrote) ++writes;
         }
     }
     if (!impl_->execSql("COMMIT;")) {
         impl_->execSql("ROLLBACK;");
         return 0;
     }
+    impl_->last_write_count = writes;
     return count;
 }
 
 bool SearchIndexService::remove(const std::string& doc_id) {
     std::lock_guard<std::mutex> lk(impl_->mutex);
     if (!impl_->db || doc_id.empty()) return false;
+    if (!impl_->stmt_del_doc && !impl_->prepareHotStatementsLocked()) return false;
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(impl_->db, "DELETE FROM docs WHERE doc_id = ?1;", -1, &s, nullptr) != SQLITE_OK) {
-            return false;
-        }
-        sqlite3_bind_text(s, 1, doc_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
+        StmtResetGuard g1(impl_->stmt_del_doc);
+        sqlite3_bind_text(impl_->stmt_del_doc, 1, doc_id.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(impl_->stmt_del_doc) != SQLITE_DONE) return false;
     }
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(impl_->db, "DELETE FROM docs_fts WHERE doc_id = ?1;", -1, &s, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, doc_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(s);
-            sqlite3_finalize(s);
-        }
+        StmtResetGuard g2(impl_->stmt_del_fts);
+        sqlite3_bind_text(impl_->stmt_del_fts, 1, doc_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(impl_->stmt_del_fts);
     }
     return true;
 }
@@ -335,25 +517,22 @@ bool SearchIndexService::remove(const std::string& doc_id) {
 bool SearchIndexService::clearSource(const std::string& source_id) {
     std::lock_guard<std::mutex> lk(impl_->mutex);
     if (!impl_->db || source_id.empty()) return false;
+    if (!impl_->stmt_clear_src_docs && !impl_->prepareHotStatementsLocked()) return false;
     if (!impl_->execSql("BEGIN IMMEDIATE;")) return false;
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(
-                impl_->db,
-                "DELETE FROM docs_fts WHERE doc_id IN (SELECT doc_id FROM docs WHERE source_id = ?1);",
-                -1, &s, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, source_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(s);
-            sqlite3_finalize(s);
-        }
+        StmtResetGuard g1(impl_->stmt_clear_src_fts);
+        sqlite3_bind_text(impl_->stmt_clear_src_fts, 1, source_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(impl_->stmt_clear_src_fts);
     }
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(impl_->db, "DELETE FROM docs WHERE source_id = ?1;", -1, &s, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, source_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(s);
-            sqlite3_finalize(s);
-        }
+        StmtResetGuard g2(impl_->stmt_clear_src_docs);
+        sqlite3_bind_text(impl_->stmt_clear_src_docs, 1, source_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(impl_->stmt_clear_src_docs);
+    }
+    {
+        StmtResetGuard g3(impl_->stmt_clear_src_files);
+        sqlite3_bind_text(impl_->stmt_clear_src_files, 1, source_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(impl_->stmt_clear_src_files);
     }
     impl_->execSql("COMMIT;");
     return true;
@@ -362,26 +541,20 @@ bool SearchIndexService::clearSource(const std::string& source_id) {
 bool SearchIndexService::clearKind(const std::string& kind) {
     std::lock_guard<std::mutex> lk(impl_->mutex);
     if (!impl_->db || kind.empty()) return false;
+    if (!impl_->stmt_clear_kind_docs && !impl_->prepareHotStatementsLocked()) return false;
     if (!impl_->execSql("BEGIN IMMEDIATE;")) return false;
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(
-                impl_->db,
-                "DELETE FROM docs_fts WHERE kind = ?1;",
-                -1, &s, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(s);
-            sqlite3_finalize(s);
-        }
+        StmtResetGuard g1(impl_->stmt_clear_kind_fts);
+        sqlite3_bind_text(impl_->stmt_clear_kind_fts, 1, kind.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(impl_->stmt_clear_kind_fts);
     }
     {
-        sqlite3_stmt* s = nullptr;
-        if (sqlite3_prepare_v2(impl_->db, "DELETE FROM docs WHERE kind = ?1;", -1, &s, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(s);
-            sqlite3_finalize(s);
-        }
+        StmtResetGuard g2(impl_->stmt_clear_kind_docs);
+        sqlite3_bind_text(impl_->stmt_clear_kind_docs, 1, kind.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(impl_->stmt_clear_kind_docs);
     }
+    // Reset file mtime state so subsequent hydration re-ingests cleared file-backed kinds
+    impl_->execSql("DELETE FROM source_file_state;");
     impl_->execSql("COMMIT;");
     return true;
 }
@@ -452,6 +625,7 @@ std::vector<SearchHit> SearchIndexService::search(const SearchQueryOptions& opts
     if (sqlite3_prepare_v2(impl_->db, sql_str.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
         return hits;
     }
+    ++impl_->prepared_compile_count;
     for (size_t i = 0; i < binds.size(); ++i) {
         sqlite3_bind_text(stmt, static_cast<int>(i + 1), binds[i].c_str(), -1, SQLITE_TRANSIENT);
     }
@@ -485,15 +659,16 @@ SearchIndexStats SearchIndexService::stats() const {
     st.db_path = impl_->db_path;
     if (!impl_->db) return st;
 
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(impl_->db, "SELECT kind, COUNT(*) FROM docs GROUP BY kind;", -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const std::string k = colText(stmt, 0);
-            const size_t c = static_cast<size_t>(sqlite3_column_int64(stmt, 1));
+    if (impl_->stmt_stats || impl_->prepareCached(
+                                 impl_->stmt_stats,
+                                 "SELECT kind, COUNT(*) FROM docs GROUP BY kind;")) {
+        StmtResetGuard g(impl_->stmt_stats);
+        while (sqlite3_step(impl_->stmt_stats) == SQLITE_ROW) {
+            const std::string k = colText(impl_->stmt_stats, 0);
+            const size_t c = static_cast<size_t>(sqlite3_column_int64(impl_->stmt_stats, 1));
             st.by_kind[k] = c;
             st.total_docs += c;
         }
-        sqlite3_finalize(stmt);
     }
     return st;
 }
@@ -502,202 +677,339 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                                             CapabilityRegistry* caps,
                                             const std::string& data_root,
                                             const std::string& config_root) {
+    SearchHydrateOptions opts;
+    opts.scopes = kHydrateAll;
+    opts.force = false;
+    return hydrateIncremental(domains, caps, data_root, config_root, opts);
+}
+
+size_t SearchIndexService::hydrateIncremental(DomainRegistry* domains,
+                                              CapabilityRegistry* caps,
+                                              const std::string& data_root,
+                                              const std::string& config_root,
+                                              const SearchHydrateOptions& opts) {
     if (!isOpen()) return 0;
+
     std::vector<SearchDocument> batch;
+    std::vector<PendingFileState> updated_files;
+    std::unordered_set<std::string> active_command_ids;
+    size_t skipped_file_count = 0;
     const int64_t now = nowUnixSec();
 
-    // 1. Built-in host quick commands
-    const struct {
-        const char* id;
-        const char* title;
-        const char* sub;
-        const char* action;
-        const char* domain;
-    } builtin_cmds[] = {
-        {"cmd:ws:store", "切换至「插件市场」工作台", "Ctrl+1 · 安装/更新/配置插件", "workspace:store", "core"},
-        {"cmd:ws:media", "切换至「影视与音乐」工作台", "Ctrl+2 · 16:9 影视 / 双语歌词 / NAS / MPV", "workspace:media", "media"},
-        {"cmd:ws:text", "切换至「文字与期刊」工作台", "Ctrl+3 · 博客 / 知乎 / Reddit / 科学期刊", "workspace:text", "text"},
-        {"cmd:ws:book", "切换至「书本与 PDF」工作台", "Ctrl+4 · 2:3 书架 / BabelDOC / SM-2", "workspace:book", "book"},
-        {"cmd:ws:settings", "打开宿主系统设置与快捷键速查", "主题 / 路径 / 目录同步", "workspace:settings", "core"},
-        {"cmd:toggle_dock", "开关 F8 AI 伴读协作栏", "F8 · Magpie 路由 & 伴读对话", "toggle_dock", "core"},
-        {"cmd:toggle_theme", "切换 Paper 亮色 / Graphite 暗色主题", "t · 即时切换全局视觉主题", "toggle_theme", "core"},
-        {"cmd:shortcuts", "查看 OmniDesk 全键盘快捷键帮助", "? · Vim 导引与全局按键", "show_shortcuts", "core"},
-        {"cmd:reindex", "立即重建跨三域 SQLite FTS5 全局索引", "刷新台词 / 书架 / 往期精选 / 乐评 / 生词", "reindex_search", "core"},
-        {"cmd:media:play_pause", "播放 / 暂停当前媒体会话", "PlaybackCoordinator · MPRIS2", "playback:play_pause", "media"},
-        {"cmd:media:resume_music", "恢复被视频打断的后台音乐队列", "断点恢复 PlaybackCoordinator", "playback:resume_music", "media"},
+    auto checkShouldSkipFile = [&](const fs::path& p,
+                                   const std::string& source_id,
+                                   int64_t& out_mtime_sec) -> bool {
+        int64_t mtime_ns = 0;
+        int64_t fsize = 0;
+        if (!statFileMtimeSize(p, mtime_ns, fsize)) {
+            out_mtime_sec = now;
+            return false;
+        }
+        out_mtime_sec = mtime_ns / 1000000000LL;
+        if (!opts.force) {
+            std::lock_guard<std::mutex> lk(impl_->mutex);
+            if (impl_->isFileUnchangedLocked(p.string(), mtime_ns, fsize)) {
+                ++skipped_file_count;
+                return true;
+            }
+        }
+        updated_files.push_back(PendingFileState{p.string(), source_id, mtime_ns, fsize});
+        return false;
     };
-    for (const auto& c : builtin_cmds) {
-        batch.push_back(SearchDocument{
-            c.id, "command", c.domain, "host.commands",
-            c.title, c.sub, c.sub, "command 快捷命令",
-            {{"target", "command"}, {"command", c.action}},
-            now + 1000,
-        });
-    }
 
-    // 2. DomainRegistry sources & plugin workspace tabs
-    if (domains) {
-        for (const auto& tab : domains->workspaceTabs()) {
+    const bool want_commands = (opts.scopes & kHydrateCommands) != 0;
+    const bool want_domains = (opts.scopes & kHydrateDomains) != 0;
+    const bool want_vocab = (opts.scopes & kHydrateVocab) != 0;
+    const bool want_archives = (opts.scopes & kHydrateArchives) != 0;
+
+    auto matchesSourceFilter = [&](const std::string& sid) -> bool {
+        if (opts.source_ids.empty()) return true;
+        return opts.source_ids.count(sid) > 0;
+    };
+
+    // 1. Built-in host quick commands & plugin workspace tabs
+    if (want_commands) {
+        const struct {
+            const char* id;
+            const char* title;
+            const char* sub;
+            const char* action;
+            const char* domain;
+        } builtin_cmds[] = {
+            {"cmd:ws:store", "切换至「插件市场」工作台", "Ctrl+1 · 安装/更新/配置插件", "workspace:store", "core"},
+            {"cmd:ws:media", "切换至「影视与音乐」工作台", "Ctrl+2 · 16:9 影视 / 双语歌词 / NAS / MPV", "workspace:media", "media"},
+            {"cmd:ws:text", "切换至「文字与期刊」工作台", "Ctrl+3 · 博客 / 知乎 / Reddit / 科学期刊", "workspace:text", "text"},
+            {"cmd:ws:book", "切换至「书本与 PDF」工作台", "Ctrl+4 · 2:3 书架 / BabelDOC / SM-2", "workspace:book", "book"},
+            {"cmd:ws:settings", "打开宿主系统设置与快捷键速查", "Ctrl+, · 主题 / 路径 / 目录同步", "workspace:settings", "core"},
+            {"cmd:toggle_dock", "开关 F8 AI 伴读协作栏", "F8 · Magpie 路由 & 伴读对话", "toggle_dock", "core"},
+            {"cmd:toggle_theme", "切换 Paper 亮色 / Graphite 暗色主题", "t · 即时切换全局视觉主题", "toggle_theme", "core"},
+            {"cmd:shortcuts", "查看 OmniDesk 全键盘快捷键帮助", "? · Vim 导引与全局按键", "show_shortcuts", "core"},
+            {"cmd:reindex", "立即重建跨三域 SQLite FTS5 全局索引", "刷新台词 / 书架 / 往期精选 / 乐评 / 生词", "reindex_search", "core"},
+            {"cmd:media:play_pause", "播放 / 暂停当前媒体会话", "PlaybackCoordinator · MPRIS2", "playback:play_pause", "media"},
+            {"cmd:media:resume_music", "恢复被视频打断的后台音乐队列", "断点恢复 PlaybackCoordinator", "playback:resume_music", "media"},
+        };
+        for (const auto& c : builtin_cmds) {
+            active_command_ids.insert(c.id);
             batch.push_back(SearchDocument{
-                "cmd:tab:" + tab.tab_id,
-                "command",
-                toString(tab.domain),
-                tab.plugin_id,
-                "打开插件工作区: " + tab.title,
-                tab.plugin_id + (tab.badge.empty() ? "" : (" · " + tab.badge)),
-                tab.title,
-                "plugin command 工作区",
-                {{"target", "workspace_tab"}, {"tab_id", tab.tab_id}, {"plugin_id", tab.plugin_id}},
-                now + 900,
+                c.id, "command", c.domain, "host.commands",
+                c.title, c.sub, c.sub, "command 快捷命令",
+                {{"target", "command"}, {"command", c.action}},
+                now + 1000,
             });
         }
 
-        for (const auto& bsrc : domains->bookSources()) {
-            try {
-                const auto books = bsrc->listBooks("", "");
-                for (const auto& b : books) {
-                    batch.push_back(SearchDocument{
-                        "book:" + b.source_id + ":" + b.id,
-                        b.source_id == "plugin-ai-curator" ? "obsidian" : "book",
-                        "book",
-                        b.source_id,
-                        b.title,
-                        b.author + " · " + b.format + " · P." + std::to_string(b.current_page),
-                        b.title + " " + b.author + " " + b.file_path,
-                        b.format + " 书架 book",
-                        {
-                            {"target", "book"},
-                            {"book_id", b.id},
-                            {"source_id", b.source_id},
-                            {"title", b.title},
-                            {"file_path", b.file_path},
-                            {"format", b.format},
-                            {"page", std::max(1, b.current_page)},
-                        },
-                        now,
-                    });
+        if (domains) {
+            auto toLowerAscii = [](std::string s) {
+                for (char& ch : s) {
+                    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
                 }
-                const auto vocab = bsrc->listVocab();
-                for (const auto& vc : vocab) {
-                    batch.push_back(SearchDocument{
-                        "vocab:" + vc.word,
-                        "vocab",
-                        "book",
-                        bsrc->sourceId(),
-                        vc.word + (vc.phonetic.empty() ? "" : ("  " + vc.phonetic)),
-                        vc.meaning,
-                        vc.etymology + "\n" + vc.context_sentence,
-                        "vocab sm2 生词 " + vc.source_book,
-                        {
-                            {"target", "vocab"},
-                            {"word", vc.word},
-                            {"source_book", vc.source_book},
-                            {"context_sentence", vc.context_sentence},
-                        },
-                        now,
-                    });
-                }
-            } catch (...) {
-            }
-        }
+                return s;
+            };
+            auto preferredAltForTab = [&](const WorkspaceTabSpec& t) -> char {
+                const std::string pid = toLowerAscii(t.plugin_id);
+                const std::string tid = toLowerAscii(t.tab_id);
+                const std::string combined = pid + "|" + tid + "|" + toLowerAscii(t.title);
+                auto has = [&](const char* tok) { return combined.find(tok) != std::string::npos; };
+                if (has("bilibili") || t.title.find("B站") != std::string::npos) return 'B';
+                if (has("youtube")) return 'Y';
+                if (has("music")) return 'M';
+                if (has("arr-imdb") || has("imdb") || t.title.find("选片") != std::string::npos) return 'Q';
+                if (has("fnos") || has("nas")) return 'N';
+                if (has("chrome") || has("web_reader") || t.title.find("网页") != std::string::npos) return 'W';
+                if (has("blog") || t.title.find("博主") != std::string::npos) return 'S';
+                if (has("recipe") || t.title.find("配方") != std::string::npos) return 'R';
+                if (has("journal")) return 'J';
+                if (has("zhihu")) return 'H';
+                if (has("linuxdo")) return 'L';
+                if (has("reddit")) return 'D';
+                if (has("v2ex")) return 'V';
+                if (has("shuiyuan")) return 'U';
+                if (pid == "plugin-x" || tid == "tab-x") return 'X';
+                if (has("ebook") || t.title.find("生词") != std::string::npos) return 'E';
+                if (has("pdf") || has("babeldoc") || t.title.find("精校") != std::string::npos) return 'P';
+                if (has("zlib") || has("z-library")) return 'Z';
+                if (has("anna")) return 'A';
+                return '\0';
+            };
 
-        for (const auto& tsrc : domains->textSources()) {
-            try {
-                const auto items = tsrc->fetchFeed("");
-                const bool is_obsidian_source =
-                    (tsrc->sourceId().find("curator") != std::string::npos ||
-                     tsrc->sourceId().find("obsidian") != std::string::npos);
-                for (const auto& item : items) {
-                    std::string kind = is_obsidian_source ? "obsidian" : "article";
-                    std::string tags_str = item.source_name + " " + item.category;
-                    for (const auto& t : item.tags) {
-                        tags_str += " " + t;
-                        if (t.find("obsidian") != std::string::npos ||
-                            t.find("往期") != std::string::npos ||
-                            t.find("精选") != std::string::npos) {
-                            kind = "obsidian";
-                        }
-                    }
-                    batch.push_back(SearchDocument{
-                        "text:" + item.source_id + ":" + item.id,
-                        kind,
-                        "text",
-                        item.source_id,
-                        item.title,
-                        item.source_name + " · " + item.author + " · " + item.published_at,
-                        item.excerpt,
-                        tags_str,
-                        {
-                            {"target", "text"},
-                            {"article_id", item.id},
-                            {"source_id", item.source_id},
-                            {"title", item.title},
-                            {"url", item.url},
-                            {"published_at", item.published_at},
-                            {"category", item.category},
-                            {"tags", item.tags},
-                        },
-                        now,
-                    });
+            const auto raw_tabs = domains->workspaceTabs();
+            std::unordered_set<char> used_alt;
+            std::vector<char> assigned_alt(raw_tabs.size(), '\0');
+            for (size_t i = 0; i < raw_tabs.size(); ++i) {
+                const char p = preferredAltForTab(raw_tabs[i]);
+                if (p != '\0' && used_alt.insert(p).second) {
+                    assigned_alt[i] = p;
                 }
-            } catch (...) {
             }
-        }
-
-        for (const auto& msrc : domains->mediaSources()) {
-            try {
-                const auto items = msrc->fetchItems("all", "");
-                for (const auto& item : items) {
-                    const bool is_music =
-                        (item.kind == "music" ||
-                         item.source_id.find("music") != std::string::npos);
-                    std::string review_body = item.creator + " " + item.quality_label;
-                    if (item.extra.is_object()) {
-                        if (item.extra.contains("analysis_summary") && item.extra["analysis_summary"].is_string()) {
-                            review_body += "\n" + item.extra["analysis_summary"].get<std::string>();
-                        }
-                        if (item.extra.contains("listening_cue") && item.extra["listening_cue"].is_string()) {
-                            review_body += "\n" + item.extra["listening_cue"].get<std::string>();
-                        }
+            auto pickUnusedAlpha = [&](const std::string& s) -> char {
+                for (unsigned char uc : s) {
+                    if (std::isalpha(uc)) {
+                        const char u = static_cast<char>(std::toupper(uc));
+                        if (used_alt.insert(u).second) return u;
                     }
-                    batch.push_back(SearchDocument{
-                        "media:" + item.source_id + ":" + item.id,
-                        is_music ? "music_review" : (item.source_id == "plugin-ai-curator" ? "obsidian" : "media"),
-                        "media",
-                        item.source_id,
-                        item.title,
-                        item.source_badge + " · " + item.creator,
-                        review_body,
-                        item.kind + " " + item.source_badge,
-                        {
-                            {"target", "media"},
-                            {"item_id", item.id},
-                            {"source_id", item.source_id},
-                            {"title", item.title},
-                            {"kind", item.kind},
-                            {"play_url", item.play_url},
-                            {"cover_url", item.cover_url},
-                            {"creator", item.creator},
-                            {"source_badge", item.source_badge},
-                            {"quality_label", item.quality_label},
-                            {"extra", item.extra},
-                        },
-                        now,
-                    });
                 }
-            } catch (...) {
+                return '\0';
+            };
+            for (size_t i = 0; i < raw_tabs.size(); ++i) {
+                if (assigned_alt[i] != '\0') continue;
+                char k = pickUnusedAlpha(raw_tabs[i].title);
+                if (k == '\0') k = pickUnusedAlpha(raw_tabs[i].tab_id);
+                if (k == '\0') k = pickUnusedAlpha(raw_tabs[i].plugin_id);
+                if (k == '\0') {
+                    for (char ch = 'A'; ch <= 'Z'; ++ch) {
+                        if (used_alt.insert(ch).second) { k = ch; break; }
+                    }
+                }
+                assigned_alt[i] = k;
+            }
+
+            for (size_t i = 0; i < raw_tabs.size(); ++i) {
+                const auto& tab = raw_tabs[i];
+                const std::string doc_id = "cmd:tab:" + tab.tab_id;
+                active_command_ids.insert(doc_id);
+                const std::string kbd =
+                    assigned_alt[i] != '\0' ? (std::string("Alt+") + assigned_alt[i] + " · ") : std::string{};
+                const std::string sub =
+                    kbd + tab.plugin_id + (tab.badge.empty() ? "" : (" · " + tab.badge));
+                batch.push_back(SearchDocument{
+                    doc_id,
+                    "command",
+                    toString(tab.domain),
+                    tab.plugin_id,
+                    "打开插件工作区: " + tab.title,
+                    sub,
+                    tab.title + " " + sub,
+                    "plugin command 工作区",
+                    {{"target", "workspace_tab"}, {"tab_id", tab.tab_id}, {"plugin_id", tab.plugin_id}},
+                    now + 900,
+                });
             }
         }
     }
 
-    // 3. Host vocab fallback JSON
-    if (!config_root.empty()) {
+    // 2. DomainRegistry sources (filtered by opts.source_ids when specified)
+    if (domains && (want_domains || want_vocab)) {
+        for (const auto& bsrc : domains->bookSources()) {
+            const bool match_src = want_domains && matchesSourceFilter(bsrc->sourceId());
+            if (!match_src && !want_vocab) continue;
+            try {
+                if (match_src) {
+                    const auto books = bsrc->listBooks("", "");
+                    for (const auto& b : books) {
+                        const std::string sid = b.source_id.empty() ? bsrc->sourceId() : b.source_id;
+                        batch.push_back(SearchDocument{
+                            "book:" + sid + ":" + b.id,
+                            sid == "plugin-ai-curator" ? "obsidian" : "book",
+                            "book",
+                            sid,
+                            b.title,
+                            b.author + " · " + b.format + " · P." + std::to_string(b.current_page),
+                            b.title + " " + b.author + " " + b.file_path,
+                            b.format + " 书架 book",
+                            {
+                                {"target", "book"},
+                                {"book_id", b.id},
+                                {"source_id", sid},
+                                {"title", b.title},
+                                {"file_path", b.file_path},
+                                {"format", b.format},
+                                {"page", std::max(1, b.current_page)},
+                            },
+                            now,
+                        });
+                    }
+                }
+                if (want_vocab || match_src) {
+                    const auto vocab = bsrc->listVocab();
+                    for (const auto& vc : vocab) {
+                        batch.push_back(SearchDocument{
+                            "vocab:" + vc.word,
+                            "vocab",
+                            "book",
+                            bsrc->sourceId(),
+                            vc.word + (vc.phonetic.empty() ? "" : ("  " + vc.phonetic)),
+                            vc.meaning,
+                            vc.etymology + "\n" + vc.context_sentence,
+                            "vocab sm2 生词 " + vc.source_book,
+                            {
+                                {"target", "vocab"},
+                                {"word", vc.word},
+                                {"source_book", vc.source_book},
+                                {"context_sentence", vc.context_sentence},
+                            },
+                            now,
+                        });
+                    }
+                }
+            } catch (...) {
+            }
+        }
+
+        if (want_domains) {
+            for (const auto& tsrc : domains->textSources()) {
+                if (!matchesSourceFilter(tsrc->sourceId())) continue;
+                try {
+                    const auto items = tsrc->fetchFeed("");
+                    const bool is_obsidian_source =
+                        (tsrc->sourceId().find("curator") != std::string::npos ||
+                         tsrc->sourceId().find("obsidian") != std::string::npos);
+                    for (const auto& item : items) {
+                        std::string kind = is_obsidian_source ? "obsidian" : "article";
+                        std::string tags_str = item.source_name + " " + item.category;
+                        for (const auto& t : item.tags) {
+                            tags_str += " " + t;
+                            if (t.find("obsidian") != std::string::npos ||
+                                t.find("往期") != std::string::npos ||
+                                t.find("精选") != std::string::npos) {
+                                kind = "obsidian";
+                            }
+                        }
+                        batch.push_back(SearchDocument{
+                            "text:" + item.source_id + ":" + item.id,
+                            kind,
+                            "text",
+                            item.source_id,
+                            item.title,
+                            item.source_name + " · " + item.author + " · " + item.published_at,
+                            item.excerpt,
+                            tags_str,
+                            {
+                                {"target", "text"},
+                                {"article_id", item.id},
+                                {"source_id", item.source_id},
+                                {"title", item.title},
+                                {"url", item.url},
+                                {"published_at", item.published_at},
+                                {"category", item.category},
+                                {"tags", item.tags},
+                            },
+                            now,
+                        });
+                    }
+                } catch (...) {
+                }
+            }
+
+            for (const auto& msrc : domains->mediaSources()) {
+                if (!matchesSourceFilter(msrc->sourceId())) continue;
+                try {
+                    const auto items = msrc->fetchItems("all", "");
+                    for (const auto& item : items) {
+                        const bool is_music =
+                            (item.kind == "music" ||
+                             item.source_id.find("music") != std::string::npos);
+                        std::string review_body = item.creator + " " + item.quality_label;
+                        if (item.extra.is_object()) {
+                            if (item.extra.contains("analysis_summary") && item.extra["analysis_summary"].is_string()) {
+                                review_body += "\n" + item.extra["analysis_summary"].get<std::string>();
+                            }
+                            if (item.extra.contains("listening_cue") && item.extra["listening_cue"].is_string()) {
+                                review_body += "\n" + item.extra["listening_cue"].get<std::string>();
+                            }
+                        }
+                        batch.push_back(SearchDocument{
+                            "media:" + item.source_id + ":" + item.id,
+                            is_music ? "music_review" : (item.source_id == "plugin-ai-curator" ? "obsidian" : "media"),
+                            "media",
+                            item.source_id,
+                            item.title,
+                            item.source_badge + " · " + item.creator,
+                            review_body,
+                            item.kind + " " + item.source_badge,
+                            {
+                                {"target", "media"},
+                                {"item_id", item.id},
+                                {"source_id", item.source_id},
+                                {"title", item.title},
+                                {"kind", item.kind},
+                                {"play_url", item.play_url},
+                                {"cover_url", item.cover_url},
+                                {"creator", item.creator},
+                                {"source_badge", item.source_badge},
+                                {"quality_label", item.quality_label},
+                                {"extra", item.extra},
+                            },
+                            now,
+                        });
+                    }
+                } catch (...) {
+                }
+            }
+        }
+    }
+
+    // 3. Host vocab fallback JSON (skipped via mtime_ns + file_size when unchanged)
+    if (want_vocab && !config_root.empty()) {
         std::error_code ec;
         for (const fs::path& vpath : {
                  fs::path(config_root) / "host_vocab_fallback.json",
                  fs::path(config_root) / "plugins" / "host-book-vocab.json",
              }) {
             if (!fs::exists(vpath, ec)) continue;
+            int64_t file_ts = now;
+            if (checkShouldSkipFile(vpath, "host.vocab_fallback", file_ts)) {
+                continue;
+            }
             auto vj = readJsonFileQuiet(vpath);
             const nlohmann::json* arr = nullptr;
             if (vj.is_array()) arr = &vj;
@@ -722,15 +1034,15 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                             {"source_book", c.value("source_book", "")},
                             {"context_sentence", c.value("context_sentence", "")},
                         },
-                        now,
+                        file_ts,
                     });
                 }
             }
         }
     }
 
-    // 4. Local Obsidian / Music-Daily curation archives under data_root
-    if (!data_root.empty()) {
+    // 4. Local Obsidian / Music-Daily curation archives under data_root (mtime-gated)
+    if (want_archives && !data_root.empty()) {
         std::error_code ec;
         const fs::path curation_root = fs::path(data_root) / "curation";
         const fs::path music_daily_dirs[] = {
@@ -744,22 +1056,30 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                 if (music_files_scanned >= 200) break;
                 if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
                 ++music_files_scanned;
+                int64_t file_ts = now;
+                if (checkShouldSkipFile(entry.path(), "music-daily", file_ts)) {
+                    continue;
+                }
                 auto mj = readJsonFileQuiet(entry.path());
                 if (!mj.is_object() || !mj.contains("tracks") || !mj["tracks"].is_array()) continue;
-                const std::string date_str = mj.value("date", entry.path().stem().string());
+                auto jstr = [](const nlohmann::json& o, const char* k, const std::string& def = "") {
+                    auto it = o.find(k);
+                    return (it != o.end() && it->is_string()) ? it->get<std::string>() : def;
+                };
+                const std::string date_str = jstr(mj, "date", entry.path().stem().string());
                 for (const auto& tr : mj["tracks"]) {
                     if (!tr.is_object()) continue;
-                    const std::string title = tr.value("title", "");
-                    const std::string artist = tr.value("artist", "");
+                    const std::string title = jstr(tr, "title");
+                    const std::string artist = jstr(tr, "artist");
                     if (title.empty()) continue;
-                    const std::string cid = tr.value("canonical_id", date_str + ":" + title);
-                    std::string body = tr.value("analysis_summary", "");
+                    const std::string cid = jstr(tr, "canonical_id", date_str + ":" + title);
+                    std::string body = jstr(tr, "analysis_summary");
                     if (tr.contains("listening_cue") && tr["listening_cue"].is_string()) {
                         body += "\n" + tr["listening_cue"].get<std::string>();
                     }
                     std::string apple_url;
                     if (tr.contains("apple_music") && tr["apple_music"].is_object()) {
-                        apple_url = tr["apple_music"].value("url", "");
+                        apple_url = jstr(tr["apple_music"], "url");
                     }
                     batch.push_back(SearchDocument{
                         "music_review:" + date_str + ":" + cid,
@@ -767,7 +1087,7 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                         "media",
                         "music-daily",
                         title + (artist.empty() ? "" : (" - " + artist)),
-                        "每日乐评 · " + date_str + " · " + tr.value("album", ""),
+                        "每日乐评 · " + date_str + " · " + jstr(tr, "album"),
                         body,
                         "music daily 乐评 " + date_str + " " + artist,
                         {
@@ -780,7 +1100,7 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                             {"url", apple_url},
                             {"date", date_str},
                         },
-                        now,
+                        file_ts,
                     });
                 }
             }
@@ -800,6 +1120,10 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                 if (obs_scanned >= 300) break;
                 if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
                 ++obs_scanned;
+                int64_t file_ts = now;
+                if (checkShouldSkipFile(entry.path(), "obsidian-vault", file_ts)) {
+                    continue;
+                }
                 const std::string rel = fs::relative(entry.path(), curation_root / "repos" / "obsidian-vault", ec).string();
                 const std::string text = readTextHead(entry.path(), 4096);
                 const std::string title = entry.path().stem().string() + " · " + entry.path().parent_path().filename().string();
@@ -819,14 +1143,14 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
                         {"title", title},
                         {"file_path", entry.path().string()},
                     },
-                    now,
+                    file_ts,
                 });
             }
         }
     }
 
-    // 5. Optional live vocab.sm2.v1 deck if no BookSource provided vocab
-    if (caps && caps->has("vocab.sm2.v1")) {
+    // 5. Optional live vocab.sm2.v1 deck
+    if (want_vocab && caps && caps->has("vocab.sm2.v1")) {
         try {
             auto vres = caps->call("vocab.sm2.v1", {{"action", "list"}, {"limit", 300}});
             if (vres.ok && vres.data.is_object()) {
@@ -862,7 +1186,58 @@ size_t SearchIndexService::hydrateEcosystem(DomainRegistry* domains,
         }
     }
 
-    return upsertBatch(batch);
+    std::lock_guard<std::mutex> lk(impl_->mutex);
+    impl_->last_write_count = 0;
+    if (!impl_->db) return 0;
+    if (batch.empty() && updated_files.empty()) {
+        return skipped_file_count;
+    }
+
+    if (!impl_->execSql("BEGIN IMMEDIATE;")) return 0;
+    size_t count = 0;
+    size_t writes = 0;
+    for (const auto& doc : batch) {
+        bool wrote = false;
+        if (impl_->upsertDocLocked(doc, &wrote)) {
+            ++count;
+            if (wrote) ++writes;
+        }
+    }
+    for (const auto& fst : updated_files) {
+        impl_->upsertFileStateLocked(fst);
+    }
+
+    // Prune stale plugin workspace tab commands if commands were refreshed
+    if (want_commands && !active_command_ids.empty()) {
+        sqlite3_stmt* q_cmds = nullptr;
+        std::vector<std::string> stale_cmds;
+        if (sqlite3_prepare_v2(impl_->db, "SELECT doc_id FROM docs WHERE kind = 'command';", -1, &q_cmds, nullptr) == SQLITE_OK) {
+            ++impl_->prepared_compile_count;
+            while (sqlite3_step(q_cmds) == SQLITE_ROW) {
+                const std::string cid = colText(q_cmds, 0);
+                if (!cid.empty() && active_command_ids.find(cid) == active_command_ids.end()) {
+                    stale_cmds.push_back(cid);
+                }
+            }
+            sqlite3_finalize(q_cmds);
+        }
+        for (const auto& cid : stale_cmds) {
+            StmtResetGuard gd(impl_->stmt_del_doc);
+            sqlite3_bind_text(impl_->stmt_del_doc, 1, cid.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(impl_->stmt_del_doc);
+            StmtResetGuard gf(impl_->stmt_del_fts);
+            sqlite3_bind_text(impl_->stmt_del_fts, 1, cid.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(impl_->stmt_del_fts);
+            ++writes;
+        }
+    }
+
+    if (!impl_->execSql("COMMIT;")) {
+        impl_->execSql("ROLLBACK;");
+        return 0;
+    }
+    impl_->last_write_count = writes;
+    return count + skipped_file_count;
 }
 
 void SearchIndexService::registerCapability(CapabilityRegistry& caps,
@@ -1008,7 +1383,7 @@ void SearchIndexService::registerCapability(CapabilityRegistry& caps,
                     docs.push_back(parseDoc(req));
                 }
                 const size_t n = upsertBatch(docs);
-                return {true, {{"upserted", n}}, "", "host.search", false};
+                return {true, {{"upserted", n}, {"written", lastWriteCount()}}, "", "host.search", false};
             }
 
             if (action == "remove") {
@@ -1029,11 +1404,38 @@ void SearchIndexService::registerCapability(CapabilityRegistry& caps,
                 return {ok, {{"cleared", ok}}, "", "host.search", false};
             }
 
-            if (action == "reindex") {
-                const size_t n = hydrateEcosystem(domains, &caps, data_root, config_root);
+            if (action == "hydrate_source") {
+                SearchHydrateOptions hopts;
+                hopts.scopes = 0;
+                const std::string sid = req.value("source_id", "");
+                if (!sid.empty()) {
+                    hopts.scopes |= kHydrateDomains;
+                    hopts.source_ids.insert(sid);
+                }
+                if (req.value("include_commands", false)) hopts.scopes |= kHydrateCommands;
+                if (req.value("include_vocab", false)) hopts.scopes |= kHydrateVocab;
+                if (req.value("include_archives", false)) hopts.scopes |= kHydrateArchives;
+                hopts.force = req.value("force", false);
+                if (hopts.scopes == 0) hopts.scopes = kHydrateAll;
+                const size_t n = hydrateIncremental(domains, &caps, data_root, config_root, hopts);
                 auto st = stats();
                 return {true, {
                     {"indexed", n},
+                    {"written", lastWriteCount()},
+                    {"total_docs", st.total_docs},
+                    {"by_kind", st.by_kind},
+                }, "", "host.search", false};
+            }
+
+            if (action == "reindex") {
+                SearchHydrateOptions hopts;
+                hopts.scopes = kHydrateAll;
+                hopts.force = req.value("force", true);
+                const size_t n = hydrateIncremental(domains, &caps, data_root, config_root, hopts);
+                auto st = stats();
+                return {true, {
+                    {"indexed", n},
+                    {"written", lastWriteCount()},
                     {"total_docs", st.total_docs},
                     {"by_kind", st.by_kind},
                 }, "", "host.search", false};
@@ -1050,7 +1452,7 @@ void SearchIndexService::registerCapability(CapabilityRegistry& caps,
 
             return {false, {{"error_code", "invalid_argument"}}, "Unsupported search.index.v1 action: " + action, "host.search", false};
         },
-        {{"name", "跨三域 SQLite FTS5 全局检索服务"}, {"version", "1.0.0"}},
+        {{"name", "跨三域 SQLite FTS5 全局检索服务"}, {"version", "1.1.0"}},
         100);
 }
 

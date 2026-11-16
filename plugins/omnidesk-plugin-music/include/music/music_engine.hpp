@@ -49,6 +49,7 @@ public:
     // Playback & Queue via MPVCore
     void setQueueAndPlay(std::vector<MusicTrack> queue, size_t start_index);
     void playTrack(const MusicTrack& track);
+    void syncExternalTrack(const MusicTrack& track);
     void playAdjacentTrack(int delta);
     void togglePlayPause();
     void seekSeconds(double sec);
@@ -125,6 +126,7 @@ private:
     MusicTrack active_track_;
     bool has_active_track_ = false;
     PlaybackSessionInfo active_session_;
+    std::string last_rpc_session_id_;
     LyricBundle active_lyrics_;
     uint64_t lyric_generation_ = 0;
     bool was_playing_in_mpv_ = false;

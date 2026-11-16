@@ -1,4 +1,5 @@
 #include "ai_curator/archive_rehydrator.hpp"
+#include "ai_curator/daily_scheduler.hpp"
 #include "ai_curator/git_mirror.hpp"
 #include "ai_curator/plugin.hpp"
 #include "ai_curator/utils.hpp"
@@ -523,6 +524,16 @@ int main() {
                     fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
                     fs::perm_options::replace, perm_ec);
 
+    auto agy_cfg_res = caps.call("recommend.feed.v1", {
+        {"action", "configure_daily_scheduler"},
+        {"auto_run_enabled", false},
+        {"agent_runner", "agy"},
+        {"obsidian_vault_dir", git_obs.string()},
+        {"music_daily_dir", git_mus.string()},
+    });
+    CHECK(agy_cfg_res.ok);
+    CHECK(agy_cfg_res.data.value("agent_runner", "") == "agy-cli");
+
     auto cfg_res = caps.call("recommend.feed.v1", {
         {"action", "configure_daily_scheduler"},
         {"auto_run_enabled", false},
@@ -568,6 +579,148 @@ int main() {
         if (d.value("date", "") == today) found_today = true;
     }
     CHECK(found_today);
+
+    // Bidirectional GitHub daily sync tests (bare origin remotes: pull-before-run + post-run push + sync_github)
+    {
+        const fs::path bare_obs = temp_root / "bare_obsidian.git";
+        const fs::path bare_mus = temp_root / "bare_music.git";
+        const fs::path seed_obs = temp_root / "seed_obsidian";
+        const fs::path seed_mus = temp_root / "seed_music";
+        const fs::path clone_obs = temp_root / "clone_obsidian";
+        const fs::path clone_mus = temp_root / "clone_music";
+        fs::create_directories(seed_obs);
+        fs::create_directories(seed_mus);
+
+        CHECK(ai_curator::runProcess({"git", "init", "--bare", "-b", "main", bare_obs.string()}).exit_code == 0);
+        CHECK(ai_curator::runProcess({"git", "init", "--bare", "-b", "main", bare_mus.string()}).exit_code == 0);
+
+        auto init_seed = [](const fs::path& dir, const fs::path& bare) {
+            ai_curator::runProcess({"git", "init", "-b", "main"}, dir.string());
+            ai_curator::runProcess({"git", "config", "user.email", "test@omnidesk.local"}, dir.string());
+            ai_curator::runProcess({"git", "config", "user.name", "OmniDesk Test"}, dir.string());
+            ai_curator::writeFileAtomic((dir / "README.md").string(), "# Seed\n");
+            ai_curator::runProcess({"git", "add", "README.md"}, dir.string());
+            ai_curator::runProcess({"git", "commit", "-m", "Initial commit"}, dir.string());
+            ai_curator::runProcess({"git", "remote", "add", "origin", bare.string()}, dir.string());
+            return ai_curator::runProcess({"git", "push", "-u", "origin", "main"}, dir.string()).exit_code == 0;
+        };
+        CHECK(init_seed(seed_obs, bare_obs));
+        CHECK(init_seed(seed_mus, bare_mus));
+
+        // Clone via GitMirror::syncRepo
+        auto c_obs = ai_curator::GitMirror::syncRepo(clone_obs.string(), bare_obs.string(), true, true);
+        auto c_mus = ai_curator::GitMirror::syncRepo(clone_mus.string(), bare_mus.string(), true, true);
+        CHECK(c_obs.cloned && c_obs.has_remote);
+        CHECK(c_mus.cloned && c_mus.has_remote);
+        ai_curator::runProcess({"git", "config", "user.email", "agent@omnidesk.local"}, clone_obs.string());
+        ai_curator::runProcess({"git", "config", "user.name", "OmniDesk Agent"}, clone_obs.string());
+        ai_curator::runProcess({"git", "config", "user.email", "agent@omnidesk.local"}, clone_mus.string());
+        ai_curator::runProcess({"git", "config", "user.name", "OmniDesk Agent"}, clone_mus.string());
+
+        // 1) Simulate remote GitHub already publishing today's `english` notes in seed_obs -> push to bare_obs
+        ai_curator::RepoPaths seed_paths;
+        seed_paths.obsidian_vault_dir = seed_obs.string();
+        seed_paths.music_daily_dir = seed_mus.string();
+        for (const auto& target :
+             ai_curator::DailyWorkflowScheduler::canonicalRepoTargets("english", today, seed_paths)) {
+            ai_curator::writeFileAtomic(target, "---\ndate: " + today + "\n---\n# Remote English\n");
+        }
+        CHECK(ai_curator::runProcess({"git", "add", "-A"}, seed_obs.string()).exit_code == 0);
+        CHECK(ai_curator::runProcess({"git", "commit", "-m", "Remote publish english"}, seed_obs.string()).exit_code == 0);
+        CHECK(ai_curator::runProcess({"git", "push", "origin", "main"}, seed_obs.string()).exit_code == 0);
+
+        // Calling daily_status with sync_remote=true pulls remote commit and marks `english` published
+        auto synced_st = caps.call("recommend.feed.v1", {
+            {"action", "daily_status"},
+            {"sync_remote", true},
+            {"force_sync", true},
+            {"obsidian_vault_dir", clone_obs.string()},
+            {"music_daily_dir", clone_mus.string()},
+        });
+        CHECK(synced_st.ok);
+        CHECK(synced_st.data["git_sync"].value("pulled_any", false) == true);
+        bool english_pulled_published = false;
+        for (const auto& wf : synced_st.data["workflows"]) {
+            if (wf.value("id", "") == "english") {
+                english_pulled_published = (wf.value("status", "") == "published");
+            }
+        }
+        CHECK(english_pulled_published);
+
+        // 2) Mock agent commits today's `news-youtube-reddit` locally WITHOUT pushing; scheduler must auto-push to origin/main
+        ai_curator::RepoPaths clone_paths;
+        clone_paths.obsidian_vault_dir = clone_obs.string();
+        clone_paths.music_daily_dir = clone_mus.string();
+        const auto disc_targets =
+            ai_curator::DailyWorkflowScheduler::canonicalRepoTargets("news-youtube-reddit", today, clone_paths);
+        CHECK(disc_targets.size() == 3);
+
+        const fs::path commit_only_agent = temp_root / "mock_commit_only_agent.sh";
+        std::string script_body = "#!/bin/sh\nset -e\n";
+        for (const auto& dt : disc_targets) {
+            script_body += "mkdir -p \"$(dirname '" + dt + "')\"\n";
+            script_body += "printf -- '---\\ndate: " + today + "\\n---\\n## 1. Synced Item\\n' > '" + dt + "'\n";
+        }
+        script_body += "git -C '" + clone_obs.string() + "' add -A\n";
+        script_body += "git -C '" + clone_obs.string() + "' commit -m 'Local agent commit discovery'\n";
+        script_body += "exit 0\n";
+        ai_curator::writeFileAtomic(commit_only_agent.string(), script_body);
+        fs::permissions(commit_only_agent,
+                        fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                        fs::perm_options::replace, perm_ec);
+
+        CHECK(caps.call("recommend.feed.v1", {
+            {"action", "configure_daily_scheduler"},
+            {"git_sync_enabled", true},
+            {"agent_runner", "custom"},
+            {"custom_agent_command", commit_only_agent.string()},
+            {"obsidian_vault_dir", clone_obs.string()},
+            {"music_daily_dir", clone_mus.string()},
+        }).ok);
+
+        auto disc_run = caps.call("recommend.feed.v1", {
+            {"action", "run_daily_workflows"},
+            {"project", "news-youtube-reddit"},
+            {"wait", true},
+            {"obsidian_vault_dir", clone_obs.string()},
+            {"music_daily_dir", clone_mus.string()},
+        });
+        CHECK(disc_run.ok);
+
+        const std::string local_head = ai_curator::trim(
+            ai_curator::runProcess({"git", "rev-parse", "HEAD"}, clone_obs.string()).stdout_text);
+        const std::string bare_head = ai_curator::trim(
+            ai_curator::runProcess({"git", "rev-parse", "refs/heads/main"}, bare_obs.string()).stdout_text);
+        CHECK(!local_head.empty());
+        CHECK(local_head == bare_head);
+
+        bool disc_pushed = false;
+        for (const auto& wf : disc_run.data["workflows"]) {
+            if (wf.value("id", "") == "news-youtube-reddit") {
+                disc_pushed = (wf.value("status", "") == "published" &&
+                               wf.value("git_sync_status", "") == "pushed");
+            }
+        }
+        CHECK(disc_pushed);
+
+        // 3) Explicit `sync_github` RPC pushes pending local commits in music_daily
+        ai_curator::writeFileAtomic((clone_mus / "SYNC_CHECK.md").string(), "ok\n");
+        CHECK(ai_curator::runProcess({"git", "add", "SYNC_CHECK.md"}, clone_mus.string()).exit_code == 0);
+        CHECK(ai_curator::runProcess({"git", "commit", "-m", "Music sync test"}, clone_mus.string()).exit_code == 0);
+
+        auto manual_sync = caps.call("recommend.feed.v1", {
+            {"action", "sync_github"},
+            {"obsidian_vault_dir", clone_obs.string()},
+            {"music_daily_dir", clone_mus.string()},
+        });
+        CHECK(manual_sync.ok);
+        CHECK(manual_sync.data.value("pushed_any", false) == true);
+        const std::string mus_local_head = ai_curator::trim(
+            ai_curator::runProcess({"git", "rev-parse", "HEAD"}, clone_mus.string()).stdout_text);
+        const std::string mus_bare_head = ai_curator::trim(
+            ai_curator::runProcess({"git", "rev-parse", "refs/heads/main"}, bare_mus.string()).stdout_text);
+        CHECK(mus_local_head == mus_bare_head);
+    }
 
     // Test cancelling a slow background agent process group
     CHECK(caps.call("recommend.feed.v1", {

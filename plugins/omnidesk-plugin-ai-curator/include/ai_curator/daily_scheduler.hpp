@@ -2,6 +2,7 @@
 
 #include "ai_curator/git_mirror.hpp"
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -24,7 +25,8 @@ struct WorkflowDefinition {
 
 struct SchedulerConfig {
     bool auto_run_enabled = true;
-    std::string agent_runner = "auto"; // auto | codex | claude | opencode | gemini | custom
+    bool git_sync_enabled = true;
+    std::string agent_runner = "auto"; // auto | agy-cli | codex | claude | opencode | gemini | custom
     std::string custom_agent_command;
     std::unordered_map<std::string, bool> project_enabled = {
         {"news-youtube-reddit", true},
@@ -44,6 +46,8 @@ struct ProjectAttemptRecord {
     std::string last_finished_at;
     std::string last_runner;
     std::string log_path;
+    std::string git_sync_status; // "" | pulled | pushed | synced | local_only | push_failed
+    std::string git_sync_detail;
 };
 
 class DailyWorkflowScheduler {
@@ -68,6 +72,9 @@ public:
     void initialize(const RepoPaths& paths);
     void shutdown();
 
+    nlohmann::json syncGitHubRepos(const RepoPaths& paths,
+                                   bool push_ahead = false,
+                                   bool force = false);
     nlohmann::json inspectStatus(const RepoPaths& paths);
     omnidesk::CapabilityResult configure(const RepoPaths& paths, const nlohmann::json& req);
     omnidesk::CapabilityResult startWorkflows(const RepoPaths& paths,
@@ -165,7 +172,11 @@ private:
     std::string active_stage_message_;
     std::string active_live_line_;
     std::string last_run_summary_;
+    std::string last_git_sync_at_;
+    std::string last_git_sync_summary_;
+    std::chrono::steady_clock::time_point last_remote_pull_tp_{};
 
+    std::mutex git_sync_mutex_;
     std::mutex thread_lifecycle_mutex_;
     std::thread worker_thread_;
 };

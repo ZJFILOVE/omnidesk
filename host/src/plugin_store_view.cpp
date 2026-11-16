@@ -2,12 +2,86 @@
 
 #include <algorithm>
 #include <thread>
+#include "omnidesk/host/auth_center_dialog.hpp"
 #include "omnidesk/host/kernel.hpp"
+#include "omnidesk/host/ui_comfort.hpp"
 #include "omnidesk/pm/scaffold.hpp"
 #include "omnidesk/ui_theme.hpp"
 
 namespace omnidesk::host {
 namespace {
+
+bool focusIsInsideView(brls::View* ancestor) {
+    if (!ancestor) return false;
+    brls::View* cur = brls::Application::getCurrentFocus();
+    while (cur) {
+        if (cur == ancestor) return true;
+        cur = cur->getParent();
+    }
+    return false;
+}
+
+void clearBoxViewsSafely(brls::Box* box) {
+    if (!box) return;
+    if (focusIsInsideView(box)) {
+        brls::Application::giveFocus(nullptr);
+    }
+    box->clearViews();
+}
+
+std::string trimAscii(const std::string& s) {
+    size_t b = 0;
+    while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) {
+        ++b;
+    }
+    size_t e = s.size();
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n')) {
+        --e;
+    }
+    return s.substr(b, e - b);
+}
+
+std::string truncateUtf8Display(const std::string& s, size_t max_codepoints) {
+    if (s.empty() || max_codepoints == 0) return s;
+    size_t cp = 0;
+    size_t i = 0;
+    while (i < s.size()) {
+        if (cp >= max_codepoints) {
+            return s.substr(0, i) + "…";
+        }
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t adv = 1;
+        if ((c & 0x80u) == 0) adv = 1;
+        else if ((c & 0xE0u) == 0xC0u) adv = 2;
+        else if ((c & 0xF0u) == 0xE0u) adv = 3;
+        else if ((c & 0xF8u) == 0xF0u) adv = 4;
+        if (i + adv > s.size()) break;
+        i += adv;
+        ++cp;
+    }
+    return s;
+}
+
+std::optional<WorkspaceTabSpec> findCustomTabForPlugin(const std::string& plugin_id) {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return std::nullopt;
+    for (const auto& tab : kernel.domains().workspaceTabs()) {
+        if (tab.plugin_id == plugin_id && !tab.tab_id.empty()) {
+            return tab;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string domainWorkbenchButtonTitle(ContentDomain d) {
+    switch (d) {
+        case ContentDomain::Media: return "打开影视与音乐工作台 ▸";
+        case ContentDomain::Text: return "打开文字与期刊工作台 ▸";
+        case ContentDomain::Book: return "打开书本与 PDF 工作台 ▸";
+        case ContentDomain::Core: return "打开 AI 协作栏 (F8) ▸";
+    }
+    return "打开工作台 ▸";
+}
 
 std::string joinStrings(const std::vector<std::string>& v, const std::string& sep) {
     std::string out;
@@ -35,6 +109,7 @@ brls::Box* makeBadgeRow(const std::vector<std::string>& items,
                         size_t max_items = 4) {
     auto* row = new brls::Box(brls::Axis::ROW);
     row->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(row, 4.0f);
     for (size_t i = 0; i < items.size() && i < max_items; ++i) {
         auto* pill = ui::makePill(prefix + items[i], bg_token, fg_token);
         pill->setMarginRight(6);
@@ -49,7 +124,13 @@ brls::Box* makeBadgeRow(const std::vector<std::string>& items,
 
 } // namespace
 
-PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
+PluginStoreView::PluginStoreView(OpenCustomTabCallback on_open_custom_tab,
+                                 OpenDomainCallback on_open_domain,
+                                 OpenAuthCenterCallback on_open_auth_center)
+    : brls::Box(brls::Axis::COLUMN),
+      on_open_custom_tab_(std::move(on_open_custom_tab)),
+      on_open_domain_(std::move(on_open_domain)),
+      on_open_auth_center_(std::move(on_open_auth_center)) {
     setGrow(1.0f);
     setPadding(22, 24, 18, 24);
     setBackgroundColor(ui::color("brls/background"));
@@ -62,6 +143,7 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     header->setMarginBottom(12);
 
     auto* title_col = new brls::Box(brls::Axis::COLUMN);
+    title_col->setShrink(1.0f);
     auto* title = ui::makeLabel("插件市场 · Plugin Marketplace", 24.0f, "brls/text");
     title->setMarginBottom(3);
     summary_label_ = ui::makeLabel("独立目录 & GitHub 仓库构建 · ABI v1 热插拔底座", 14.5f, "font/grey");
@@ -71,16 +153,28 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
 
     auto* actions = new brls::Box(brls::Axis::ROW);
     actions->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(actions, 6.0f);
+
+    auto* auth_hub_btn = ui::makeButton("账号授权中心", [this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (on_open_auth_center_) {
+            on_open_auth_center_(selected_plugin_id_);
+        } else {
+            AuthCenterDialog::open({}, selected_plugin_id_);
+        }
+    }, true, 35.0f);
+    auth_hub_btn->setMarginRight(6);
+    actions->addView(auth_hub_btn);
 
     auto* search_btn = ui::makeButton("搜索 /", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) promptSearch();
-    }, false, 38.0f);
+    }, false, 35.0f);
     search_btn->setMarginRight(6);
     actions->addView(search_btn);
 
     auto* radar_btn = ui::makeButton("更新雷达", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) startUpdateRadar();
-    }, false, 38.0f);
+    }, false, 35.0f);
     radar_btn->setMarginRight(6);
     actions->addView(radar_btn);
 
@@ -88,26 +182,26 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
         if (alive->load(std::memory_order_acquire) && !busy_) {
             startBatchRebuild(true);
         }
-    }, false, 38.0f);
+    }, false, 35.0f);
     rebuild_stale_btn_->setMarginRight(6);
     rebuild_stale_btn_->setVisibility(brls::Visibility::GONE);
     actions->addView(rebuild_stale_btn_);
 
     auto* gh_btn = ui::makeButton("+ GitHub 安装", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) openInstallModal(false);
-    }, true, 38.0f);
+    }, false, 35.0f);
     gh_btn->setMarginRight(6);
     actions->addView(gh_btn);
 
     auto* local_btn = ui::makeButton("+ 本地源码安装", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) openInstallModal(true);
-    }, false, 38.0f);
+    }, false, 35.0f);
     local_btn->setMarginRight(6);
     actions->addView(local_btn);
 
     auto* new_btn = ui::makeButton("+ 脚手架", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) openScaffoldModal();
-    }, false, 38.0f);
+    }, false, 35.0f);
     actions->addView(new_btn);
 
     header->setId("omnidesk/pane_header");
@@ -118,40 +212,47 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     filter_bar_ = new brls::Box(brls::Axis::ROW);
     filter_bar_->setId("omnidesk/pane_filters");
     filter_bar_->setAlignItems(brls::AlignItems::CENTER);
-    filter_bar_->setMarginBottom(14);
+    filter_bar_->setMarginBottom(12);
+    ui_comfort::enableFlexWrap(filter_bar_, 6.0f);
     addView(filter_bar_);
 
     // Master-Detail Split Body
     auto* split = new brls::Box(brls::Axis::ROW);
     split->setGrow(1.0f);
+    split->setShrink(1.0f);
+    split->setMinHeight(0);
     split->setWidthPercentage(100);
 
-    auto* list_scroll = new brls::ScrollingFrame();
-    list_scroll->setId("omnidesk/pane_primary");
-    list_scroll->setWidthPercentage(52);
-    list_scroll->setHeightPercentage(100);
-    list_scroll->setMarginRight(16);
+    list_scroll_ = new brls::ScrollingFrame();
+    list_scroll_->setId("omnidesk/pane_primary");
+    list_scroll_->setWidthPercentage(52);
+    list_scroll_->setHeightPercentage(100);
+    list_scroll_->setMarginRight(16);
     list_container_ = new brls::Box(brls::Axis::COLUMN);
     list_container_->setWidthPercentage(100);
-    list_scroll->setContentView(list_container_);
-    split->addView(list_scroll);
+    list_scroll_->setContentView(list_container_);
+    split->addView(list_scroll_);
 
     auto* right_col = new brls::Box(brls::Axis::COLUMN);
     right_col->setId("omnidesk/pane_secondary");
     right_col->setWidthPercentage(48);
     right_col->setHeightPercentage(100);
+    right_col->setMinWidth(0);
 
-    auto* detail_scroll = new brls::ScrollingFrame();
-    detail_scroll->setGrow(1.0f);
-    detail_scroll->setWidthPercentage(100);
+    detail_scroll_ = new brls::ScrollingFrame();
+    detail_scroll_->setGrow(1.0f);
+    detail_scroll_->setShrink(1.0f);
+    detail_scroll_->setMinHeight(0);
+    detail_scroll_->setWidthPercentage(100);
     detail_container_ = new brls::Box(brls::Axis::COLUMN);
     detail_container_->setWidthPercentage(100);
-    detail_scroll->setContentView(detail_container_);
-    right_col->addView(detail_scroll);
+    detail_scroll_->setContentView(detail_container_);
+    right_col->addView(detail_scroll_);
 
     // Live Build & Verify Log Console
     auto* console_card = ui::makeCard("desktop/soft", 14.0f, 10.0f);
     console_card->setHeight(172);
+    console_card->setShrink(0.0f);
     console_card->setMarginTop(12);
 
     auto* console_hdr = new brls::Box(brls::Axis::ROW);
@@ -183,6 +284,9 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
     bus_sub_token_ = HostKernel::instance().bus().subscribe(
         "plugin.state_changed", "host.plugin_store",
         [this, alive = alive_](const std::string&, const nlohmann::json&) {
+            if (suppress_bus_refresh_) {
+                return;
+            }
             brls::sync([this, alive]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 if (getVisibility() == brls::Visibility::VISIBLE) {
@@ -193,14 +297,42 @@ PluginStoreView::PluginStoreView() : brls::Box(brls::Axis::COLUMN) {
             });
         });
 
+    auth_sub_token_ = AuthCenterManager::instance().subscribeChanges([this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (getVisibility() == brls::Visibility::VISIBLE) {
+                refresh();
+            } else {
+                dirty_ = true;
+            }
+        });
+    });
+
     refresh();
 }
 
 PluginStoreView::~PluginStoreView() {
     alive_->store(false, std::memory_order_release);
+    if (auth_sub_token_ != 0) {
+        AuthCenterManager::instance().unsubscribeChanges(auth_sub_token_);
+        auth_sub_token_ = 0;
+    }
     if (HostKernel::instance().isInitialized() && bus_sub_token_ != 0) {
         HostKernel::instance().bus().unsubscribe(bus_sub_token_);
     }
+}
+
+void PluginStoreView::focusPluginConfig(const std::string& plugin_id) {
+    if (plugin_id.empty()) return;
+    filter_tab_ = FilterTab::All;
+    search_query_.clear();
+    selected_plugin_id_ = plugin_id;
+    refresh();
+    brls::sync([this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) {
+            scrollToConfigSection(true);
+        }
+    });
 }
 
 void PluginStoreView::appendLog(const std::string& line) {
@@ -245,7 +377,7 @@ void PluginStoreView::refresh() {
 
     abi_status_cache_.clear();
     size_t stale_count = 0;
-    for (const auto& entry : kernel.installer().checkInstalledAbiStatus(false)) {
+    for (const auto& entry : kernel.installedAbiStatuses(false)) {
         if (entry.needs_rebuild) {
             ++stale_count;
         }
@@ -273,31 +405,34 @@ void PluginStoreView::refresh() {
     }
 
     // Filter tabs
-    filter_bar_->clearViews();
+    clearBoxViewsSafely(filter_bar_);
     struct TabDef {
         FilterTab tab;
         const char* label;
+        const char* accent;
     };
     const TabDef tabs[] = {
-        {FilterTab::All, "全部"},
-        {FilterTab::Core, "底座与AI"},
-        {FilterTab::Media, "影视音乐"},
-        {FilterTab::Text, "文字期刊"},
-        {FilterTab::Book, "书本PDF"},
-        {FilterTab::Installed, "已安装"},
-        {FilterTab::Diagnostics, "能力诊断"},
+        {FilterTab::All, "全部", "brls/accent"},
+        {FilterTab::Core, "底座与AI", "domain/core"},
+        {FilterTab::Media, "影视音乐", "domain/media"},
+        {FilterTab::Text, "文字期刊", "domain/text"},
+        {FilterTab::Book, "书本PDF", "domain/book"},
+        {FilterTab::Installed, "已安装", "status/ok_fg"},
+        {FilterTab::Diagnostics, "能力诊断", "domain/core"},
     };
 
     for (const auto& t : tabs) {
         const bool active = (filter_tab_ == t.tab);
-        auto* btn = ui::makeButton(t.label, [this, alive = alive_, tab = t.tab]() {
+        auto* btn = ui_comfort::makeFilterChip(t.label, [this, alive = alive_, tab = t.tab]() {
             brls::sync([this, alive, tab]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 filter_tab_ = tab;
+                if (list_scroll_) list_scroll_->setContentOffsetY(0.0f, false);
+                if (detail_scroll_) detail_scroll_->setContentOffsetY(0.0f, false);
                 refresh();
             });
-        }, active, 34.0f);
-        btn->setMarginRight(8);
+        }, active, t.accent, 32.0f);
+        btn->setMarginRight(7);
         filter_bar_->addView(btn);
     }
 
@@ -306,9 +441,10 @@ void PluginStoreView::refresh() {
             brls::sync([this, alive]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 search_query_.clear();
+                if (list_scroll_) list_scroll_->setContentOffsetY(0.0f, false);
                 refresh();
             });
-        }, false, 34.0f);
+        }, false, 32.0f);
         filter_bar_->addView(clr);
     }
 
@@ -317,7 +453,7 @@ void PluginStoreView::refresh() {
 
 void PluginStoreView::rebuildList() {
     list_cards_.clear();
-    list_container_->clearViews();
+    clearBoxViewsSafely(list_container_);
     if (filter_tab_ == FilterTab::Diagnostics) {
         renderDiagnosticsView();
         return;
@@ -327,12 +463,10 @@ void PluginStoreView::rebuildList() {
 
 void PluginStoreView::updateSelectedCardStyling(const std::string& prev_id, const std::string& next_id) {
     if (auto it = list_cards_.find(prev_id); it != list_cards_.end() && it->second) {
-        it->second->setBackgroundColor(ui::color("desktop/surface"));
-        it->second->setBorderColor(ui::color("desktop/border"));
+        ui_comfort::styleSelectableCard(it->second, false, "brls/accent");
     }
     if (auto it = list_cards_.find(next_id); it != list_cards_.end() && it->second) {
-        it->second->setBackgroundColor(ui::color("desktop/active"));
-        it->second->setBorderColor(ui::color("brls/accent"));
+        ui_comfort::styleSelectableCard(it->second, true, "brls/accent");
     }
 }
 
@@ -414,7 +548,11 @@ void PluginStoreView::renderCatalogOrInstalledList() {
         auto* empty = ui::makeCard("desktop/surface", 20.0f, 10.0f);
         empty->addView(ui::makeLabel("当前筛选条件下暂无插件。", 16.0f, "font/grey"));
         list_container_->addView(empty);
-        detail_container_->clearViews();
+        clearBoxViewsSafely(detail_container_);
+        config_section_box_ = nullptr;
+        first_config_btn_ = nullptr;
+        primary_entry_btn_ = nullptr;
+        config_edit_buttons_.clear();
         return;
     }
 
@@ -439,9 +577,16 @@ void PluginStoreView::renderCatalogOrInstalledList() {
 
         auto* name_row = new brls::Box(brls::Axis::ROW);
         name_row->setAlignItems(brls::AlignItems::CENTER);
-        name_row->addView(ui::makeLabel(e.name, 18.0f, "brls/text"));
+        name_row->setShrink(1.0f);
+        name_row->setMinWidth(0);
+        name_row->setMarginRight(8);
+        auto* name_lbl = ui::makeLabel(e.name, 18.0f, "brls/text");
+        name_lbl->setSingleLine(true);
+        name_lbl->setShrink(1.0f);
+        name_row->addView(name_lbl);
         auto* ver = ui::makePill("v" + e.version, "desktop/soft", "font/grey");
         ver->setMarginLeft(8);
+        ver->setShrink(0.0f);
         name_row->addView(ver);
         top->addView(name_row);
 
@@ -469,6 +614,7 @@ void PluginStoreView::renderCatalogOrInstalledList() {
         }
         auto* badges = new brls::Box(brls::Axis::ROW);
         badges->setAlignItems(brls::AlignItems::CENTER);
+        badges->setShrink(0.0f);
         if (e.is_installed) {
             auto abi_it = abi_status_cache_.find(e.id);
             if (abi_it != abi_status_cache_.end() && abi_it->second.needs_rebuild) {
@@ -483,6 +629,13 @@ void PluginStoreView::renderCatalogOrInstalledList() {
                     w->quarantined ? "status/err_fg" : "status/info_fg");
                 iso_pill->setMarginRight(6);
                 badges->addView(iso_pill);
+            }
+            const auto auth_rep = AuthCenterManager::instance().inspectPlugin(e.id);
+            if (auth_rep.method != AuthMethodKind::NoAuth) {
+                auto* auth_pill = ui::makePill(
+                    auth_rep.status_badge_text, auth_rep.status_bg_token, auth_rep.status_fg_token);
+                auth_pill->setMarginRight(6);
+                badges->addView(auth_pill);
             }
         }
         badges->addView(ui::makePill(st_text, st_bg, st_fg));
@@ -509,10 +662,17 @@ void PluginStoreView::renderCatalogOrInstalledList() {
         list_cards_[e.id] = card;
         card->registerClickAction([this, alive = alive_, id = e.id](brls::View*) {
             brls::sync([this, alive, id]() {
-                if (!alive->load(std::memory_order_acquire) || selected_plugin_id_ == id) return;
+                if (!alive->load(std::memory_order_acquire)) return;
+                if (selected_plugin_id_ == id) {
+                    activateSelectedPluginEntry(id);
+                    return;
+                }
                 const std::string prev = selected_plugin_id_;
                 selected_plugin_id_ = id;
                 updateSelectedCardStyling(prev, selected_plugin_id_);
+                if (detail_scroll_) {
+                    detail_scroll_->setContentOffsetY(0.0f, false);
+                }
                 renderDetail(selected_plugin_id_);
             });
             return true;
@@ -537,7 +697,7 @@ void PluginStoreView::renderDiagnosticsView() {
     host_sig_lbl->setMarginTop(4);
     abi_card->addView(host_sig_lbl);
 
-    const auto abi_entries = kernel.installer().checkInstalledAbiStatus(false);
+    const auto abi_entries = kernel.installedAbiStatuses(false);
     size_t stale_count = 0;
     if (abi_entries.empty()) {
         auto* none = ui::makeLabel("当前尚未安装本地 .so 插件。", 14.5f, "font/grey");
@@ -554,19 +714,24 @@ void PluginStoreView::renderDiagnosticsView() {
             row->setMarginTop(8);
 
             auto* left = new brls::Box(brls::Axis::COLUMN);
+            left->setWidth(0);
             left->setGrow(1.0f);
+            left->setShrink(1.0f);
+            left->setMarginRight(10);
             left->addView(ui::makeLabel(ae.plugin_id + " (v" + ae.version + ")", 14.5f, "brls/text"));
             const std::string sub =
                 ae.compatible ? ("签名: " + ae.plugin_abi_signature) : ae.reason;
             left->addView(ui::makeLabel(sub, 12.5f, ae.compatible ? "font/grey" : "status/warn_fg"));
             row->addView(left);
 
-            row->addView(ui::makePill(
+            auto* pill = ui::makePill(
                 ae.needs_rebuild ? "ABI过期·需重编" : (ae.compatible ? "兼容" : "不兼容"),
                 ae.needs_rebuild ? "status/warn_bg"
                                  : (ae.compatible ? "status/ok_bg" : "status/err_bg"),
                 ae.needs_rebuild ? "status/warn_fg"
-                                 : (ae.compatible ? "status/ok_fg" : "status/err_fg")));
+                                 : (ae.compatible ? "status/ok_fg" : "status/err_fg"));
+            pill->setShrink(0.0f);
+            row->addView(pill);
             abi_card->addView(row);
         }
     }
@@ -610,7 +775,10 @@ void PluginStoreView::renderDiagnosticsView() {
             row->setMarginTop(8);
 
             auto* left = new brls::Box(brls::Axis::COLUMN);
+            left->setWidth(0);
             left->setGrow(1.0f);
+            left->setShrink(1.0f);
+            left->setMarginRight(10);
             const std::string tr =
                 (w.transport == WorkerTransport::UnixSocket) ? "unix_socket" : "pipe";
             left->addView(ui::makeLabel(w.worker_id + " [" + tr + "]", 14.5f, "brls/text"));
@@ -630,7 +798,9 @@ void PluginStoreView::renderDiagnosticsView() {
                 w.quarantined ? "status/err_bg" : (w.running ? "status/ok_bg" : "status/warn_bg");
             const std::string pill_fg =
                 w.quarantined ? "status/err_fg" : (w.running ? "status/ok_fg" : "status/warn_fg");
-            row->addView(ui::makePill(pill_txt, pill_bg, pill_fg));
+            auto* pill = ui::makePill(pill_txt, pill_bg, pill_fg);
+            pill->setShrink(0.0f);
+            row->addView(pill);
             worker_card->addView(row);
         }
     }
@@ -650,9 +820,15 @@ void PluginStoreView::renderDiagnosticsView() {
         for (const auto& c : caps) {
             auto* row = new brls::Box(brls::Axis::ROW);
             row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+            row->setAlignItems(brls::AlignItems::CENTER);
             row->setMarginTop(8);
-            row->addView(ui::makePill(c.capability_id, "status/info_bg", "status/info_fg"));
-            row->addView(ui::makeLabel(c.plugin_id + " (priority=" + std::to_string(c.priority) + ")", 14.5f, "brls/text"));
+            auto* pill = ui::makePill(c.capability_id, "status/info_bg", "status/info_fg");
+            pill->setShrink(0.0f);
+            pill->setMarginRight(8);
+            row->addView(pill);
+            auto* r_lbl = ui::makeLabel(c.plugin_id + " (priority=" + std::to_string(c.priority) + ")", 14.5f, "brls/text");
+            r_lbl->setShrink(1.0f);
+            row->addView(r_lbl);
             cap_card->addView(row);
         }
     }
@@ -669,7 +845,12 @@ void PluginStoreView::renderDiagnosticsView() {
     dom_card->addView(stat_lbl);
     list_container_->addView(dom_card);
 
-    detail_container_->clearViews();
+    clearBoxViewsSafely(detail_container_);
+    config_section_box_ = nullptr;
+    first_config_btn_ = nullptr;
+    primary_entry_btn_ = nullptr;
+    config_edit_buttons_.clear();
+
     auto* help = ui::makeCard("desktop/surface", 16.0f, 10.0f);
     help->addView(ui::makeLabel("插件解耦与防崩溃架构说明", 18.0f, "brls/text"));
     help->addView(ui::makeLabel(
@@ -682,7 +863,12 @@ void PluginStoreView::renderDiagnosticsView() {
 }
 
 void PluginStoreView::renderDetail(const std::string& plugin_id) {
-    detail_container_->clearViews();
+    clearBoxViewsSafely(detail_container_);
+    config_section_box_ = nullptr;
+    first_config_btn_ = nullptr;
+    primary_entry_btn_ = nullptr;
+    config_edit_buttons_.clear();
+
     auto& kernel = HostKernel::instance();
 
     auto rec = kernel.installer().getInstalled(plugin_id);
@@ -699,6 +885,7 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
     const std::string desc = rec ? rec->manifest.description : cat->description;
     const std::string repo = rec ? rec->source_url : cat->repo_url;
     const std::string branch = rec ? rec->branch : cat->repo_branch;
+    const ContentDomain domain = rec ? rec->manifest.domain : cat->domain;
     const auto provides = rec ? rec->manifest.provides : cat->provides;
     const auto consumes = rec ? rec->manifest.consumes : cat->consumes;
 
@@ -858,10 +1045,10 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
         card->addView(err_card);
     }
 
-    // Action Bar
-    auto* act = new brls::Box(brls::Axis::ROW);
-    act->setMarginTop(4);
+    // Action Bar (two clean rows when installed so controls never clip horizontally)
     if (!rec.has_value()) {
+        auto* act = new brls::Box(brls::Axis::ROW);
+        act->setMarginTop(4);
         auto* inst_btn = ui::makeButton(
             busy_ ? "正在安装..." : "安装插件 (优先 .tar.zst)",
             [this, alive = alive_, repo, branch]() {
@@ -870,16 +1057,75 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                 }
             },
             true, 40.0f);
+        primary_entry_btn_ = inst_btn;
         act->addView(inst_btn);
+        card->addView(act);
     } else {
         const bool is_loaded = st && st->loaded;
+
+        // Row 1: Primary Workspace/Workbench Entry + Quick Jump to Settings + Enable/Disable
+        auto* entry_row = new brls::Box(brls::Axis::ROW);
+        entry_row->setAlignItems(brls::AlignItems::CENTER);
+        entry_row->setMarginTop(4);
+        entry_row->setMarginBottom(8);
+
+        if (is_loaded) {
+            if (auto custom_tab = findCustomTabForPlugin(plugin_id)) {
+                auto* open_tab_btn = ui::makeButton(
+                    "进入: " + custom_tab->title + " ▸",
+                    [this, alive = alive_, tid = custom_tab->tab_id]() {
+                        if (alive->load(std::memory_order_acquire) && on_open_custom_tab_) {
+                            on_open_custom_tab_(tid);
+                        }
+                    },
+                    true, 38.0f);
+                open_tab_btn->setMarginRight(8);
+                open_tab_btn->setShrink(0.0f);
+                primary_entry_btn_ = open_tab_btn;
+                entry_row->addView(open_tab_btn);
+            } else if (on_open_domain_) {
+                auto* open_dom_btn = ui::makeButton(
+                    domainWorkbenchButtonTitle(domain),
+                    [this, alive = alive_, domain]() {
+                        if (alive->load(std::memory_order_acquire) && on_open_domain_) {
+                            on_open_domain_(domain);
+                        }
+                    },
+                    domain != ContentDomain::Core, 38.0f);
+                open_dom_btn->setMarginRight(8);
+                open_dom_btn->setShrink(0.0f);
+                primary_entry_btn_ = open_dom_btn;
+                entry_row->addView(open_dom_btn);
+            }
+        }
+
+        auto* cfg_jump_btn = ui::makeButton(
+            "⚙ 参数设置",
+            [this, alive = alive_]() {
+                brls::sync([this, alive]() {
+                    if (alive->load(std::memory_order_acquire)) {
+                        scrollToConfigSection(true);
+                    }
+                });
+            },
+            false, 38.0f);
+        cfg_jump_btn->setMarginRight(8);
+        cfg_jump_btn->setShrink(0.0f);
+        entry_row->addView(cfg_jump_btn);
+
         auto* toggle_btn = ui::makeButton(
             rec->enabled ? (is_loaded ? "停用" : "启用并加载") : "启用",
             [this, alive = alive_, plugin_id, enabled = rec->enabled, is_loaded]() {
                 brls::sync([this, alive, plugin_id, enabled, is_loaded]() {
                     if (!alive->load(std::memory_order_acquire)) return;
                     auto& k = HostKernel::instance();
+                    clearBoxViewsSafely(detail_container_);
+                    config_section_box_ = nullptr;
+                    first_config_btn_ = nullptr;
+                    primary_entry_btn_ = nullptr;
+                    config_edit_buttons_.clear();
                     std::string err;
+                    suppress_bus_refresh_ = true;
                     if (enabled && is_loaded) {
                         k.plugins().disablePlugin(plugin_id);
                         appendLog("Disabled plugin " + plugin_id);
@@ -891,12 +1137,21 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                             appendLog("Loaded plugin " + plugin_id);
                         }
                     }
+                    suppress_bus_refresh_ = false;
                     refresh();
                 });
             },
             !is_loaded && !abi_needs_rebuild, 38.0f);
-        toggle_btn->setMarginRight(8);
-        act->addView(toggle_btn);
+        toggle_btn->setShrink(0.0f);
+        if (!primary_entry_btn_) {
+            primary_entry_btn_ = toggle_btn;
+        }
+        entry_row->addView(toggle_btn);
+        card->addView(entry_row);
+
+        // Row 2: Lifecycle Maintenance (Update / Rebuild / Rollback / Uninstall)
+        auto* maint_row = new brls::Box(brls::Axis::ROW);
+        maint_row->setAlignItems(brls::AlignItems::CENTER);
 
         auto rit = radar_results_.find(plugin_id);
         const bool radar_has_update = (rit != radar_results_.end() && rit->second.ok && rit->second.update_available);
@@ -909,24 +1164,32 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
             [this, alive = alive_, plugin_id]() {
                 if (alive->load(std::memory_order_acquire) && !busy_) startUpdate(plugin_id);
             },
-            radar_has_update, 38.0f);
+            radar_has_update, 36.0f);
         upd_btn->setMarginRight(8);
-        act->addView(upd_btn);
+        upd_btn->setShrink(0.0f);
+        maint_row->addView(upd_btn);
 
         auto* rebuild_btn = ui::makeButton(
             busy_ ? "重编中..." : "按当前SDK重编",
             [this, alive = alive_, plugin_id]() {
                 if (alive->load(std::memory_order_acquire) && !busy_) startRebuildPlugin(plugin_id);
             },
-            abi_needs_rebuild && !radar_has_update, 38.0f);
+            abi_needs_rebuild && !radar_has_update, 36.0f);
         rebuild_btn->setMarginRight(8);
-        act->addView(rebuild_btn);
+        rebuild_btn->setShrink(0.0f);
+        maint_row->addView(rebuild_btn);
 
         if (!rec->backup_versions.empty()) {
             auto* rb_btn = ui::makeButton("回滚", [this, alive = alive_, plugin_id]() {
                 brls::sync([this, alive, plugin_id]() {
                     if (!alive->load(std::memory_order_acquire)) return;
                     auto& k = HostKernel::instance();
+                    clearBoxViewsSafely(detail_container_);
+                    config_section_box_ = nullptr;
+                    first_config_btn_ = nullptr;
+                    primary_entry_btn_ = nullptr;
+                    config_edit_buttons_.clear();
+                    suppress_bus_refresh_ = true;
                     k.plugins().unloadPlugin(plugin_id);
                     auto r = k.installer().rollbackPlugin(plugin_id);
                     if (r.ok) {
@@ -936,17 +1199,25 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                     } else {
                         appendLog("Rollback failed: " + r.error);
                     }
+                    suppress_bus_refresh_ = false;
                     refresh();
                 });
-            }, false, 38.0f);
+            }, false, 36.0f);
             rb_btn->setMarginRight(8);
-            act->addView(rb_btn);
+            rb_btn->setShrink(0.0f);
+            maint_row->addView(rb_btn);
         }
 
         auto* rm_btn = ui::makeButton("卸载", [this, alive = alive_, plugin_id]() {
             brls::sync([this, alive, plugin_id]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 auto& k = HostKernel::instance();
+                clearBoxViewsSafely(detail_container_);
+                config_section_box_ = nullptr;
+                first_config_btn_ = nullptr;
+                primary_entry_btn_ = nullptr;
+                config_edit_buttons_.clear();
+                suppress_bus_refresh_ = true;
                 k.plugins().unloadPlugin(plugin_id);
                 std::string err;
                 if (k.installer().removePlugin(plugin_id, err)) {
@@ -954,12 +1225,14 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
                 } else {
                     appendLog("Remove failed: " + err);
                 }
+                suppress_bus_refresh_ = false;
                 refresh();
             });
-        }, false, 38.0f);
-        act->addView(rm_btn);
+        }, false, 36.0f);
+        rm_btn->setShrink(0.0f);
+        maint_row->addView(rm_btn);
+        card->addView(maint_row);
     }
-    card->addView(act);
 
     if (rec.has_value()) {
         card->addView(ui::makeDivider(14.0f));
@@ -971,110 +1244,536 @@ void PluginStoreView::renderDetail(const std::string& plugin_id) {
 
 void PluginStoreView::renderConfigSection(brls::Box* container, const pm::InstalledPluginRecord& rec) {
     auto& kernel = HostKernel::instance();
-    container->addView(ui::makeLabel("插件配置与凭据 (config_schema)", 17.0f, "brls/text"));
+    config_section_box_ = new brls::Box(brls::Axis::COLUMN);
+    config_section_box_->setWidthPercentage(100);
+    container->addView(config_section_box_);
 
-    // Custom settings view override from plugin if provided
-    if (auto* custom = kernel.plugins().createCustomSettingsView(rec.manifest.id)) {
-        container->addView(custom);
-        return;
+    auto* hdr_row = new brls::Box(brls::Axis::ROW);
+    hdr_row->setWidthPercentage(100);
+    hdr_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    hdr_row->setAlignItems(brls::AlignItems::CENTER);
+    hdr_row->addView(ui::makeLabel("插件配置与凭据 (参数设置)", 17.5f, "brls/text"));
+    if (!rec.manifest.config_schema.empty()) {
+        auto* cnt_pill = ui::makePill(
+            std::to_string(rec.manifest.config_schema.size()) + " 项可调参数",
+            "desktop/soft", "font/grey");
+        cnt_pill->setShrink(0.0f);
+        hdr_row->addView(cnt_pill);
+    }
+    config_section_box_->addView(hdr_row);
+
+    // Host-unified Auth Status & One-Click Browser Cookie Harvester card
+    const auto auth_rep = AuthCenterManager::instance().inspectPlugin(rec.manifest.id);
+    if (auth_rep.method != AuthMethodKind::NoAuth) {
+        auto* auth_box = ui::makeCard(
+            auth_rep.status == AuthStatusKind::GuestCookieOnly ? "status/warn_bg" : "desktop/soft",
+            12.0f, 10.0f);
+        auth_box->setMarginTop(8);
+        auth_box->setMarginBottom(4);
+
+        auto* ab_top = new brls::Box(brls::Axis::ROW);
+        ab_top->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        ab_top->setAlignItems(brls::AlignItems::CENTER);
+        ab_top->addView(ui::makeLabel("登录授权诊断与一键自动取 Cookie", 14.5f, "brls/text"));
+        ab_top->addView(ui::makePill(
+            auth_rep.status_badge_text, auth_rep.status_bg_token, auth_rep.status_fg_token));
+        auth_box->addView(ab_top);
+
+        auto* ab_desc = ui::makeLabel(
+            auth_rep.detail_summary,
+            13.0f,
+            auth_rep.status == AuthStatusKind::GuestCookieOnly ? "status/warn_fg" : "font/grey",
+            1.40f);
+        ab_desc->setMarginTop(4);
+        auth_box->addView(ab_desc);
+
+        auto* ab_btns = new brls::Box(brls::Axis::ROW);
+        ab_btns->setAlignItems(brls::AlignItems::CENTER);
+        ab_btns->setMarginTop(8);
+        ui_comfort::enableFlexWrap(ab_btns, 6.0f);
+
+        if (auth_rep.supports_browser_cookie_login) {
+            const std::string login_lbl =
+                auth_rep.allows_custom_login_url
+                    ? "🌐 输入网址登录自动获取 Cookie"
+                    : (auth_rep.status == AuthStatusKind::Authenticated
+                           ? "🌐 重新浏览器登录更新 Cookie"
+                           : "🌐 浏览器登录并自动获取 Cookie");
+            auto* b_login = ui::makeButton(
+                login_lbl,
+                [alive = alive_, id = rec.manifest.id,
+                 allow_custom = auth_rep.allows_custom_login_url,
+                 def_url = auth_rep.default_login_url]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    if (allow_custom) {
+                        if (auto* plat = brls::Application::getPlatform()) {
+                            plat->getImeManager()->openForText(
+                                [alive, id](std::string url) {
+                                    brls::sync([alive, id, url = std::move(url)]() {
+                                        if (!alive->load(std::memory_order_acquire)) return;
+                                        const std::string clean = trimAscii(url);
+                                        if (clean.empty()) return;
+                                        AuthCenterManager::instance().startBrowserCookieLogin(id, clean);
+                                    });
+                                },
+                                "输入目标网站登录地址",
+                                "将弹出独立 Chrome 登录窗口，完成登录或验证后关闭窗口即可自动提取并保存该站 Cookie",
+                                512,
+                                def_url);
+                        }
+                    } else {
+                        AuthCenterManager::instance().startBrowserCookieLogin(id);
+                    }
+                },
+                auth_rep.status != AuthStatusKind::Authenticated, 34.0f);
+            b_login->setMarginRight(8);
+            ab_btns->addView(b_login);
+            if (!first_config_btn_) first_config_btn_ = b_login;
+
+            if (!auth_rep.allows_custom_login_url) {
+                auto* b_sync = ui::makeButton(
+                    "🔄 同步现有会话",
+                    [alive = alive_, id = rec.manifest.id]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        std::string msg;
+                        AuthCenterManager::instance().syncCookiesFromExistingStores(id, msg);
+                        if (!msg.empty()) brls::Application::notify(msg);
+                    },
+                    false, 34.0f);
+                b_sync->setMarginRight(8);
+                ab_btns->addView(b_sync);
+            }
+        }
+
+        auto* b_hub = ui::makeButton(
+            "打开统一授权中心 ▸",
+            [this, alive = alive_, id = rec.manifest.id]() {
+                if (!alive->load(std::memory_order_acquire)) return;
+                if (on_open_auth_center_) {
+                    on_open_auth_center_(id);
+                } else {
+                    AuthCenterDialog::open({}, id);
+                }
+            },
+            false, 34.0f);
+        ab_btns->addView(b_hub);
+        if (!first_config_btn_) first_config_btn_ = b_hub;
+
+        auth_box->addView(ab_btns);
+        config_section_box_->addView(auth_box);
+    }
+
+    // Render plugin-provided status/diagnostic settings panel if available,
+    // AND continue rendering declarative config_schema fields underneath.
+    brls::View* custom = kernel.plugins().createCustomSettingsView(rec.manifest.id);
+    if (custom) {
+        custom->setWidthPercentage(100);
+        custom->setMarginTop(8);
+        custom->setMarginBottom(4);
+        config_section_box_->addView(custom);
     }
 
     if (rec.manifest.config_schema.empty()) {
-        auto* none = ui::makeLabel("此插件未声明可配置参数。", 14.0f, "font/grey");
-        none->setMarginTop(6);
-        container->addView(none);
+        if (!custom && auth_rep.method == AuthMethodKind::NoAuth) {
+            auto* none = ui::makeLabel("此插件未声明可配置参数。", 14.0f, "font/grey");
+            none->setMarginTop(8);
+            config_section_box_->addView(none);
+        }
         return;
     }
 
     const nlohmann::json cfg = kernel.config().loadPluginConfig(rec.manifest.id);
 
     for (const auto& field : rec.manifest.config_schema) {
-        auto* row = ui::makeCard("desktop/soft", 10.0f, 8.0f);
+        auto* row = ui::makeCard("desktop/soft", 12.0f, 10.0f);
         row->setMarginTop(8);
 
         auto* top = new brls::Box(brls::Axis::ROW);
+        top->setWidthPercentage(100);
         top->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
         top->setAlignItems(brls::AlignItems::CENTER);
 
         auto* label_col = new brls::Box(brls::Axis::COLUMN);
+        label_col->setWidth(0);
         label_col->setGrow(1.0f);
-        label_col->addView(ui::makeLabel(field.label + " (" + field.key + ")", 15.0f, "brls/text"));
+        label_col->setShrink(1.0f);
+        label_col->setMarginRight(12);
+
+        auto* title_line = new brls::Box(brls::Axis::ROW);
+        title_line->setAlignItems(brls::AlignItems::CENTER);
+        title_line->setWidthPercentage(100);
+        auto* f_lbl = ui::makeLabel(field.label, 15.0f, "brls/text");
+        f_lbl->setShrink(1.0f);
+        title_line->addView(f_lbl);
+        auto* k_lbl = ui::makeLabel(" (" + field.key + ")", 12.5f, "font/grey");
+        k_lbl->setShrink(0.0f);
+        title_line->addView(k_lbl);
+        label_col->addView(title_line);
+
         if (!field.description.empty()) {
-            label_col->addView(ui::makeLabel(field.description, 13.0f, "font/grey"));
+            auto* desc_lbl = ui::makeLabel(field.description, 13.0f, "font/grey", 1.42f);
+            desc_lbl->setMarginTop(3);
+            label_col->addView(desc_lbl);
         }
-        top->addView(label_col);
+
+        const bool has_override = cfg.contains(field.key);
+        const bool has_secret =
+            (field.type == ConfigFieldType::Secret) &&
+            kernel.secrets().hasSecret(rec.manifest.id, field.key);
 
         std::string cur_val = field.default_value;
-        if (field.type == ConfigFieldType::Secret) {
-            cur_val = kernel.secrets().hasSecret(rec.manifest.id, field.key) ? "•••••• (已加密存储)" : "未设置";
-        } else if (cfg.contains(field.key)) {
+        if (field.type != ConfigFieldType::Secret && has_override) {
             if (cfg[field.key].is_string()) cur_val = cfg[field.key].get<std::string>();
             else if (cfg[field.key].is_boolean()) cur_val = cfg[field.key].get<bool>() ? "true" : "false";
             else if (cfg[field.key].is_number()) cur_val = cfg[field.key].dump();
         }
 
-        auto* edit_btn = ui::makeButton(cur_val.empty() ? "设置..." : cur_val, [this, alive = alive_, id = rec.manifest.id, field, cur_val]() {
-            if (!alive->load(std::memory_order_acquire)) return;
-            auto& k = HostKernel::instance();
-            if (field.type == ConfigFieldType::Bool) {
-                bool next = (cur_val != "true");
-                k.config().setPluginValue(id, field.key, next);
-                std::string err;
-                if (k.plugins().isLoaded(id)) k.plugins().reloadPlugin(id, err);
-                brls::sync([this, alive]() {
-                    if (alive->load(std::memory_order_acquire)) refresh();
-                });
-                return;
+        std::string val_summary;
+        std::string val_color = "font/grey";
+        if (field.type == ConfigFieldType::Secret) {
+            if (!AuthCenterManager::instance().diagnoseCookieSecretField(
+                    rec.manifest.id, field.key, val_summary, val_color)) {
+                val_summary = has_secret ? "当前状态: •••••• (已加密保存)" : "当前状态: 未设置密钥";
+                val_color = has_secret ? "status/ok_fg" : "font/grey";
             }
-            if (field.type == ConfigFieldType::Select && !field.options.empty()) {
-                size_t idx = 0;
-                for (size_t i = 0; i < field.options.size(); ++i) {
-                    if (field.options[i] == cur_val) {
-                        idx = (i + 1) % field.options.size();
-                        break;
-                    }
-                }
-                k.config().setPluginValue(id, field.key, field.options[idx]);
-                std::string err;
-                if (k.plugins().isLoaded(id)) k.plugins().reloadPlugin(id, err);
-                brls::sync([this, alive]() {
-                    if (alive->load(std::memory_order_acquire)) refresh();
-                });
-                return;
-            }
-            if (auto* plat = brls::Application::getPlatform()) {
-                plat->getImeManager()->openForText(
-                    [this, alive, id, field](std::string val) {
+        } else if (field.type == ConfigFieldType::Bool) {
+            const bool is_on = (cur_val == "true" || cur_val == "1");
+            val_summary = std::string("当前状态: ") + (is_on ? "已开启" : "已关闭") +
+                          (has_override ? " · [已自定义]" : " · [默认]");
+            val_color = is_on ? "status/ok_fg" : "font/grey";
+        } else {
+            const std::string shown = cur_val.empty() ? "<空>" : truncateUtf8Display(cur_val, 54);
+            val_summary = "当前值: " + shown + (has_override ? " · [已自定义]" : " · [默认]");
+            val_color = has_override ? "status/info_fg" : "font/grey";
+        }
+        auto* val_lbl = ui::makeLabel(val_summary, 12.5f, val_color, 1.35f);
+        val_lbl->setMarginTop(4);
+        label_col->addView(val_lbl);
+
+        top->addView(label_col);
+
+        auto* btn_group = new brls::Box(brls::Axis::ROW);
+        btn_group->setAlignItems(brls::AlignItems::CENTER);
+        btn_group->setShrink(0.0f);
+
+        std::string btn_label = "修改...";
+        bool btn_primary = false;
+        if (field.type == ConfigFieldType::Bool) {
+            const bool is_on = (cur_val == "true" || cur_val == "1");
+            btn_label = is_on ? "已开启 ✓" : "已关闭";
+            btn_primary = is_on;
+        } else if (field.type == ConfigFieldType::Select) {
+            btn_label = "选择 ▾";
+        } else if (field.type == ConfigFieldType::Secret) {
+            btn_label = has_secret ? "更新密钥..." : "设置密钥...";
+        }
+
+        auto* edit_btn = ui::makeButton(
+            btn_label,
+            [this, alive = alive_, id = rec.manifest.id, field, cur_val, has_secret]() {
+                if (!alive->load(std::memory_order_acquire)) return;
+                if (field.type == ConfigFieldType::Bool) {
+                    const bool next = !(cur_val == "true" || cur_val == "1");
+                    brls::sync([this, alive, id, field, next]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
                         auto& hk = HostKernel::instance();
                         if (!hk.isInitialized()) return;
-                        if (field.type == ConfigFieldType::Secret) {
-                            hk.secrets().setSecret(id, field.key, val);
-                        } else if (field.type == ConfigFieldType::Int) {
-                            try {
-                                hk.config().setPluginValue(id, field.key, std::stoll(val));
-                            } catch (...) {
+                        hk.config().setPluginValue(id, field.key, next);
+                        reloadPluginAfterConfigEdit(
+                            id, field.key,
+                            field.label + (next ? ": 已开启" : ": 已关闭"));
+                    });
+                    return;
+                }
+                if (field.type == ConfigFieldType::Select && !field.options.empty()) {
+                    brls::sync([this, alive, id, field, cur_val]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        openSelectOptionModal(id, field, cur_val);
+                    });
+                    return;
+                }
+                if (auto* plat = brls::Application::getPlatform()) {
+                    std::string hint = field.description;
+                    if (field.type == ConfigFieldType::Secret && has_secret) {
+                        hint += "（直接留空确认将保持现有密钥不变；如需删除请点右侧「清除」）";
+                    }
+                    plat->getImeManager()->openForText(
+                        [this, alive, id, field, has_secret](std::string val) {
+                            brls::sync([this, alive, id, field, has_secret, val = std::move(val)]() {
+                                if (!alive->load(std::memory_order_acquire)) return;
+                                auto& hk = HostKernel::instance();
+                                if (!hk.isInitialized()) return;
+                                if (field.type == ConfigFieldType::Secret) {
+                                    if (val.empty()) {
+                                        if (has_secret) {
+                                            brls::Application::notify("输入为空，已保留原有密钥不变");
+                                        }
+                                        return;
+                                    }
+                                    hk.secrets().setSecret(id, field.key, val);
+                                    reloadPluginAfterConfigEdit(
+                                        id, field.key, "已加密保存凭据: " + field.label);
+                                    return;
+                                }
+                                if (field.type == ConfigFieldType::Int) {
+                                    const std::string trimmed = trimAscii(val);
+                                    if (trimmed.empty()) {
+                                        brls::Application::notify("整数参数不能为空");
+                                        return;
+                                    }
+                                    try {
+                                        size_t parsed_len = 0;
+                                        const long long iv = std::stoll(trimmed, &parsed_len, 10);
+                                        if (parsed_len != trimmed.size()) {
+                                            brls::Application::notify("请输入有效整数: " + field.label);
+                                            return;
+                                        }
+                                        hk.config().setPluginValue(id, field.key, iv);
+                                    } catch (...) {
+                                        brls::Application::notify("请输入有效整数: " + field.label);
+                                        return;
+                                    }
+                                    reloadPluginAfterConfigEdit(
+                                        id, field.key,
+                                        "已保存 " + field.label + " = " + trimmed);
+                                    return;
+                                }
                                 hk.config().setPluginValue(id, field.key, val);
-                            }
-                        } else {
-                            hk.config().setPluginValue(id, field.key, val);
-                        }
-                        std::string err;
-                        if (hk.plugins().isLoaded(id)) hk.plugins().reloadPlugin(id, err);
-                        brls::sync([this, alive]() {
-                            if (alive->load(std::memory_order_acquire)) refresh();
-                        });
-                    },
-                    "配置 " + field.label,
-                    field.description,
-                    256,
-                    field.type == ConfigFieldType::Secret ? "" : cur_val);
-            }
-        }, false, 34.0f);
-        edit_btn->setMarginLeft(10);
-        top->addView(edit_btn);
+                                reloadPluginAfterConfigEdit(
+                                    id, field.key, "已保存参数: " + field.label);
+                            });
+                        },
+                        "配置 " + field.label,
+                        hint,
+                        4096,
+                        field.type == ConfigFieldType::Secret ? "" : cur_val);
+                }
+            },
+            btn_primary, 34.0f);
+        edit_btn->setShrink(0.0f);
+        btn_group->addView(edit_btn);
+        config_edit_buttons_[field.key] = edit_btn;
+        if (!first_config_btn_) {
+            first_config_btn_ = edit_btn;
+        }
+
+        if (field.type == ConfigFieldType::Secret && has_secret) {
+            auto* clr_secret_btn = ui::makeButton(
+                "清除",
+                [this, alive = alive_, id = rec.manifest.id, field]() {
+                    brls::sync([this, alive, id, field]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        auto& hk = HostKernel::instance();
+                        if (!hk.isInitialized()) return;
+                        hk.secrets().deleteSecret(id, field.key);
+                        reloadPluginAfterConfigEdit(
+                            id, field.key, "已清除凭据: " + field.label);
+                    });
+                },
+                false, 34.0f);
+            clr_secret_btn->setMarginLeft(6);
+            clr_secret_btn->setShrink(0.0f);
+            btn_group->addView(clr_secret_btn);
+        } else if (field.type != ConfigFieldType::Secret &&
+                   field.type != ConfigFieldType::Bool &&
+                   has_override) {
+            auto* reset_btn = ui::makeButton(
+                "重置",
+                [this, alive = alive_, id = rec.manifest.id, field]() {
+                    brls::sync([this, alive, id, field]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        auto& hk = HostKernel::instance();
+                        if (!hk.isInitialized()) return;
+                        nlohmann::json next_cfg = hk.config().loadPluginConfig(id);
+                        next_cfg.erase(field.key);
+                        hk.config().savePluginConfig(id, next_cfg);
+                        reloadPluginAfterConfigEdit(
+                            id, field.key, "已恢复默认值: " + field.label);
+                    });
+                },
+                false, 34.0f);
+            reset_btn->setMarginLeft(6);
+            reset_btn->setShrink(0.0f);
+            btn_group->addView(reset_btn);
+        }
+
+        top->addView(btn_group);
         row->addView(top);
-        container->addView(row);
+        config_section_box_->addView(row);
     }
+}
+
+void PluginStoreView::scrollToConfigSection(bool focus_first_control) {
+    if (!detail_scroll_ || !detail_container_) return;
+    if (config_section_box_) {
+        float local_y = 0.0f;
+        brls::View* cur = config_section_box_;
+        while (cur && cur != detail_container_) {
+            local_y += cur->getLocalY();
+            cur = cur->getParent();
+        }
+        const float max_scroll =
+            std::max(0.0f, detail_container_->getHeight() - detail_scroll_->getHeight());
+        const float target_y = std::clamp(local_y - 12.0f, 0.0f, max_scroll);
+        detail_scroll_->setContentOffsetY(target_y, false);
+    }
+    if (focus_first_control) {
+        if (first_config_btn_) {
+            brls::Application::giveFocus(first_config_btn_);
+        } else if (config_section_box_) {
+            if (auto* f = config_section_box_->getDefaultFocus()) {
+                brls::Application::giveFocus(f);
+            }
+        }
+    }
+}
+
+bool PluginStoreView::activateSelectedPluginEntry(const std::string& plugin_id) {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return false;
+
+    const auto st = kernel.plugins().statusOf(plugin_id);
+    const bool is_loaded = st && st->loaded;
+
+    if (is_loaded) {
+        if (auto custom_tab = findCustomTabForPlugin(plugin_id)) {
+            if (on_open_custom_tab_) {
+                on_open_custom_tab_(custom_tab->tab_id);
+                return true;
+            }
+        }
+        const auto rec = kernel.installer().getInstalled(plugin_id);
+        if (rec.has_value() && rec->manifest.domain != ContentDomain::Core && on_open_domain_) {
+            on_open_domain_(rec->manifest.domain);
+            return true;
+        }
+    }
+
+    if (config_section_box_) {
+        scrollToConfigSection(true);
+        return true;
+    }
+    if (primary_entry_btn_) {
+        brls::Application::giveFocus(primary_entry_btn_);
+        return true;
+    }
+    return false;
+}
+
+void PluginStoreView::reloadPluginAfterConfigEdit(const std::string& plugin_id,
+                                                  const std::string& focus_field_key,
+                                                  const std::string& toast_msg) {
+    auto& hk = HostKernel::instance();
+    if (!hk.isInitialized()) return;
+
+    const float saved_list_y = list_scroll_ ? list_scroll_->getContentOffsetY() : 0.0f;
+    const float saved_detail_y = detail_scroll_ ? detail_scroll_->getContentOffsetY() : 0.0f;
+
+    clearBoxViewsSafely(detail_container_);
+    config_section_box_ = nullptr;
+    first_config_btn_ = nullptr;
+    primary_entry_btn_ = nullptr;
+    config_edit_buttons_.clear();
+
+    std::string err;
+    suppress_bus_refresh_ = true;
+    if (hk.plugins().isLoaded(plugin_id)) {
+        hk.plugins().reloadPlugin(plugin_id, err);
+    }
+    suppress_bus_refresh_ = false;
+
+    refresh();
+
+    if (list_scroll_) {
+        list_scroll_->setContentOffsetY(saved_list_y, false);
+    }
+    if (detail_scroll_) {
+        detail_scroll_->setContentOffsetY(saved_detail_y, false);
+    }
+    if (!focus_field_key.empty()) {
+        auto it = config_edit_buttons_.find(focus_field_key);
+        if (it != config_edit_buttons_.end() && it->second) {
+            brls::Application::giveFocus(it->second);
+        }
+    }
+
+    if (!err.empty()) {
+        appendLog("[config-reload-error] " + plugin_id + ": " + err);
+        brls::Application::notify("配置已保存，但重载异常: " + err);
+    } else if (!toast_msg.empty()) {
+        brls::Application::notify(toast_msg);
+    }
+}
+
+void PluginStoreView::openSelectOptionModal(const std::string& plugin_id,
+                                            const ConfigField& field,
+                                            const std::string& current_value) {
+    if (!brls::Application::getPlatform() || field.options.empty()) {
+        return;
+    }
+
+    auto* modal_box = new brls::Box(brls::Axis::COLUMN);
+    modal_box->setWidthPercentage(100);
+    modal_box->setPadding(20, 22, 14, 22);
+
+    modal_box->addView(ui::makeLabel("选择参数: " + field.label, 18.5f, "brls/text"));
+    if (!field.description.empty()) {
+        auto* desc_lbl = ui::makeLabel(field.description, 13.5f, "font/grey", 1.42f);
+        desc_lbl->setMarginTop(4);
+        modal_box->addView(desc_lbl);
+    }
+
+    const float list_h = std::min<float>(
+        340.0f, std::max<float>(110.0f, static_cast<float>(field.options.size()) * 48.0f + 8.0f));
+    auto* opt_scroll = new brls::ScrollingFrame();
+    opt_scroll->setWidthPercentage(100);
+    opt_scroll->setHeight(list_h);
+    opt_scroll->setMarginTop(12);
+
+    auto* opt_list = new brls::Box(brls::Axis::COLUMN);
+    opt_list->setWidthPercentage(100);
+    opt_scroll->setContentView(opt_list);
+    modal_box->addView(opt_scroll);
+
+    auto* dialog = new brls::Dialog(modal_box);
+    if (auto* applet = dynamic_cast<brls::Box*>(dialog->getView("brls/dialog/applet"))) {
+        applet->setWidth(520.0f);
+        applet->setCornerRadius(14.0f);
+        applet->setBorderThickness(1.0f);
+        applet->setBorderColor(ui::color("desktop/line"));
+        applet->setBackgroundColor(ui::color("brls/background"));
+        applet->setClipsToBounds(true);
+    }
+
+    for (const auto& opt : field.options) {
+        const bool is_cur = (opt == current_value);
+        const std::string label = is_cur ? ("✓  " + opt + "  (当前)") : opt;
+        auto* btn = ui::makeButton(
+            label,
+            [this, alive = alive_, dialog, plugin_id, field, opt]() {
+                dialog->close([this, alive, plugin_id, field, opt]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    auto& hk = HostKernel::instance();
+                    if (!hk.isInitialized()) return;
+                    hk.config().setPluginValue(plugin_id, field.key, opt);
+                    reloadPluginAfterConfigEdit(
+                        plugin_id, field.key,
+                        "已切换 " + field.label + " = " + opt);
+                });
+            },
+            is_cur, 40.0f);
+        btn->setWidthPercentage(100);
+        btn->setMarginBottom(8);
+        opt_list->addView(btn);
+    }
+
+    dialog->addButton("取消 Esc", []() {});
+    if (auto* btn1 = dialog->getView("brls/dialog/button1")) {
+        if (auto* btn_row = btn1->getParent()) {
+            btn_row->setHeight(50.0f);
+        }
+    }
+    dialog->open();
 }
 
 void PluginStoreView::promptSearch() {
@@ -1178,8 +1877,16 @@ void PluginStoreView::startGitInstall(const std::string& source, const std::stri
             if (res.ok) {
                 selected_plugin_id_ = res.plugin_id;
                 radar_results_.erase(res.plugin_id);
+                clearBoxViewsSafely(detail_container_);
+                config_section_box_ = nullptr;
+                first_config_btn_ = nullptr;
+                primary_entry_btn_ = nullptr;
+                config_edit_buttons_.clear();
                 std::string err;
+                suppress_bus_refresh_ = true;
                 k.plugins().reloadPlugin(res.plugin_id, err);
+                suppress_bus_refresh_ = false;
+                k.installedAbiStatuses(true);
                 if (!err.empty()) {
                     appendLog("[load-error] " + err);
                 }
@@ -1215,8 +1922,16 @@ void PluginStoreView::startLocalInstall(const std::string& dir) {
             if (res.ok) {
                 selected_plugin_id_ = res.plugin_id;
                 radar_results_.erase(res.plugin_id);
+                clearBoxViewsSafely(detail_container_);
+                config_section_box_ = nullptr;
+                first_config_btn_ = nullptr;
+                primary_entry_btn_ = nullptr;
+                config_edit_buttons_.clear();
                 std::string err;
+                suppress_bus_refresh_ = true;
                 k.plugins().reloadPlugin(res.plugin_id, err);
+                suppress_bus_refresh_ = false;
+                k.installedAbiStatuses(true);
                 if (!err.empty()) appendLog("[load-error] " + err);
                 brls::Application::notify("本地插件已安装并激活: " + res.plugin_id);
             } else {
@@ -1247,8 +1962,16 @@ void PluginStoreView::startUpdate(const std::string& plugin_id) {
             auto& k = HostKernel::instance();
             if (res.ok) {
                 radar_results_.erase(plugin_id);
+                clearBoxViewsSafely(detail_container_);
+                config_section_box_ = nullptr;
+                first_config_btn_ = nullptr;
+                primary_entry_btn_ = nullptr;
+                config_edit_buttons_.clear();
                 std::string err;
+                suppress_bus_refresh_ = true;
                 k.plugins().reloadPlugin(plugin_id, err);
+                suppress_bus_refresh_ = false;
+                k.installedAbiStatuses(true);
                 const std::string mode = res.used_prebuilt ? " [prebuilt]" : " [source-build]";
                 brls::Application::notify("插件已更新至 v" + res.version + mode);
             } else {
@@ -1327,12 +2050,20 @@ void PluginStoreView::startRebuildPlugin(const std::string& plugin_id) {
             auto& k = HostKernel::instance();
             if (res.ok) {
                 if (k.installer().isEnabled(plugin_id)) {
+                    clearBoxViewsSafely(detail_container_);
+                    config_section_box_ = nullptr;
+                    first_config_btn_ = nullptr;
+                    primary_entry_btn_ = nullptr;
+                    config_edit_buttons_.clear();
                     std::string err;
+                    suppress_bus_refresh_ = true;
                     k.plugins().reloadPlugin(plugin_id, err);
+                    suppress_bus_refresh_ = false;
                     if (!err.empty()) {
                         appendLog("[reload-error] " + err);
                     }
                 }
+                k.installedAbiStatuses(true);
                 appendLog("[rebuilt] " + plugin_id + " -> SDK v" +
                           omnidesk::sdkVersion());
                 brls::Application::notify("插件已按当前 SDK 重编完成: " + plugin_id);
@@ -1364,6 +2095,12 @@ void PluginStoreView::startBatchRebuild(bool only_stale) {
             }
             busy_ = false;
             auto& k = HostKernel::instance();
+            clearBoxViewsSafely(detail_container_);
+            config_section_box_ = nullptr;
+            first_config_btn_ = nullptr;
+            primary_entry_btn_ = nullptr;
+            config_edit_buttons_.clear();
+            suppress_bus_refresh_ = true;
             for (const auto& r : batch.results) {
                 if (r.ok && k.installer().isEnabled(r.plugin_id)) {
                     std::string err;
@@ -1375,6 +2112,8 @@ void PluginStoreView::startBatchRebuild(bool only_stale) {
                     appendLog("[ERROR] " + r.plugin_id + ": " + r.error);
                 }
             }
+            suppress_bus_refresh_ = false;
+            k.installedAbiStatuses(true);
             std::string summary = "批量重编完成: 成功 " + std::to_string(batch.rebuilt_count) +
                                   " · 跳过 " + std::to_string(batch.skipped_count) +
                                   " · 失败 " + std::to_string(batch.failed_count);

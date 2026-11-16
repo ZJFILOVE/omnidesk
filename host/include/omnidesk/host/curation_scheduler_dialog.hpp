@@ -29,13 +29,15 @@ public:
     void unsubscribeStatus(uint64_t token);
 
     nlohmann::json latestStatus() const;
-    void refreshStatus(bool trigger_auto_if_needed = false);
+    void refreshStatus(bool trigger_auto_if_needed = false, bool sync_remote = false);
 
     void runMissingToday(const std::string& trigger = "manual");
     void runSingleWorkflow(const std::string& project);
     void cancelRun();
+    void syncGitHubNow();
 
     void setAutoRunEnabled(bool enabled);
+    void setGitSyncEnabled(bool enabled);
     void setProjectEnabled(const std::string& project, bool enabled);
     void setAgentRunner(const std::string& runner, const std::string& custom_cmd = "");
 
@@ -43,6 +45,7 @@ private:
     CurationSchedulerManager() = default;
     ~CurationSchedulerManager();
 
+    void schedulePeriodicTick();
     void applyStatusUpdate(const nlohmann::json& status, bool from_event);
     void ensureTrackedJob(const nlohmann::json& status);
     void notifyListeners(const nlohmann::json& status);

@@ -26,6 +26,7 @@
 #include <omnidesk/config_store.hpp>
 #include <omnidesk/domain_registry.hpp>
 #include <omnidesk/entity_bus.hpp>
+#include <omnidesk/image_cache.hpp>
 #include <omnidesk/plugin.hpp>
 #include <omnidesk/plugin_abi.h>
 #include <poll.h>
@@ -135,6 +136,7 @@ public:
 
     int port() const { return port_; }
     bool sandboxBlocked() const { return sandbox_blocked_; }
+    int deletedSessions() const { return deleted_sessions_.load(); }
 
 private:
     void serveLoop() {
@@ -146,11 +148,27 @@ private:
             SSL* ssl = SSL_new(ssl_ctx_);
             SSL_set_fd(ssl, cfd);
             if (SSL_accept(ssl) == 1) {
+                std::string req;
                 char buf[8192];
-                int n = SSL_read(ssl, buf, sizeof(buf) - 1);
-                if (n > 0) {
-                    buf[n] = '\0';
-                    std::string req(buf, static_cast<size_t>(n));
+                while (true) {
+                    int n = SSL_read(ssl, buf, sizeof(buf) - 1);
+                    if (n <= 0) break;
+                    req.append(buf, static_cast<size_t>(n));
+                    size_t hdr_end = req.find("\r\n\r\n");
+                    if (hdr_end != std::string::npos) {
+                        size_t cl = 0;
+                        std::istringstream hss(req.substr(0, hdr_end));
+                        std::string hline;
+                        while (std::getline(hss, hline)) {
+                            for (char& ch : hline) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                            if (hline.rfind("content-length:", 0) == 0) {
+                                cl = std::stoul(hline.substr(15));
+                            }
+                        }
+                        if (req.size() >= hdr_end + 4 + cl) break;
+                    }
+                }
+                if (!req.empty()) {
                     std::istringstream iss(req);
                     std::string method, path;
                     iss >> method >> path;
@@ -196,25 +214,90 @@ private:
                         code = 200;
                         body = R"({"ok":true})";
                     } else if (method == "POST" && path == "/api/v1/playback") {
-                        code = 201;
-                        body = nlohmann::json({
-                            {"sessionId", "sess-mock-1"},
-                            {"assetId", "1440857781"},
-                            {"storefront", "us"},
-                            {"type", "song"},
-                            {"codec", "alac"},
-                            {"sampleRate", 192000},
-                            {"bitDepth", 24},
-                            {"channelCount", 2},
-                            {"title", "Midnight City"},
-                            {"artistName", "M83"},
-                            {"albumName", "Hurry Up, We're Dreaming"},
-                            {"durationMs", 243000},
-                            {"streams", {{"audio", "/api/v1/playback/sess-mock-1/audio"}}},
-                        }).dump();
-                    } else if (method == "DELETE" && path == "/api/v1/playback/sess-mock-1") {
+                        size_t hdr_end = req.find("\r\n\r\n");
+                        std::string pbody = (hdr_end != std::string::npos) ? req.substr(hdr_end + 4) : "";
+                        auto pj = nlohmann::json::parse(pbody, nullptr, false);
+                        std::string req_asset = pj.is_object() ? pj.value("assetId", "") : "";
+                        std::string req_sf = pj.is_object() ? pj.value("storefront", "us") : "us";
+                        bool digits_ok = !req_asset.empty() &&
+                            std::all_of(req_asset.begin(), req_asset.end(),
+                                        [](unsigned char c) { return std::isdigit(c) != 0; });
+                        if (!digits_ok) {
+                            code = 400;
+                            body = R"({"error":"assetId must be numeric catalog ID"})";
+                        } else {
+                            std::string sid = "sess-mock-" + std::to_string(++playback_seq_);
+                            code = 201;
+                            body = nlohmann::json({
+                                {"sessionId", sid},
+                                {"assetId", req_asset},
+                                {"storefront", req_sf},
+                                {"type", "song"},
+                                {"codec", "alac"},
+                                {"sampleRate", 192000},
+                                {"bitDepth", 24},
+                                {"channelCount", 2},
+                                {"title", "Midnight City"},
+                                {"artistName", "M83"},
+                                {"albumName", "Hurry Up, We're Dreaming"},
+                                {"artworkUrl", "https://example.com/cover-" + req_asset + ".jpg"},
+                                {"durationMs", 243000},
+                                {"streams", {{"audio", "/api/v1/playback/" + sid + "/audio"}}},
+                            }).dump();
+                        }
+                    } else if (method == "DELETE" && path.rfind("/api/v1/playback/sess-mock-", 0) == 0) {
+                        ++deleted_sessions_;
                         code = 200;
                         body = R"({"ok":true})";
+                    } else if (path.rfind("/api/v1/metadata/", 0) == 0) {
+                        std::string tail = path.substr(std::string("/api/v1/metadata/").size());
+                        size_t qpos = tail.find('?');
+                        std::string req_id = (qpos != std::string::npos) ? tail.substr(0, qpos) : tail;
+                        bool digits_ok = !req_id.empty() &&
+                            std::all_of(req_id.begin(), req_id.end(),
+                                        [](unsigned char c) { return std::isdigit(c) != 0; });
+                        if (!digits_ok) {
+                            code = 400;
+                            body = R"({"error":"assetId must be numeric catalog ID"})";
+                        } else {
+                            code = 200;
+                            body = nlohmann::json({
+                                {"id", req_id},
+                                {"type", "song"},
+                                {"title", "Catalog Song " + req_id},
+                                {"artistName", "Catalog Artist"},
+                                {"albumName", "Catalog Album"},
+                                {"durationMs", 342000},
+                                {"hasLyrics", true},
+                                {"artworkUrl", "https://example.com/cat-{w}x{h}-" + req_id + ".jpg"},
+                                {"availableStreams", {{
+                                    {"codec", "ALAC"},
+                                    {"sampleRate", 96000},
+                                    {"bitDepth", 24},
+                                }}},
+                            }).dump();
+                        }
+                    } else if (path.rfind("/api/v1/catalog/", 0) == 0 && path.find("/songs/") != std::string::npos) {
+                        size_t sp = path.rfind('/');
+                        std::string req_id = path.substr(sp + 1);
+                        size_t qpos = req_id.find('?');
+                        if (qpos != std::string::npos) req_id.resize(qpos);
+                        code = 200;
+                        body = nlohmann::json({
+                            {"data", {{
+                                {"id", req_id},
+                                {"type", "songs"},
+                                {"attributes", {
+                                    {"name", "Catalog Song " + req_id},
+                                    {"artistName", "Catalog Artist"},
+                                    {"albumName", "Catalog Album"},
+                                    {"durationInMillis", 342000},
+                                    {"hasLyrics", true},
+                                    {"audioTraits", {"lossless", "hi-res-lossless"}},
+                                    {"artwork", {{"url", "https://example.com/cat-{w}x{h}-" + req_id + ".jpg"}}},
+                                }},
+                            }}}
+                        }).dump();
                     } else if (path.rfind("/api/v1/lyrics/1440857781", 0) == 0) {
                         code = 200;
                         ctype = "text/plain; charset=utf-8";
@@ -222,6 +305,46 @@ private:
                     } else if (path == "/api/v1/library/playlists") {
                         code = 200;
                         body = R"({"playlists":[{"lid":"p.123","name":"Lossless Favorites","trackCount":12}]})";
+                    } else if (path.rfind("/api/v1/recommendations/heavy-rotation", 0) == 0) {
+                        if (path.find("limit=10") == std::string::npos) {
+                            code = 400;
+                            body = R"({"errors":[{"status":"400","detail":"limit must be <= 10"}]})";
+                        } else {
+                            code = 200;
+                            body = nlohmann::json({
+                                {"data", {{
+                                    {"id", "pl.pm-heavy1"},
+                                    {"type", "playlists"},
+                                    {"attributes", {
+                                        {"name", "Heavy Rotation Mix"},
+                                        {"curatorName", "Apple Music"},
+                                        {"artwork", {{"url", "https://example.com/hr-{w}x{h}{c}.{f}"}}},
+                                    }},
+                                }}}
+                            }).dump();
+                        }
+                    } else if (path.rfind("/api/v1/recommendations/recently-played", 0) == 0) {
+                        if (path.find("limit=10") == std::string::npos) {
+                            code = 400;
+                            body = R"({"errors":[{"status":"400","detail":"limit must be <= 10"}]})";
+                        } else {
+                            code = 200;
+                            body = nlohmann::json({
+                                {"data", {{
+                                    {"id", "1643009587"},
+                                    {"type", "songs"},
+                                    {"attributes", {
+                                        {"name", "Muerte"},
+                                        {"artistName", "Canserbero"},
+                                        {"albumName", "Muerte"},
+                                        {"durationInMillis", 342000},
+                                        {"hasLyrics", true},
+                                        {"audioTraits", {"lossless"}},
+                                        {"artwork", {{"url", "https://example.com/recent/{w}x{h}{c}.{f}"}}},
+                                    }},
+                                }}}
+                            }).dump();
+                        }
                     } else if (path.rfind("/api/v1/recommendations", 0) == 0) {
                         code = 200;
                         body = nlohmann::json({
@@ -273,6 +396,8 @@ private:
     std::thread th_;
     std::string auth_state_ = "logged_out";
     std::string fairplay_state_ = "unknown";
+    std::atomic<int> playback_seq_{0};
+    std::atomic<int> deleted_sessions_{0};
 };
 
 int testLrcAndBilingualParser() {
@@ -402,11 +527,38 @@ int testMockAdamAndLlmPipeline(const fs::path& tmp) {
     REQUIRE(pl_feed.containers.size() == 1);
     REQUIRE(pl_feed.containers[0].name == "Lossless Favorites");
 
+    // Verify heavy-rotation clamps limit<=10 and supplements playable tracks with expanded {w}x{h}{c}.{f} covers
+    auto hr_feed = engine.loadFeed("heavy-rotation", "", true);
+    REQUIRE(hr_feed.ok);
+    REQUIRE(hr_feed.containers.size() == 1);
+    REQUIRE(hr_feed.containers[0].cover_url == "https://example.com/hr-500x500bb.jpg");
+    REQUIRE(!hr_feed.tracks.empty());
+    REQUIRE(hr_feed.tracks[0].cover_url == "https://example.com/recent/500x500bb.jpg");
+
+    // Verify homepage SDK feed ("个人曲库") populates playable Apple Music URLs + song covers
+    auto sdk_items = engine.fetchSdkMediaItems("music", "");
+    REQUIRE(sdk_items.size() >= 2);
+    REQUIRE(sdk_items[0].id == "1643009587");
+    REQUIRE(sdk_items[0].play_url == "https://music.apple.com/us/song/1643009587");
+    REQUIRE(sdk_items[0].cover_url == "https://example.com/recent/500x500bb.jpg");
+
+    auto rpc_feed = engine.handleMediaSourceRpc({{"action", "feed"}, {"category", "music"}});
+    REQUIRE(rpc_feed.ok);
+    REQUIRE(rpc_feed.data.value("count", 0) >= 2);
+    REQUIRE(rpc_feed.data["items"][0].value("play_url", "").find("music.apple.com/") != std::string::npos);
+    REQUIRE(!rpc_feed.data["items"][0].value("cover_url", "").empty());
+
+    // Verify ImageCache::normalizeImageUrl expands Apple Music {w}x{h}{c}.{f} templates
+    REQUIRE(omnidesk::ImageCache::normalizeImageUrl(
+                "https://is1-ssl.mzstatic.com/image/thumb/Music/{w}x{h}{c}.{f}") ==
+            "https://is1-ssl.mzstatic.com/image/thumb/Music/500x500bb.jpg");
+
     auto sess = engine.adamClient().createPlaybackSession("1440857781", "us", true, true, false, false);
     REQUIRE(sess.ok);
     REQUIRE(sess.codec == "alac");
     REQUIRE(sess.sample_rate == 192000);
     REQUIRE(sess.bit_depth == 24);
+    REQUIRE(sess.cover_url == "https://example.com/cover-1440857781.jpg");
     REQUIRE(sess.formattedQuality() == "ALAC 24bit/192kHz");
     REQUIRE(engine.adamClient().deletePlaybackSession(sess.session_id));
 
@@ -416,6 +568,54 @@ int testMockAdamAndLlmPipeline(const fs::path& tmp) {
     REQUIRE(lyr.translated);
     REQUIRE(lyr.lines[0].translation == "在车里静静等待");
     REQUIRE(fs::exists(lyr.bilingual_lrc_path));
+
+    // Verify media.source.v1 playurl normalizes am-cn-<id> and Apple Music web URLs (?i=...)
+    auto rpc_play1 = engine.handleMediaSourceRpc({
+        {"action", "playurl"},
+        {"id", "am-cn-1440857781"},
+        {"url", "https://music.apple.com/cn/song/1440857781"},
+    });
+    REQUIRE(rpc_play1.ok);
+    REQUIRE(rpc_play1.data.value("id", "") == "1440857781");
+    REQUIRE(rpc_play1.data.value("storefront", "") == "cn");
+    REQUIRE(rpc_play1.data.value("audio_url", "").find("/api/v1/playback/") != std::string::npos);
+    REQUIRE(rpc_play1.data.value("cover_url", "") == "https://example.com/cover-1440857781.jpg");
+    REQUIRE(rpc_play1.data.value("duration_sec", 0.0) > 240.0);
+
+    auto rpc_play2 = engine.handleMediaSourceRpc({
+        {"action", "playurl"},
+        {"url", "https://music.apple.com/jp/album/hurry-up/1440857700?i=1440857781"},
+    });
+    REQUIRE(rpc_play2.ok);
+    REQUIRE(rpc_play2.data.value("id", "") == "1440857781");
+    REQUIRE(rpc_play2.data.value("storefront", "") == "jp");
+
+    // Verify media.source.v1 metadata normalizes prefixed IDs & resolves catalog cover/duration
+    auto rpc_meta = engine.handleMediaSourceRpc({
+        {"action", "metadata"},
+        {"id", "am-cn-1643009587"},
+    });
+    REQUIRE(rpc_meta.ok);
+    REQUIRE(rpc_meta.data.value("cover_url", "").find("1643009587") != std::string::npos);
+    REQUIRE(rpc_meta.data.value("duration_sec", 0.0) > 300.0);
+
+    // Verify media.source.v1 batch_metadata resolves curated prefixed IDs and Apple Music URLs
+    auto rpc_batch = engine.handleMediaSourceRpc({
+        {"action", "batch_metadata"},
+        {"items", nlohmann::json::array({
+            {{"id", "am-cn-1643009587"}},
+            {{"url", "https://music.apple.com/us/song/1440857781"}},
+        })},
+    });
+    REQUIRE(rpc_batch.ok);
+    REQUIRE(rpc_batch.data.value("count", 0) == 2);
+    REQUIRE(rpc_batch.data["tracks"]["1643009587"].value("cover_url", "").find("500x500") != std::string::npos);
+    REQUIRE(rpc_batch.data["tracks"]["1440857781"].value("cover_url", "").find("500x500") != std::string::npos);
+
+    // Verify SDK lyrics lookup normalizes prefixed curated IDs
+    auto sdk_lyr = engine.fetchSdkLyrics("am-cn-1440857781");
+    REQUIRE(sdk_lyr.size() == 2);
+    REQUIRE(sdk_lyr[0].translation == "在车里静静等待");
 
     // Verify media.lyrics.v1 explain RPC
     auto exp = engine.handleLyricsRpc({
@@ -429,6 +629,7 @@ int testMockAdamAndLlmPipeline(const fs::path& tmp) {
     REQUIRE(exp.data.value("explanation", "").find("waiting for") != std::string::npos);
 
     engine.shutdown();
+    REQUIRE(mock.deletedSessions() >= 2);
     return 0;
 }
 
@@ -475,6 +676,14 @@ int testDlopenPluginLifecycle(const std::string& so_path, const fs::path& tmp) {
         auto hc = plugin->onHealthCheck();
         REQUIRE(hc.value("ok", false));
 
+        int boomerang_opens = 0;
+        uint64_t open_tok = bus.subscribe("entity.media.open", "test.boomerang",
+            [&](const std::string&, const nlohmann::json& p) {
+                if (p.value("origin", "") == "plugin_music") {
+                    ++boomerang_opens;
+                }
+            });
+
         // Test entity.media.open from plugin-ai-curator (Daily 5 & interactive items)
         // Wait briefly or check active track via media.lyrics.v1 status
         bus.publish("entity.media.open", {
@@ -502,6 +711,7 @@ int testDlopenPluginLifecycle(const std::string& so_path, const fs::path& tmp) {
         auto st_after_am = caps.call("media.lyrics.v1", {{"action", "status"}});
         REQUIRE(st_after_am.ok);
         REQUIRE(st_after_am.data.value("active_track_id", "") == "1643009587");
+        REQUIRE(boomerang_opens == 0);
 
         bus.publish("entity.media.open", {
             {"id", "ix-am-1833283533"},
@@ -513,7 +723,9 @@ int testDlopenPluginLifecycle(const std::string& so_path, const fs::path& tmp) {
         auto st_after_ix = caps.call("media.lyrics.v1", {{"action", "status"}});
         REQUIRE(st_after_ix.ok);
         REQUIRE(st_after_ix.data.value("active_track_id", "") == "1833283533");
+        REQUIRE(boomerang_opens == 0);
 
+        bus.unsubscribe(open_tok);
         plugin->onUnload();
         REQUIRE(!caps.has("media.source.v1"));
         REQUIRE(!caps.has("media.lyrics.v1"));

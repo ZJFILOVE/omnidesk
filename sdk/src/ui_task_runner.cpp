@@ -1,7 +1,9 @@
 #include "omnidesk/ui_task_runner.hpp"
 #include "shutdown_grace.hpp"
 
+#include <SDL.h>
 #include <algorithm>
+#include <borealis/core/application.hpp>
 #include <borealis/core/thread.hpp>
 #include <chrono>
 #include <condition_variable>
@@ -12,6 +14,19 @@
 #include <unordered_map>
 
 namespace omnidesk {
+
+namespace {
+std::atomic<bool> g_runner_wake_pending{false};
+
+void wakeSdlFromTaskRunner() {
+    if (SDL_WasInit(SDL_INIT_EVENTS) == 0) return;
+    static const Uint32 kWakeType = SDL_RegisterEvents(1);
+    if (kWakeType == static_cast<Uint32>(-1)) return;
+    SDL_Event ev{};
+    ev.type = kWakeType;
+    SDL_PushEvent(&ev);
+}
+}  // namespace
 
 struct UiTaskRunner::State {
     struct QueuedTask {
@@ -143,7 +158,15 @@ void UiTaskRunner::dispatchToUi(std::function<void()> fn) const {
     if (disp) {
         disp(std::move(fn));
     } else {
-        brls::sync(std::move(fn));
+        const bool need_wake = !g_runner_wake_pending.exchange(true, std::memory_order_acq_rel);
+        brls::sync([f = std::move(fn)]() mutable {
+            g_runner_wake_pending.store(false, std::memory_order_release);
+            brls::Application::setActiveEvent(true);
+            f();
+        });
+        if (need_wake) {
+            wakeSdlFromTaskRunner();
+        }
     }
 }
 

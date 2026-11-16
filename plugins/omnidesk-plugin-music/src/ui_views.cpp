@@ -44,6 +44,7 @@ std::string drmBadgeText(const DrmStatus& drm) {
 
 MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
     : brls::Box(brls::Axis::COLUMN), engine_(std::move(engine)) {
+    feed_loading_ = (engine_ != nullptr);
     buildUi();
 
     if (engine_) {
@@ -71,16 +72,20 @@ MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
             });
 
         // Initial async status & feed load
-        std::thread([eng = engine_, this, alive_w]() {
+        const uint64_t seq = ++feed_req_seq_;
+        std::thread([eng = engine_, this, alive_w, seq]() {
             if (!eng || !eng->isAlive()) return;
             eng->refreshDrmStatus(true);
             FeedOutcome rec = eng->loadFeed("recommendations", "", false);
-            brls::sync([this, alive_w, rec]() {
+            brls::sync([this, alive_w, seq, rec]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
-                current_feed_ = rec;
                 refreshHeader();
-                renderActiveTab();
+                if (seq == feed_req_seq_) {
+                    feed_loading_ = false;
+                    current_feed_ = rec;
+                    renderActiveTab();
+                }
             });
         }).detach();
     }
@@ -128,6 +133,24 @@ void MusicWorkspaceView::buildUi() {
     auto* search_btn = omnidesk::ui::makeButton("搜索 /", [this]() { promptSearch(); }, false, 34.0f);
     search_btn->setMarginRight(8);
     right->addView(search_btn);
+
+    auto* refresh_btn = omnidesk::ui::makeButton("刷新", [this]() {
+        if (showing_container_detail_) {
+            openContainerView(active_container_);
+            return;
+        }
+        if (active_tab_ == SubTab::ForYou) triggerFeedLoad("recommendations", "", true);
+        else if (active_tab_ == SubTab::Recent) triggerFeedLoad("heavy-rotation", "", true);
+        else if (active_tab_ == SubTab::Library) triggerFeedLoad("library-playlists", "", true);
+        else if (active_tab_ == SubTab::Search) {
+            if (!search_query_.empty()) triggerFeedLoad("search", search_query_, true);
+            else promptSearch();
+        } else {
+            renderNowPlayingBody();
+        }
+    }, false, 34.0f);
+    refresh_btn->setMarginRight(8);
+    right->addView(refresh_btn);
 
     auto* auth_btn = omnidesk::ui::makeButton("Apple ID / 账号", [this]() {
         show_auth_panel_ = !show_auth_panel_;
@@ -297,22 +320,24 @@ void MusicWorkspaceView::setSubTab(SubTab tab) {
 void MusicWorkspaceView::triggerFeedLoad(const std::string& feed_id, const std::string& query, bool force) {
     if (!engine_) return;
     feed_loading_ = true;
+    const uint64_t seq = ++feed_req_seq_;
     renderActiveTab();
 
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, feed_id, query, force]() {
+    std::thread([this, eng = engine_, alive_w, seq, feed_id, query, force]() {
         FeedOutcome out = eng->loadFeed(feed_id, query, force);
         if (feed_id == "heavy-rotation" && (!out.ok || (out.containers.empty() && out.tracks.empty()))) {
             out = eng->loadFeed("recently-played", "", force);
         }
-        brls::sync([this, alive_w, feed_id, out]() {
+        brls::sync([this, alive_w, seq, feed_id, out]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
-            feed_loading_ = false;
-            current_feed_ = out;
             if (feed_id == "library-playlists" && out.ok) {
                 library_playlists_ = out.containers;
             }
+            if (seq != feed_req_seq_) return;
+            feed_loading_ = false;
+            current_feed_ = out;
             renderActiveTab();
         });
     }).detach();
@@ -324,21 +349,28 @@ void MusicWorkspaceView::openContainerView(const ContainerItem& container) {
     active_container_ = container;
     container_tracks_.clear();
     feed_loading_ = true;
+    const uint64_t seq = ++feed_req_seq_;
     renderActiveTab();
 
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, container]() {
+    std::thread([this, eng = engine_, alive_w, seq, container]() {
         std::vector<MusicTrack> tracks;
         std::string err;
         bool ok = eng->openContainer(container, tracks, err);
-        brls::sync([this, alive_w, ok, tracks = std::move(tracks), err]() mutable {
+        brls::sync([this, alive_w, seq, ok, tracks = std::move(tracks), err]() mutable {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
+            if (seq != feed_req_seq_) return;
             feed_loading_ = false;
             if (!ok && !err.empty()) {
                 brls::Application::notify(err);
             }
             container_tracks_ = std::move(tracks);
+            if (active_container_.cover_url.empty() &&
+                !container_tracks_.empty() &&
+                !container_tracks_.front().cover_url.empty()) {
+                active_container_.cover_url = container_tracks_.front().cover_url;
+            }
             renderActiveTab();
         });
     }).detach();
@@ -362,11 +394,22 @@ void MusicWorkspaceView::renderActiveTab() {
         top->setAlignItems(brls::AlignItems::CENTER);
         top->setMarginBottom(12);
         auto* back_b = omnidesk::ui::makeButton("← 返回列表", [this]() {
+            ++feed_req_seq_;
+            feed_loading_ = false;
             showing_container_detail_ = false;
             renderActiveTab();
         }, false, 32.0f);
         back_b->setMarginRight(12);
         top->addView(back_b);
+        if (!active_container_.cover_url.empty()) {
+            auto* civ = new omnidesk::CachedImageView(&omnidesk::ImageCache::instance());
+            civ->setDimensions(56, 56);
+            civ->setCornerRadius(8.0f);
+            civ->setScalingType(brls::ImageScalingType::FILL);
+            civ->setMarginRight(12);
+            civ->setImageUrl(active_container_.cover_url);
+            top->addView(civ);
+        }
         top->addView(omnidesk::ui::makeLabel(
             active_container_.name + (active_container_.subtitle.empty() ? "" : (" · " + active_container_.subtitle)),
             18.0f, "brls/text"));
@@ -398,12 +441,35 @@ void MusicWorkspaceView::renderActiveTab() {
             row->setMarginBottom(8);
             row->setFocusable(true);
 
+            auto* left = new brls::Box(brls::Axis::ROW);
+            left->setAlignItems(brls::AlignItems::CENTER);
+            left->setGrow(1.0f);
+            const std::string track_cov = !tr.cover_url.empty() ? tr.cover_url : active_container_.cover_url;
+            if (!track_cov.empty()) {
+                auto* iv = new omnidesk::CachedImageView(&omnidesk::ImageCache::instance());
+                iv->setDimensions(46, 46);
+                iv->setCornerRadius(6.0f);
+                iv->setScalingType(brls::ImageScalingType::FILL);
+                iv->setMarginRight(10);
+                iv->setImageUrl(track_cov);
+                left->addView(iv);
+            } else {
+                auto* ph = omnidesk::ui::makeCard("desktop/soft", 0.0f, 6.0f);
+                ph->setDimensions(46, 46);
+                ph->setJustifyContent(brls::JustifyContent::CENTER);
+                ph->setAlignItems(brls::AlignItems::CENTER);
+                ph->setMarginRight(10);
+                ph->addView(omnidesk::ui::makeLabel("♪", 15.0f, "domain/media"));
+                left->addView(ph);
+            }
+
             auto* info = new brls::Box(brls::Axis::COLUMN);
             info->setGrow(1.0f);
             info->addView(omnidesk::ui::makeLabel(std::to_string(i + 1) + ". " + tr.title, 15.5f, "brls/text"));
             info->addView(omnidesk::ui::makeLabel(
                 tr.artist + (tr.album.empty() ? "" : (" · " + tr.album)), 13.0f, "font/grey"));
-            row->addView(info);
+            left->addView(info);
+            row->addView(left);
 
             auto* right = new brls::Box(brls::Axis::ROW);
             if (!tr.quality_label.empty()) {
@@ -506,6 +572,29 @@ void MusicWorkspaceView::renderFeedBody(const FeedOutcome& outcome) {
         return;
     }
 
+    if (outcome.containers.empty() && outcome.tracks.empty()) {
+        auto* card = omnidesk::ui::makeCard("desktop/surface", 16.0f, 10.0f);
+        const std::string empty_msg =
+            (active_tab_ == SubTab::Search)
+                ? (search_query_.empty() ? "点击上方「输入歌曲 / 专辑 / 艺人关键词…」搜索 Apple Music 全站目录"
+                                         : ("未找到与「" + search_query_ + "」匹配的歌曲或专辑"))
+                : "当前栏目暂无内容，可点击「刷新」或切换至「资料库歌单 / 搜索曲库」";
+        card->addView(omnidesk::ui::makeLabel(empty_msg, 14.5f, "font/grey", 1.5f));
+        auto* btn_row = new brls::Box(brls::Axis::ROW);
+        btn_row->setMarginTop(10);
+        btn_row->addView(omnidesk::ui::makeButton(
+            active_tab_ == SubTab::Search ? "输入搜索词" : "刷新当前栏目",
+            [this]() {
+                if (active_tab_ == SubTab::ForYou) triggerFeedLoad("recommendations", "", true);
+                else if (active_tab_ == SubTab::Recent) triggerFeedLoad("heavy-rotation", "", true);
+                else if (active_tab_ == SubTab::Library) triggerFeedLoad("library-playlists", "", true);
+                else promptSearch();
+            }, true, 34.0f));
+        card->addView(btn_row);
+        stage_box_->addView(card);
+        return;
+    }
+
     if (!outcome.containers.empty()) {
         stage_box_->addView(omnidesk::ui::makeLabel("专辑与歌单", 17.0f, "brls/text"));
         brls::Box* row = nullptr;
@@ -533,6 +622,15 @@ void MusicWorkspaceView::renderFeedBody(const FeedOutcome& outcome) {
                 iv->setMarginBottom(8);
                 iv->setImageUrl(c.cover_url);
                 card->addView(iv);
+            } else {
+                auto* ph = omnidesk::ui::makeCard("desktop/soft", 10.0f, 8.0f);
+                ph->setWidthPercentage(100);
+                ph->setHeight(156);
+                ph->setJustifyContent(brls::JustifyContent::CENTER);
+                ph->setAlignItems(brls::AlignItems::CENTER);
+                ph->setMarginBottom(8);
+                ph->addView(omnidesk::ui::makePill("Apple Music 歌单", "desktop/surface", "domain/media"));
+                card->addView(ph);
             }
             card->addView(omnidesk::ui::makeLabel(clipText(c.name, 56), 15.5f, "brls/text", 1.35f));
             std::string sub = c.subtitle.empty() ? c.type : c.subtitle;
@@ -587,6 +685,14 @@ void MusicWorkspaceView::renderFeedBody(const FeedOutcome& outcome) {
                 iv->setMarginRight(10);
                 iv->setImageUrl(tr.cover_url);
                 left->addView(iv);
+            } else {
+                auto* ph = omnidesk::ui::makeCard("desktop/soft", 0.0f, 6.0f);
+                ph->setDimensions(48, 48);
+                ph->setJustifyContent(brls::JustifyContent::CENTER);
+                ph->setAlignItems(brls::AlignItems::CENTER);
+                ph->setMarginRight(10);
+                ph->addView(omnidesk::ui::makeLabel("♪", 15.0f, "domain/media"));
+                left->addView(ph);
             }
             auto* meta = new brls::Box(brls::Axis::COLUMN);
             meta->addView(omnidesk::ui::makeLabel(tr.title, 15.5f, "brls/text"));
@@ -663,13 +769,13 @@ void MusicWorkspaceView::renderNowPlayingBody() {
         art->setHeight(230);
         art->setJustifyContent(brls::JustifyContent::CENTER);
         art->setAlignItems(brls::AlignItems::CENTER);
-        if (!track.cover_url.empty()) {
+        const std::string cov = !track.cover_url.empty() ? track.cover_url : sess.cover_url;
+        if (!cov.empty()) {
             auto* cover = new omnidesk::CachedImageView(&omnidesk::ImageCache::instance());
-            cover->setWidthPercentage(100);
-            cover->setHeight(206);
+            cover->setDimensions(206, 206);
             cover->setCornerRadius(8.0f);
             cover->setScalingType(brls::ImageScalingType::FILL);
-            cover->setImageUrl(track.cover_url);
+            cover->setImageUrl(cov);
             art->addView(cover);
         } else {
             art->addView(omnidesk::ui::makePill("ALAC 无损舞台", "desktop/surface", "brls/accent"));
@@ -751,10 +857,21 @@ void MusicWorkspaceView::renderNowPlayingBody() {
         for (size_t i = 0; i < max_show; ++i) {
             bool cur = (i == qidx);
             auto* qrow = omnidesk::ui::makeCard(cur ? "desktop/active" : "desktop/soft", 8.0f, 6.0f);
+            qrow->setAxis(brls::Axis::ROW);
+            qrow->setAlignItems(brls::AlignItems::CENTER);
             qrow->setMarginBottom(4);
             qrow->setFocusable(true);
+            if (!queue[i].cover_url.empty()) {
+                auto* qiv = new omnidesk::CachedImageView(&omnidesk::ImageCache::instance());
+                qiv->setDimensions(32, 32);
+                qiv->setCornerRadius(5.0f);
+                qiv->setScalingType(brls::ImageScalingType::FILL);
+                qiv->setMarginRight(8);
+                qiv->setImageUrl(queue[i].cover_url);
+                qrow->addView(qiv);
+            }
             qrow->addView(omnidesk::ui::makeLabel(
-                (cur ? "▶ " : "") + clipText(queue[i].title, 36), 13.0f,
+                (cur ? "▶ " : "") + clipText(queue[i].title, 34), 13.0f,
                 cur ? "brls/accent" : "brls/text"));
             qrow->registerClickAction([this, queue, i](brls::View*) {
                 engine_->setQueueAndPlay(queue, i);
@@ -1052,13 +1169,27 @@ MusicCompanionDockView::MusicCompanionDockView(std::shared_ptr<MusicEngine> engi
     setBackgroundColor(omnidesk::ui::color("desktop/soft"));
     setMarginBottom(8);
 
-    addView(omnidesk::ui::makeLabel("Apple Music 双语精讲", 15.0f, "brls/accent"));
+    auto* hdr_row = new brls::Box(brls::Axis::ROW);
+    hdr_row->setAlignItems(brls::AlignItems::CENTER);
+    cover_view_ = new omnidesk::CachedImageView(&omnidesk::ImageCache::instance());
+    cover_view_->setDimensions(42, 42);
+    cover_view_->setCornerRadius(6.0f);
+    cover_view_->setScalingType(brls::ImageScalingType::FILL);
+    cover_view_->setMarginRight(10);
+    cover_view_->setVisibility(brls::Visibility::GONE);
+    hdr_row->addView(cover_view_);
+
+    auto* hdr_meta = new brls::Box(brls::Axis::COLUMN);
+    hdr_meta->setGrow(1.0f);
+    hdr_meta->addView(omnidesk::ui::makeLabel("Apple Music 双语精讲", 15.0f, "brls/accent"));
     track_label_ = omnidesk::ui::makeLabel("尚未播放曲目", 14.0f, "brls/text");
     track_label_->setMarginTop(4);
-    addView(track_label_);
+    hdr_meta->addView(track_label_);
+    hdr_row->addView(hdr_meta);
+    addView(hdr_row);
 
     lyric_orig_label_ = omnidesk::ui::makeLabel("等待歌词同步…", 14.0f, "brls/text", 1.38f);
-    lyric_orig_label_->setMarginTop(4);
+    lyric_orig_label_->setMarginTop(6);
     addView(lyric_orig_label_);
 
     lyric_trans_label_ = omnidesk::ui::makeLabel("", 13.5f, "font/grey", 1.38f);
@@ -1135,8 +1266,18 @@ void MusicCompanionDockView::refreshSummary() {
     if (!engine_) return;
     MusicTrack tr; PlaybackSessionInfo s; LyricBundle lyr; std::vector<MusicTrack> q; size_t qi = 0;
     if (!engine_->getActivePlaybackState(tr, s, lyr, q, qi)) {
+        if (cover_view_) cover_view_->setVisibility(brls::Visibility::GONE);
         if (track_label_) track_label_->setText("尚未播放曲目");
         return;
+    }
+    const std::string cov = !tr.cover_url.empty() ? tr.cover_url : s.cover_url;
+    if (cover_view_) {
+        if (!cov.empty()) {
+            cover_view_->setVisibility(brls::Visibility::VISIBLE);
+            cover_view_->setImageUrl(cov);
+        } else {
+            cover_view_->setVisibility(brls::Visibility::GONE);
+        }
     }
     if (track_label_) {
         track_label_->setText(tr.title + " · " + (s.ok ? s.formattedQuality() : tr.artist));

@@ -54,6 +54,7 @@ private:
     omnidesk::CapabilityResult actionConfigureDailyScheduler(const nlohmann::json& req);
     omnidesk::CapabilityResult actionRunDailyWorkflows(const nlohmann::json& req);
     omnidesk::CapabilityResult actionCancelDailyWorkflows(const nlohmann::json& req);
+    omnidesk::CapabilityResult actionSyncGitHub(const nlohmann::json& req);
 
     void rehydrateLocalIncremental(const RepoPaths& paths);
 
@@ -109,6 +110,7 @@ private:
     std::unordered_set<std::string> dismissed_ids_;
 
     std::unique_ptr<DailyWorkflowScheduler> scheduler_;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 };
 
 } // namespace ai_curator

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <omnidesk/capabilities.hpp>
@@ -25,8 +27,14 @@ public:
     std::string sourceId() const override { return source_id_; }
     std::string displayName() const override { return display_name_; }
     std::vector<std::string> categories() const override;
+    void seedCategories(std::vector<std::string> categories);
+    void invalidateMetadataCache();
     std::vector<MediaItem> fetchItems(const std::string& category,
                                       const std::string& query = "") override;
+    std::vector<MediaItem> fetchItemsPage(const std::string& category,
+                                          const std::string& query,
+                                          int page,
+                                          bool force_refresh = false) override;
     std::vector<LyricLine> fetchLyrics(const std::string& item_id) override;
     std::vector<ChapterSegment> fetchChapters(const std::string& item_id) override;
 
@@ -36,7 +44,11 @@ private:
     std::string plugin_id_;
     std::string source_id_;
     std::string display_name_;
-    std::vector<std::string> cached_categories_;
+    mutable std::mutex metadata_mutex_;
+    mutable std::vector<std::string> cached_categories_;
+    mutable bool categories_cached_ = false;
+    mutable uint64_t cached_registration_gen_ = 0;
+    mutable uint64_t metadata_epoch_ = 0;
 };
 
 /// Pure-JSON out-of-process ITextSource proxy communicating via WorkerSupervisor.
@@ -47,15 +59,22 @@ public:
                      std::string plugin_id,
                      std::string source_id,
                      std::string display_name,
-                     std::string category = "blog");
+                     std::string category = "blog",
+                     std::vector<TextChannel> channels = {});
 
     std::string sourceId() const override { return source_id_; }
     std::string displayName() const override { return display_name_; }
     std::string category() const override { return category_; }
     std::vector<TextChannel> channels() const override;
+    void seedChannels(std::vector<TextChannel> channels);
+    void invalidateMetadataCache();
     std::vector<TextFeedItem> fetchFeed(const std::string& query = "") override;
     std::vector<TextFeedItem> fetchFeedInChannel(const std::string& channel_id,
                                                  const std::string& query = "") override;
+    std::vector<TextFeedItem> fetchFeedPage(const std::string& channel_id,
+                                            const std::string& query,
+                                            int page,
+                                            bool force_refresh = false) override;
     TextArticle fetchArticle(const std::string& article_id) override;
 
 private:
@@ -65,6 +84,11 @@ private:
     std::string source_id_;
     std::string display_name_;
     std::string category_;
+    mutable std::mutex metadata_mutex_;
+    mutable std::vector<TextChannel> cached_channels_;
+    mutable bool channels_cached_ = false;
+    mutable uint64_t cached_registration_gen_ = 0;
+    mutable uint64_t metadata_epoch_ = 0;
 };
 
 /// Pure-JSON out-of-process IBookSource proxy communicating via WorkerSupervisor.

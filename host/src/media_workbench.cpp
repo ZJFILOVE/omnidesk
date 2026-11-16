@@ -1,6 +1,8 @@
 #include "omnidesk/host/media_workbench.hpp"
 #include "omnidesk/host/async_load.hpp"
 #include "omnidesk/host/curation_calendar_dialog.hpp"
+#include "omnidesk/host/recycling_grid.hpp"
+#include "omnidesk/host/ui_comfort.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -63,9 +65,26 @@ bool mediaItemMatchesQuery(const MediaItem& item, const std::string& query) {
                item.title.find(target_date) != std::string::npos;
     }
     const std::string q_low = toLowerCopy(query);
-    return toLowerCopy(item.title).find(q_low) != std::string::npos ||
-           toLowerCopy(item.creator).find(q_low) != std::string::npos ||
-           toLowerCopy(item.source_badge).find(q_low) != std::string::npos;
+    if (toLowerCopy(item.title).find(q_low) != std::string::npos ||
+        toLowerCopy(item.creator).find(q_low) != std::string::npos ||
+        toLowerCopy(item.source_badge).find(q_low) != std::string::npos) {
+        return true;
+    }
+    if (item.extra.is_object()) {
+        if (toLowerCopy(item.extra.value("series", "")).find(q_low) != std::string::npos) return true;
+        if (toLowerCopy(item.extra.value("season_code", "")).find(q_low) != std::string::npos) return true;
+        if (item.extra.contains("episodes") && item.extra["episodes"].is_array()) {
+            for (const auto& ep : item.extra["episodes"]) {
+                if (!ep.is_object()) continue;
+                if (toLowerCopy(ep.value("title", "")).find(q_low) != std::string::npos ||
+                    toLowerCopy(ep.value("episode_code", "")).find(q_low) != std::string::npos ||
+                    toLowerCopy(ep.value("episode_title", "")).find(q_low) != std::string::npos) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 void appendCuratedMetadataBlock(brls::Box* parent, const MediaItem& item) {
@@ -234,15 +253,226 @@ MediaRequestOptions buildPlaybackOptions(const MediaItem& item) {
         if (item.extra.contains("user_agent") && item.extra["user_agent"].is_string()) {
             opts.user_agent = item.extra["user_agent"].get<std::string>();
         }
+        auto pushSubUnique = [&](const std::string& sp) {
+            if (sp.empty()) return;
+            if (std::find(opts.subtitle_urls.begin(), opts.subtitle_urls.end(), sp) ==
+                opts.subtitle_urls.end()) {
+                opts.subtitle_urls.push_back(sp);
+            }
+        };
         if (item.extra.contains("subtitle_urls") && item.extra["subtitle_urls"].is_array()) {
             for (const auto& s : item.extra["subtitle_urls"]) {
-                if (s.is_string() && !s.get_ref<const std::string&>().empty()) {
-                    opts.subtitle_urls.push_back(s.get<std::string>());
-                }
+                if (s.is_string()) pushSubUnique(s.get<std::string>());
+            }
+        }
+        if (item.extra.contains("primary_subtitle_path") && item.extra["primary_subtitle_path"].is_string()) {
+            pushSubUnique(item.extra["primary_subtitle_path"].get<std::string>());
+        }
+        if (item.extra.contains("subtitle_paths") && item.extra["subtitle_paths"].is_array()) {
+            for (const auto& s : item.extra["subtitle_paths"]) {
+                if (s.is_string()) pushSubUnique(s.get<std::string>());
             }
         }
     }
     return opts;
+}
+
+std::vector<MediaItem> extractSeasonEpisodes(const MediaItem& parent_or_active) {
+    std::vector<MediaItem> out;
+    if (!parent_or_active.extra.is_object()) return out;
+
+    const nlohmann::json* ep_arr = nullptr;
+    if (parent_or_active.extra.contains("episodes") &&
+        parent_or_active.extra["episodes"].is_array() &&
+        !parent_or_active.extra["episodes"].empty()) {
+        ep_arr = &parent_or_active.extra["episodes"];
+    } else if (parent_or_active.extra.contains("season_episodes") &&
+               parent_or_active.extra["season_episodes"].is_array() &&
+               !parent_or_active.extra["season_episodes"].empty()) {
+        ep_arr = &parent_or_active.extra["season_episodes"];
+    }
+    if (!ep_arr) return out;
+
+    const std::string group_title = parent_or_active.extra.value(
+        "season_group_title", parent_or_active.title);
+    const std::string series_name = parent_or_active.extra.value(
+        "series", parent_or_active.creator);
+
+    out.reserve(ep_arr->size());
+    for (const auto& e : *ep_arr) {
+        if (!e.is_object()) continue;
+        MediaItem ep;
+        ep.id = e.value("id", "");
+        ep.source_id = parent_or_active.source_id.empty() ? "plugin-fnos-nas" : parent_or_active.source_id;
+        ep.title = e.value("title", "");
+        ep.creator = series_name.empty() ? parent_or_active.creator : series_name;
+        ep.kind = parent_or_active.kind.empty() ? "nas" : parent_or_active.kind;
+        ep.source_badge = parent_or_active.source_badge.empty() ? "飞牛 NAS" : parent_or_active.source_badge;
+        ep.cover_url = e.value("cover_url", "");
+        if (ep.cover_url.empty()) ep.cover_url = parent_or_active.cover_url;
+        ep.play_url = e.value("play_url", "");
+        ep.quality_label = e.value("quality_label", "");
+        ep.duration_sec = e.value("duration_sec", 0.0);
+        ep.has_bilingual_sub = e.value("has_bilingual_sub", false);
+        ep.extra = {
+            {"abs_path", e.value("abs_path", "")},
+            {"series", series_name},
+            {"season", e.value("season", -1)},
+            {"episode", e.value("episode", -1)},
+            {"episode_code", e.value("episode_code", "")},
+            {"episode_title", e.value("episode_title", "")},
+            {"primary_subtitle_path", e.value("primary_subtitle_path", "")},
+            {"subtitle_paths", e.value("subtitle_paths", nlohmann::json::array())},
+            {"season_group_title", group_title},
+            {"season_episodes", *ep_arr},
+        };
+        if (!ep.id.empty() || !ep.play_url.empty()) {
+            out.push_back(std::move(ep));
+        }
+    }
+    return out;
+}
+
+bool isDigitsOnlyStr(const std::string& s) {
+    if (s.empty()) return false;
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+struct AppleMusicLookup {
+    bool is_apple_music = false;
+    std::string song_id;
+    std::string storefront;
+    std::string url;
+};
+
+AppleMusicLookup extractAppleMusicLookup(const MediaItem& item) {
+    AppleMusicLookup out;
+    if (item.id.rfind("demo-", 0) == 0) return out;
+    out.url = item.play_url;
+
+    std::string extra_song_id;
+    if (item.extra.is_object()) {
+        for (const char* k : {"apple_music_song_id", "asset_id", "song_id"}) {
+            if (item.extra.contains(k) && item.extra[k].is_string()) {
+                extra_song_id = item.extra[k].get<std::string>();
+                if (!extra_song_id.empty()) break;
+            }
+        }
+        if (item.extra.contains("storefront") && item.extra["storefront"].is_string()) {
+            out.storefront = toLowerCopy(item.extra["storefront"].get<std::string>());
+        }
+    }
+
+    std::string pref_song_id;
+    std::string pref_sf;
+    if (item.id.rfind("am-", 0) == 0 && item.id.size() > 6 && item.id[5] == '-' &&
+        std::isalpha(static_cast<unsigned char>(item.id[3])) &&
+        std::isalpha(static_cast<unsigned char>(item.id[4]))) {
+        pref_sf = toLowerCopy(item.id.substr(3, 2));
+        std::string rest = item.id.substr(6);
+        if (isDigitsOnlyStr(rest)) pref_song_id = rest;
+        else {
+            size_t dash = rest.rfind('-');
+            if (dash != std::string::npos && isDigitsOnlyStr(rest.substr(dash + 1))) {
+                pref_song_id = rest.substr(dash + 1);
+            }
+        }
+    } else if (item.id.rfind("ix-am-", 0) == 0) {
+        std::string rest = item.id.substr(6);
+        if (isDigitsOnlyStr(rest)) pref_song_id = rest;
+        else {
+            size_t dash = rest.rfind('-');
+            if (dash != std::string::npos && isDigitsOnlyStr(rest.substr(dash + 1))) {
+                pref_song_id = rest.substr(dash + 1);
+            }
+        }
+    }
+
+    std::string url_song_id;
+    std::string url_sf;
+    size_t host_pos = item.play_url.find("music.apple.com/");
+    if (host_pos != std::string::npos) {
+        size_t p = host_pos + std::char_traits<char>::length("music.apple.com/");
+        size_t slash = item.play_url.find('/', p);
+        if (slash != std::string::npos && slash - p == 2 &&
+            std::isalpha(static_cast<unsigned char>(item.play_url[p])) &&
+            std::isalpha(static_cast<unsigned char>(item.play_url[p + 1]))) {
+            url_sf = toLowerCopy(item.play_url.substr(p, 2));
+        }
+        size_t q_pos = item.play_url.find('?');
+        if (q_pos != std::string::npos) {
+            std::string query = item.play_url.substr(q_pos + 1);
+            size_t hash = query.find('#');
+            if (hash != std::string::npos) query.resize(hash);
+            size_t cur = 0;
+            while (cur < query.size()) {
+                size_t amp = query.find('&', cur);
+                std::string kv = (amp == std::string::npos) ? query.substr(cur) : query.substr(cur, amp - cur);
+                if (kv.rfind("i=", 0) == 0 && isDigitsOnlyStr(kv.substr(2))) {
+                    url_song_id = kv.substr(2);
+                    break;
+                }
+                if (amp == std::string::npos) break;
+                cur = amp + 1;
+            }
+        }
+        if (url_song_id.empty()) {
+            for (const char* marker : {"/song/", "/music-video/"}) {
+                size_t pos = item.play_url.find(marker);
+                if (pos != std::string::npos) {
+                    size_t sp = pos + std::char_traits<char>::length(marker);
+                    size_t q = item.play_url.find_first_of("?#", sp);
+                    std::string tail = (q == std::string::npos) ? item.play_url.substr(sp) : item.play_url.substr(sp, q - sp);
+                    while (!tail.empty() && tail.back() == '/') tail.pop_back();
+                    size_t ls = tail.rfind('/');
+                    std::string cand = (ls == std::string::npos) ? tail : tail.substr(ls + 1);
+                    if (isDigitsOnlyStr(cand)) {
+                        url_song_id = cand;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (isDigitsOnlyStr(extra_song_id)) {
+        out.song_id = extra_song_id;
+    } else if (!pref_song_id.empty()) {
+        out.song_id = pref_song_id;
+    } else if (!url_song_id.empty()) {
+        out.song_id = url_song_id;
+    } else if (item.source_id == "plugin-music" && !item.id.empty()) {
+        out.song_id = item.id;
+    } else if (item.source_id == "plugin-ai-curator" && item.kind == "music" && isDigitsOnlyStr(item.id)) {
+        out.song_id = item.id;
+    }
+
+    if (!out.song_id.empty()) {
+        out.is_apple_music = true;
+        if (out.storefront.empty()) out.storefront = url_sf;
+        if (out.storefront.empty()) out.storefront = pref_sf;
+        if (out.storefront.empty() && item.source_id == "plugin-ai-curator") out.storefront = "cn";
+    }
+    return out;
+}
+
+bool isPlayableOrResolvableItem(const MediaItem& item) {
+    if (item.id.rfind("demo-", 0) == 0 || item.id.rfind("cache:", 0) == 0) return false;
+    if (!item.play_url.empty()) return true;
+    if (extractAppleMusicLookup(item).is_apple_music) return true;
+    if (item.source_id == "bilibili" || item.source_id == "youtube" ||
+        item.source_id == "plugin-bilibili" || item.source_id == "plugin-youtube") {
+        return !item.id.empty();
+    }
+    if (item.extra.is_object()) {
+        for (const char* k : {"video_id", "youtube_id", "bvid", "abs_path", "local_path"}) {
+            if (item.extra.contains(k) && item.extra[k].is_string() &&
+                !item.extra[k].get_ref<const std::string&>().empty()) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 std::vector<MediaItem> buildShowcaseMedia() {
@@ -322,22 +552,643 @@ int computeVideoGridColumns(float stage_w) {
     return 5;
 }
 
-void appendGridRowSpacers(brls::Box* row, int total_items, int cols, float gap) {
-    if (!row || cols <= 1 || total_items <= 0) return;
-    const int rem = total_items % cols;
-    if (rem == 0) return;
-    for (int i = rem; i < cols; ++i) {
-        auto* spacer = new brls::Box(brls::Axis::COLUMN);
-        spacer->setWidth(0);
-        spacer->setGrow(1.0f);
-        spacer->setShrink(1.0f);
-        spacer->setFocusable(false);
-        if (i != cols - 1) {
-            spacer->setMarginRight(gap);
-        }
-        row->addView(spacer);
+std::string clipUtf8Bytes(const std::string& s, size_t max_bytes) {
+    if (s.size() <= max_bytes) return s;
+    size_t cut = max_bytes;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0u) == 0x80u) {
+        --cut;
     }
+    return s.substr(0, cut) + "…";
 }
+
+struct ReusablePillSlot {
+    brls::Box* box = nullptr;
+    brls::Label* lbl = nullptr;
+
+    static ReusablePillSlot create() {
+        ReusablePillSlot s;
+        s.box = new brls::Box(brls::Axis::ROW);
+        s.box->setPadding(4, 10, 4, 10);
+        s.box->setCornerRadius(7);
+        s.box->setAlignItems(brls::AlignItems::CENTER);
+        s.lbl = ui::makeLabel("", 13.0f, "font/grey", 1.2f);
+        s.lbl->setSingleLine(true);
+        s.box->addView(s.lbl);
+        return s;
+    }
+
+    void bind(const std::string& text,
+              const std::string& bg_token,
+              const std::string& fg_token) {
+        if (text.empty()) {
+            box->setVisibility(brls::Visibility::GONE);
+            return;
+        }
+        box->setVisibility(brls::Visibility::VISIBLE);
+        box->setBackgroundColor(ui::color(bg_token));
+        lbl->setTextColor(ui::color(fg_token));
+        lbl->setText(text);
+    }
+};
+
+class MediaVideoGridCell final : public RecyclingGridCell {
+public:
+    MediaVideoGridCell() : RecyclingGridCell(brls::Axis::COLUMN) {
+        setPadding(14.0f);
+        setBackgroundColor(ui::color("desktop/surface"));
+        setCornerRadius(12.0f);
+        setHighlightCornerRadius(12.0f);
+        setHideHighlightBackground(true);
+        setHideHighlightBorder(true);
+        setBorderThickness(1);
+        setBorderColor(ui::color("desktop/line"));
+        setFocusable(true);
+
+        thumb_card_ = ui::makeCard("desktop/soft", 10.0f, 9.0f);
+        thumb_card_->setBorderThickness(0);
+        thumb_card_->setMarginBottom(10);
+
+        badge_row_ = new brls::Box(brls::Axis::ROW);
+        badge_row_->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        source_pill_ = ReusablePillSlot::create();
+        dur_pill_ = ReusablePillSlot::create();
+        badge_row_->addView(source_pill_.box);
+        badge_row_->addView(dur_pill_.box);
+        thumb_card_->addView(badge_row_);
+
+        music_cover_wrap_ = new brls::Box(brls::Axis::ROW);
+        music_cover_wrap_->setWidthPercentage(100);
+        music_cover_wrap_->setMarginTop(6);
+        music_cover_wrap_->setJustifyContent(brls::JustifyContent::CENTER);
+        music_cover_wrap_->setAlignItems(brls::AlignItems::CENTER);
+        music_cover_img_ = new CachedImageView(&ImageCache::instance());
+        music_cover_img_->setCornerRadius(8.0f);
+        music_cover_img_->setScalingType(brls::ImageScalingType::FILL);
+        music_cover_wrap_->addView(music_cover_img_);
+        thumb_card_->addView(music_cover_wrap_);
+
+        video_cover_img_ = new CachedImageView(&ImageCache::instance());
+        video_cover_img_->setWidthPercentage(100);
+        video_cover_img_->setMarginTop(6);
+        video_cover_img_->setCornerRadius(7.0f);
+        video_cover_img_->setScalingType(brls::ImageScalingType::FILL);
+        thumb_card_->addView(video_cover_img_);
+
+        placeholder_box_ = new brls::Box(brls::Axis::COLUMN);
+        placeholder_box_->setWidthPercentage(100);
+        placeholder_box_->setMarginTop(6);
+        placeholder_box_->setJustifyContent(brls::JustifyContent::CENTER);
+        placeholder_box_->setAlignItems(brls::AlignItems::CENTER);
+        placeholder_lbl_ = ui::makeLabel("16:9 视频预览", 13.0f, "font/grey");
+        placeholder_box_->addView(placeholder_lbl_);
+        thumb_card_->addView(placeholder_box_);
+
+        pills_row_ = new brls::Box(brls::Axis::ROW);
+        pills_row_->setMarginTop(6);
+        ui_comfort::enableFlexWrap(pills_row_, 4.0f);
+        quality_pill_ = ReusablePillSlot::create();
+        quality_pill_.box->setMarginRight(6);
+        bilingual_pill_ = ReusablePillSlot::create();
+        bilingual_pill_.box->setMarginRight(6);
+        prov_pill_ = ReusablePillSlot::create();
+        pills_row_->addView(quality_pill_.box);
+        pills_row_->addView(bilingual_pill_.box);
+        pills_row_->addView(prov_pill_.box);
+        thumb_card_->addView(pills_row_);
+
+        addView(thumb_card_);
+
+        title_lbl_ = ui::makeLabel("", 16.0f, "brls/text", 1.38f);
+        title_lbl_->setMarginBottom(5);
+        addView(title_lbl_);
+
+        creator_lbl_ = ui::makeLabel("", 13.5f, "font/grey");
+        creator_lbl_->setSingleLine(true);
+        addView(creator_lbl_);
+
+        registerClickAction([this](brls::View*) {
+            if (on_activate_) on_activate_();
+            return true;
+        });
+
+        addGestureRecognizer(new brls::TapGestureRecognizer(
+            [this](brls::TapGestureStatus status, brls::Sound* soundToPlay) {
+                if (!isFocusable() || getVisibility() != brls::Visibility::VISIBLE) return;
+                if (status.state == brls::GestureState::START ||
+                    status.state == brls::GestureState::UNSURE) {
+                    playClickAnimation(false, false);
+                } else if (status.state == brls::GestureState::FAILED ||
+                           status.state == brls::GestureState::INTERRUPTED) {
+                    playClickAnimation(true);
+                } else if (status.state == brls::GestureState::END) {
+                    playClickAnimation(true);
+                    brls::Application::giveFocus(this);
+                    if (soundToPlay) *soundToPlay = brls::SOUND_CLICK;
+                    if (on_activate_) on_activate_();
+                }
+            }));
+    }
+
+    void prepareForReuse() override {
+        on_activate_ = nullptr;
+    }
+
+    void bind(const MediaItem& item,
+              float inner_cover_w,
+              float cover_h,
+              std::function<void()> on_activate) {
+        on_activate_ = std::move(on_activate);
+        setBackgroundColor(ui::color("desktop/surface"));
+        setBorderColor(ui::color("desktop/line"));
+        thumb_card_->setBackgroundColor(ui::color("desktop/soft"));
+
+        source_pill_.bind(item.source_badge.empty() ? "Media" : item.source_badge,
+                          "desktop/surface", "domain/media");
+        std::string right_badge;
+        const int ep_count = item.extra.is_object() ? item.extra.value("episode_count", 0) : 0;
+        if (ep_count > 0) {
+            right_badge = "共 " + std::to_string(ep_count) + " 集";
+        } else if (item.duration_sec > 0.0 || item.kind != "nas") {
+            right_badge = formatDuration(item.duration_sec);
+        }
+        dur_pill_.bind(right_badge, "desktop/surface", "brls/text");
+
+        const bool url_changed = (item.cover_url != bound_cover_url_);
+        bound_cover_url_ = item.cover_url;
+
+        if (!item.cover_url.empty()) {
+            placeholder_box_->setVisibility(brls::Visibility::GONE);
+            if (item.kind == "music") {
+                if (url_changed) {
+                    video_cover_img_->setImageUrl("", {});
+                    music_cover_img_->setImageUrl("", {});
+                }
+                video_cover_img_->setVisibility(brls::Visibility::GONE);
+                music_cover_wrap_->setVisibility(brls::Visibility::VISIBLE);
+                music_cover_wrap_->setHeight(cover_h);
+                const float sq_side = std::min(inner_cover_w, cover_h);
+                music_cover_img_->setDimensions(sq_side, sq_side);
+                music_cover_img_->setImageUrl(item.cover_url, extractHeadersFromItem(item));
+            } else {
+                if (url_changed) {
+                    music_cover_img_->setImageUrl("", {});
+                    video_cover_img_->setImageUrl("", {});
+                }
+                music_cover_wrap_->setVisibility(brls::Visibility::GONE);
+                video_cover_img_->setVisibility(brls::Visibility::VISIBLE);
+                video_cover_img_->setHeight(cover_h);
+                video_cover_img_->setImageUrl(item.cover_url, extractHeadersFromItem(item));
+            }
+        } else {
+            if (url_changed) {
+                music_cover_img_->setImageUrl("", {});
+                video_cover_img_->setImageUrl("", {});
+            }
+            music_cover_wrap_->setVisibility(brls::Visibility::GONE);
+            video_cover_img_->setVisibility(brls::Visibility::GONE);
+            placeholder_box_->setVisibility(brls::Visibility::VISIBLE);
+            placeholder_box_->setHeight(cover_h);
+            placeholder_lbl_->setTextColor(ui::color("font/grey"));
+            placeholder_lbl_->setText(item.kind == "music" ? "♪ 专辑封面" : "16:9 视频预览");
+        }
+
+        const bool quality_is_reason = item.extra.is_object() &&
+            (item.quality_label == item.extra.value("reason", "") ||
+             item.quality_label == item.extra.value("why_recommended", ""));
+        const std::string q_text = (!item.quality_label.empty() && !quality_is_reason)
+                                       ? item.quality_label
+                                       : std::string{};
+        quality_pill_.bind(q_text, "status/info_bg", "status/info_fg");
+        bilingual_pill_.bind(item.has_bilingual_sub ? "双语字幕" : "", "status/ok_bg", "status/ok_fg");
+
+        std::string prov_text;
+        std::string prov_fg = "status/info_fg";
+        if (item.extra.is_object()) {
+            const std::string prev_date = item.extra.value("previously_recommended_on", "");
+            const std::string cur_mode = item.extra.value("curation_mode", "");
+            if (!prev_date.empty()) {
+                prov_text = "经典重温 · " + prev_date;
+            } else if (cur_mode == "interactive_ephemeral") {
+                prov_text = "AI 灵感推荐";
+                prov_fg = "domain/core";
+            }
+        }
+        prov_pill_.bind(prov_text, "status/info_bg", prov_fg);
+
+        const bool any_pill = !q_text.empty() || item.has_bilingual_sub || !prov_text.empty();
+        pills_row_->setVisibility(any_pill ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+
+        title_lbl_->setTextColor(ui::color("brls/text"));
+        title_lbl_->setText(clipUtf8Bytes(item.title, 96));
+
+        const std::string creator_txt =
+            item.creator.empty() ? (item.kind == "music" ? "音乐曲目" : "视频内容") : item.creator;
+        creator_lbl_->setTextColor(ui::color("font/grey"));
+        creator_lbl_->setText(creator_txt);
+    }
+
+private:
+    brls::Box* thumb_card_ = nullptr;
+    brls::Box* badge_row_ = nullptr;
+    ReusablePillSlot source_pill_;
+    ReusablePillSlot dur_pill_;
+    brls::Box* music_cover_wrap_ = nullptr;
+    CachedImageView* music_cover_img_ = nullptr;
+    CachedImageView* video_cover_img_ = nullptr;
+    brls::Box* placeholder_box_ = nullptr;
+    brls::Label* placeholder_lbl_ = nullptr;
+    brls::Box* pills_row_ = nullptr;
+    ReusablePillSlot quality_pill_;
+    ReusablePillSlot bilingual_pill_;
+    ReusablePillSlot prov_pill_;
+    brls::Label* title_lbl_ = nullptr;
+    brls::Label* creator_lbl_ = nullptr;
+    std::string bound_cover_url_;
+    std::function<void()> on_activate_;
+};
+
+class NasMediaGridCell final : public RecyclingGridCell {
+public:
+    NasMediaGridCell() : RecyclingGridCell(brls::Axis::COLUMN) {
+        setPadding(14.0f);
+        setBackgroundColor(ui::color("desktop/surface"));
+        setCornerRadius(12.0f);
+        setHighlightCornerRadius(12.0f);
+        setHideHighlightBackground(true);
+        setHideHighlightBorder(true);
+        setBorderThickness(1);
+        setBorderColor(ui::color("desktop/line"));
+        setFocusable(true);
+
+        top_row_ = new brls::Box(brls::Axis::ROW);
+        top_row_->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        top_row_->setMarginBottom(6);
+        badge_pill_ = ReusablePillSlot::create();
+        sub_pill_ = ReusablePillSlot::create();
+        top_row_->addView(badge_pill_.box);
+        top_row_->addView(sub_pill_.box);
+        addView(top_row_);
+
+        title_lbl_ = ui::makeLabel("", 16.0f, "brls/text", 1.38f);
+        addView(title_lbl_);
+
+        meta_lbl_ = ui::makeLabel("", 13.5f, "font/grey");
+        meta_lbl_->setMarginTop(6);
+        meta_lbl_->setSingleLine(true);
+        addView(meta_lbl_);
+
+        registerClickAction([this](brls::View*) {
+            if (on_activate_) on_activate_();
+            return true;
+        });
+
+        addGestureRecognizer(new brls::TapGestureRecognizer(
+            [this](brls::TapGestureStatus status, brls::Sound* soundToPlay) {
+                if (!isFocusable() || getVisibility() != brls::Visibility::VISIBLE) return;
+                if (status.state == brls::GestureState::START ||
+                    status.state == brls::GestureState::UNSURE) {
+                    playClickAnimation(false, false);
+                } else if (status.state == brls::GestureState::FAILED ||
+                           status.state == brls::GestureState::INTERRUPTED) {
+                    playClickAnimation(true);
+                } else if (status.state == brls::GestureState::END) {
+                    playClickAnimation(true);
+                    brls::Application::giveFocus(this);
+                    if (soundToPlay) *soundToPlay = brls::SOUND_CLICK;
+                    if (on_activate_) on_activate_();
+                }
+            }));
+    }
+
+    void prepareForReuse() override { on_activate_ = nullptr; }
+
+    void bind(const MediaItem& item, std::function<void()> on_activate) {
+        on_activate_ = std::move(on_activate);
+        setBackgroundColor(ui::color("desktop/surface"));
+        setBorderColor(ui::color("desktop/line"));
+        badge_pill_.bind(item.source_badge.empty() ? "飞牛 NAS" : item.source_badge,
+                         "status/info_bg", "domain/media");
+        sub_pill_.bind(item.has_bilingual_sub ? "双语字幕" : "", "status/ok_bg", "status/ok_fg");
+        title_lbl_->setTextColor(ui::color("brls/text"));
+        title_lbl_->setText(clipUtf8Bytes(item.title, 88));
+        meta_lbl_->setTextColor(ui::color("font/grey"));
+        meta_lbl_->setText((item.quality_label.empty() ? item.kind : item.quality_label) + " · 点击播放");
+    }
+
+private:
+    brls::Box* top_row_ = nullptr;
+    ReusablePillSlot badge_pill_;
+    ReusablePillSlot sub_pill_;
+    brls::Label* title_lbl_ = nullptr;
+    brls::Label* meta_lbl_ = nullptr;
+    std::function<void()> on_activate_;
+};
+
+class ImdbDiscoverCell final : public RecyclingGridCell {
+public:
+    ImdbDiscoverCell() : RecyclingGridCell(brls::Axis::ROW) {
+        setWidthPercentage(100);
+        setPadding(14.0f);
+        setBackgroundColor(ui::color("desktop/surface"));
+        setCornerRadius(10.0f);
+        setHighlightCornerRadius(10.0f);
+        setBorderThickness(1);
+        setBorderColor(ui::color("desktop/line"));
+        setAlignItems(brls::AlignItems::CENTER);
+
+        poster_img_ = new CachedImageView(&ImageCache::instance());
+        poster_img_->setWidth(68.0f);
+        poster_img_->setHeight(102.0f);
+        poster_img_->setShrink(0.0f);
+        poster_img_->setCornerRadius(6.0f);
+        poster_img_->setScalingType(brls::ImageScalingType::FILL);
+        poster_img_->setMarginRight(14.0f);
+        addView(poster_img_);
+
+        info_col_ = new brls::Box(brls::Axis::COLUMN);
+        info_col_->setGrow(1.0f);
+        info_col_->setShrink(1.0f);
+
+        top_row_ = new brls::Box(brls::Axis::ROW);
+        top_row_->setAlignItems(brls::AlignItems::CENTER);
+        kind_pill_ = ReusablePillSlot::create();
+        kind_pill_.box->setMarginRight(8);
+        meta_lbl_ = ui::makeLabel("", 12.5f, "font/grey");
+        meta_lbl_->setSingleLine(true);
+        top_row_->addView(kind_pill_.box);
+        top_row_->addView(meta_lbl_);
+        info_col_->addView(top_row_);
+
+        title_lbl_ = ui::makeLabel("", 16.5f, "brls/text");
+        title_lbl_->setMarginTop(5);
+        title_lbl_->setSingleLine(true);
+        info_col_->addView(title_lbl_);
+
+        desc_lbl_ = ui::makeLabel("", 13.0f, "font/grey");
+        desc_lbl_->setMarginTop(4);
+        info_col_->addView(desc_lbl_);
+
+        btn_row_ = new brls::Box(brls::Axis::ROW);
+        btn_row_->setMarginTop(8);
+        play_btn_ = ui::makeButton("飞牛匹配播放", [this]() {
+            if (on_local_match_) on_local_match_();
+        }, false, 30.0f);
+        play_btn_->setMarginRight(8);
+        btn_row_->addView(play_btn_);
+
+        add_btn_ = ui::makeButton("加入 Arr 选小体积", [this]() {
+            if (on_add_arr_) on_add_arr_("compact");
+        }, true, 30.0f);
+        add_btn_->setMarginRight(8);
+        btn_row_->addView(add_btn_);
+
+        add_fast_btn_ = ui::makeButton("加入 Arr 选最快下载", [this]() {
+            if (on_add_arr_) on_add_arr_("fastest");
+        }, false, 30.0f);
+        add_fast_btn_->setMarginRight(8);
+        btn_row_->addView(add_fast_btn_);
+
+        ws_btn_ = ui::makeButton("完整选种与队列", [this]() {
+            if (on_open_ws_) on_open_ws_();
+        }, false, 30.0f);
+        btn_row_->addView(ws_btn_);
+
+        info_col_->addView(btn_row_);
+        addView(info_col_);
+    }
+
+    void prepareForReuse() override {
+        on_local_match_ = nullptr;
+        on_add_arr_ = nullptr;
+        on_open_ws_ = nullptr;
+    }
+
+    void bind(const nlohmann::json& entry,
+              bool can_local_match,
+              bool has_arr,
+              std::function<void()> on_local_match,
+              std::function<void(const std::string&)> on_add_arr,
+              std::function<void()> on_open_ws) {
+        on_local_match_ = std::move(on_local_match);
+        on_add_arr_ = std::move(on_add_arr);
+        on_open_ws_ = std::move(on_open_ws);
+
+        setBackgroundColor(ui::color("desktop/surface"));
+        setBorderColor(ui::color("desktop/line"));
+
+        const std::string imdb_id = entry.value("imdb_id", "");
+        const std::string title = entry.value("title", "");
+        const std::string orig_title = entry.value("original_title", "");
+        const std::string kind = entry.value("kind", "movie");
+        const int year = entry.value("year", 0);
+        const int rank = entry.value("rank", 0);
+        const double rating = entry.value("rating", 0.0);
+        const std::string poster_url = entry.value("poster_url", "");
+        const std::string plot = entry.value("plot", "");
+        const std::string cast_summary = entry.value("cast_summary", "");
+
+        if (poster_url != bound_poster_url_) {
+            poster_img_->setImageUrl("", {});
+            bound_poster_url_ = poster_url;
+        }
+        if (!poster_url.empty()) {
+            poster_img_->setVisibility(brls::Visibility::VISIBLE);
+            poster_img_->setImageUrl(poster_url, {{"Referer", "https://www.imdb.com/"}});
+        } else {
+            poster_img_->setVisibility(brls::Visibility::GONE);
+        }
+
+        kind_pill_.bind(kind == "series" ? "剧集 · Sonarr" : "电影 · Radarr",
+                        "desktop/soft", "domain/media");
+
+        std::string meta;
+        if (rank > 0) meta += "#" + std::to_string(rank) + " · ";
+        if (year > 0) meta += std::to_string(year) + " · ";
+        if (rating > 0.0) {
+            char rbuf[32];
+            std::snprintf(rbuf, sizeof(rbuf), "★ %.1f", rating);
+            meta += std::string(rbuf) + " · ";
+        }
+        meta += imdb_id;
+        meta_lbl_->setTextColor(ui::color("font/grey"));
+        meta_lbl_->setText(meta);
+
+        std::string full_title = title;
+        if (!orig_title.empty() && orig_title != title) {
+            full_title += " (" + orig_title + ")";
+        }
+        title_lbl_->setTextColor(ui::color("brls/text"));
+        title_lbl_->setText(clipUtf8Bytes(full_title, 110));
+
+        const std::string desc = !plot.empty() ? clipUtf8Bytes(plot, 160) : clipUtf8Bytes(cast_summary, 160);
+        if (!desc.empty()) {
+            desc_lbl_->setVisibility(brls::Visibility::VISIBLE);
+            desc_lbl_->setTextColor(ui::color("font/grey"));
+            desc_lbl_->setText(desc);
+        } else {
+            desc_lbl_->setVisibility(brls::Visibility::GONE);
+        }
+
+        play_btn_->setVisibility(can_local_match ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+        add_btn_->setVisibility(has_arr ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+        add_fast_btn_->setVisibility(has_arr ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+
+private:
+    CachedImageView* poster_img_ = nullptr;
+    brls::Box* info_col_ = nullptr;
+    brls::Box* top_row_ = nullptr;
+    ReusablePillSlot kind_pill_;
+    brls::Label* meta_lbl_ = nullptr;
+    brls::Label* title_lbl_ = nullptr;
+    brls::Label* desc_lbl_ = nullptr;
+    brls::Box* btn_row_ = nullptr;
+    brls::Button* play_btn_ = nullptr;
+    brls::Button* add_btn_ = nullptr;
+    brls::Button* add_fast_btn_ = nullptr;
+    brls::Button* ws_btn_ = nullptr;
+    std::string bound_poster_url_;
+    std::function<void()> on_local_match_;
+    std::function<void(const std::string&)> on_add_arr_;
+    std::function<void()> on_open_ws_;
+};
+
+class MusicTrackRowCell final : public RecyclingGridCell {
+public:
+    MusicTrackRowCell() : RecyclingGridCell(brls::Axis::ROW) {
+        setWidthPercentage(100);
+        setPadding(10.0f);
+        setCornerRadius(8.0f);
+        setHighlightCornerRadius(8.0f);
+        setHideHighlightBackground(true);
+        setHideHighlightBorder(true);
+        setBorderThickness(1);
+        setBorderColor(ui::color("desktop/line"));
+        setAlignItems(brls::AlignItems::CENTER);
+        setFocusable(true);
+
+        thumb_img_ = new CachedImageView(&ImageCache::instance());
+        thumb_img_->setDimensions(46, 46);
+        thumb_img_->setShrink(0.0f);
+        thumb_img_->setCornerRadius(6.0f);
+        thumb_img_->setScalingType(brls::ImageScalingType::FILL);
+        thumb_img_->setMarginRight(10);
+        addView(thumb_img_);
+
+        ph_box_ = ui::makeCard("desktop/surface", 0.0f, 6.0f);
+        ph_box_->setDimensions(46, 46);
+        ph_box_->setShrink(0.0f);
+        ph_box_->setMarginRight(10);
+        ph_box_->setJustifyContent(brls::JustifyContent::CENTER);
+        ph_box_->setAlignItems(brls::AlignItems::CENTER);
+        ph_lbl_ = ui::makeLabel("♪", 15.0f, "font/grey");
+        ph_box_->addView(ph_lbl_);
+        addView(ph_box_);
+
+        info_col_ = new brls::Box(brls::Axis::COLUMN);
+        info_col_->setGrow(1.0f);
+        info_col_->setShrink(1.0f);
+
+        top_row_ = new brls::Box(brls::Axis::ROW);
+        top_row_->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        top_row_->setAlignItems(brls::AlignItems::CENTER);
+        title_lbl_ = ui::makeLabel("", 14.5f, "brls/text");
+        title_lbl_->setShrink(1.0f);
+        title_lbl_->setSingleLine(true);
+        top_row_->addView(title_lbl_);
+        prov_pill_ = ReusablePillSlot::create();
+        prov_pill_.box->setMarginLeft(6);
+        top_row_->addView(prov_pill_.box);
+        info_col_->addView(top_row_);
+
+        sub_lbl_ = ui::makeLabel("", 13.0f, "font/grey");
+        sub_lbl_->setMarginTop(2);
+        sub_lbl_->setSingleLine(true);
+        info_col_->addView(sub_lbl_);
+        addView(info_col_);
+
+        registerClickAction([this](brls::View*) {
+            if (on_activate_) on_activate_();
+            return true;
+        });
+
+        addGestureRecognizer(new brls::TapGestureRecognizer(
+            [this](brls::TapGestureStatus status, brls::Sound* soundToPlay) {
+                if (!isFocusable() || getVisibility() != brls::Visibility::VISIBLE) return;
+                if (status.state == brls::GestureState::START ||
+                    status.state == brls::GestureState::UNSURE) {
+                    playClickAnimation(false, false);
+                } else if (status.state == brls::GestureState::FAILED ||
+                           status.state == brls::GestureState::INTERRUPTED) {
+                    playClickAnimation(true);
+                } else if (status.state == brls::GestureState::END) {
+                    playClickAnimation(true);
+                    brls::Application::giveFocus(this);
+                    if (soundToPlay) *soundToPlay = brls::SOUND_CLICK;
+                    if (on_activate_) on_activate_();
+                }
+            }));
+    }
+
+    void prepareForReuse() override { on_activate_ = nullptr; }
+
+    void bind(const MediaItem& tr, bool selected, std::function<void()> on_activate) {
+        on_activate_ = std::move(on_activate);
+        setBackgroundColor(ui::color(selected ? "desktop/active" : "desktop/soft"));
+        setBorderColor(ui::color(selected ? "brls/accent" : "desktop/line"));
+
+        if (tr.cover_url != bound_cover_url_) {
+            thumb_img_->setImageUrl("", {});
+            bound_cover_url_ = tr.cover_url;
+        }
+        if (!tr.cover_url.empty()) {
+            ph_box_->setVisibility(brls::Visibility::GONE);
+            thumb_img_->setVisibility(brls::Visibility::VISIBLE);
+            thumb_img_->setImageUrl(tr.cover_url, extractHeadersFromItem(tr));
+        } else {
+            thumb_img_->setVisibility(brls::Visibility::GONE);
+            ph_box_->setVisibility(brls::Visibility::VISIBLE);
+            ph_box_->setBackgroundColor(ui::color("desktop/surface"));
+            ph_lbl_->setTextColor(ui::color(selected ? "brls/accent" : "font/grey"));
+        }
+
+        title_lbl_->setTextColor(ui::color(selected ? "brls/accent" : "brls/text"));
+        title_lbl_->setText(tr.title);
+
+        const std::string prev_date =
+            tr.extra.is_object() ? tr.extra.value("previously_recommended_on", "") : "";
+        prov_pill_.bind(prev_date.empty() ? "" : ("经典重温 · " + prev_date),
+                        "status/info_bg", "status/info_fg");
+
+        std::string sub_line = tr.creator;
+        const bool q_is_reason = tr.extra.is_object() &&
+            (tr.quality_label == tr.extra.value("reason", "") ||
+             tr.quality_label == tr.extra.value("why_recommended", ""));
+        if (!tr.quality_label.empty() && !q_is_reason) {
+            if (!sub_line.empty()) sub_line += " · ";
+            sub_line += tr.quality_label;
+        }
+        if (!sub_line.empty()) {
+            sub_lbl_->setVisibility(brls::Visibility::VISIBLE);
+            sub_lbl_->setTextColor(ui::color("font/grey"));
+            sub_lbl_->setText(sub_line);
+        } else {
+            sub_lbl_->setVisibility(brls::Visibility::GONE);
+        }
+    }
+
+private:
+    CachedImageView* thumb_img_ = nullptr;
+    brls::Box* ph_box_ = nullptr;
+    brls::Label* ph_lbl_ = nullptr;
+    brls::Box* info_col_ = nullptr;
+    brls::Box* top_row_ = nullptr;
+    brls::Label* title_lbl_ = nullptr;
+    ReusablePillSlot prov_pill_;
+    brls::Label* sub_lbl_ = nullptr;
+    std::string bound_cover_url_;
+    std::function<void()> on_activate_;
+};
 
 } // namespace
 
@@ -347,6 +1198,9 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
       on_entity_focus_(std::move(on_entity_focus)),
       on_open_marketplace_(std::move(on_open_marketplace)) {
     setGrow(1.0f);
+    setShrink(1.0f);
+    setMinHeight(0);
+    setHeightPercentage(100);
     setPadding(22, 24, 18, 24);
     setBackgroundColor(ui::color("brls/background"));
 
@@ -360,28 +1214,35 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
     auto* left = new brls::Box(brls::Axis::COLUMN);
     left->setShrink(1.0f);
     left->addView(ui::makeLabel("影视与音乐 · Media Workbench", 24.0f, "brls/text"));
-    source_status_label_ = ui::makeLabel("16:9 影视卡片 · 双语歌词工作室 · fnOS NAS · MPV 播放器舞台", 14.5f, "font/grey");
+    source_status_label_ = ui::makeLabel("16:9 影视卡片 · 双语歌词工作室 · IMDb 选片 · fnOS NAS · MPV 播放器舞台", 14.5f, "font/grey");
     source_status_label_->setMarginTop(3);
     left->addView(source_status_label_);
     header_box_->addView(left);
 
     auto* right = new brls::Box(brls::Axis::ROW);
     right->setShrink(0.0f);
-    date_filter_btn_ = ui::makeButton("📅 日历查找", [this, alive = alive_]() {
+    right->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(right, 6.0f);
+    date_filter_btn_ = ui::makeButton("日历查找", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) promptRehydrateOrDateFilter();
-    }, false, 36.0f);
+    }, false, 35.0f);
     date_filter_btn_->setMarginRight(8);
     right->addView(date_filter_btn_);
+    auto* r_btn = ui::makeButton("刷新 (R)", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) refresh(true);
+    }, true, 35.0f);
+    r_btn->setMarginRight(8);
+    right->addView(r_btn);
     auto* s_btn = ui::makeButton("搜索片库 /", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) promptSearch();
-    }, false, 36.0f);
+    }, false, 35.0f);
     s_btn->setMarginRight(8);
     right->addView(s_btn);
     auto* m_btn = ui::makeButton("管理影视插件", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire) && on_open_marketplace_) {
             on_open_marketplace_();
         }
-    }, false, 36.0f);
+    }, false, 35.0f);
     right->addView(m_btn);
     header_box_->addView(right);
     addView(header_box_);
@@ -389,23 +1250,233 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
     sub_tabs_box_ = new brls::Box(brls::Axis::ROW);
     sub_tabs_box_->setId("omnidesk/pane_filters");
     sub_tabs_box_->setShrink(0.0f);
-    sub_tabs_box_->setMarginBottom(14);
+    sub_tabs_box_->setMarginBottom(12);
+    ui_comfort::enableFlexWrap(sub_tabs_box_, 6.0f);
     addView(sub_tabs_box_);
 
-    stage_scroll_ = new brls::ScrollingFrame();
-    stage_scroll_->setId("omnidesk/pane_primary");
-    stage_scroll_->setGrow(1.0f);
-    stage_scroll_->setWidthPercentage(100);
-    stage_box_ = new brls::Box(brls::Axis::COLUMN);
-    stage_box_->setWidthPercentage(100);
-    stage_scroll_->setContentView(stage_box_);
-    addView(stage_scroll_);
+    class MediaStageDataSource final : public RecyclingGridDataSource {
+    public:
+        explicit MediaStageDataSource(MediaWorkbench* owner) : owner_(owner) {}
+
+        size_t getItemCount() override {
+            if (!owner_) return 0;
+            if (owner_->sub_mode_ == SubMode::ImdbDiscover) {
+                return owner_->visible_imdb_items_.size();
+            }
+            return owner_->visible_grid_items_.size();
+        }
+
+        RecyclingGridCell* cellForRow(RecyclingGrid* recycler, size_t index) override {
+            if (!owner_ || !recycler) return nullptr;
+            auto* wb = owner_;
+            auto alive = owner_->alive_;
+
+            if (wb->sub_mode_ == SubMode::ImdbDiscover) {
+                auto* cell = static_cast<ImdbDiscoverCell*>(recycler->dequeueReusableCell("imdb_card"));
+                if (!cell || index >= wb->visible_imdb_items_.size()) return cell;
+                const nlohmann::json& entry = wb->visible_imdb_items_[index];
+                auto& kernel = HostKernel::instance();
+                const bool has_arr = kernel.isInitialized() && kernel.capabilities().has("arr.manage.v1");
+                const bool can_local_match = has_arr && kernel.capabilities().has("media.local_match.v1");
+
+                const std::string imdb_id = entry.value("imdb_id", "");
+                const std::string title = entry.value("title", "");
+                const int year = entry.value("year", 0);
+                const std::string kind = entry.value("kind", "movie");
+
+                cell->bind(
+                    entry,
+                    can_local_match,
+                    has_arr,
+                    [wb, alive, imdb_id, title, year, kind]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        auto& k = HostKernel::instance();
+                        if (!k.isInitialized()) return;
+                        if (wb->imdb_action_request_) wb->imdb_action_request_->cancel();
+                        auto req = CancelToken::create();
+                        wb->imdb_action_request_ = req;
+                        loadUiInBackground(
+                            k.uiTasks(),
+                            "media.imdb_local_match",
+                            req,
+                            [imdb_id, title, year, kind](const auto& cancel) {
+                                return HostKernel::instance().capabilities().callCancellable(
+                                    "arr.manage.v1",
+                                    {
+                                        {"action", "local_match"},
+                                        {"imdb_id", imdb_id},
+                                        {"title", title},
+                                        {"year", year},
+                                        {"kind", kind},
+                                        {"auto_open_player", true},
+                                    },
+                                    cancel);
+                            },
+                            [alive](CapabilityResult res) {
+                                if (!alive->load(std::memory_order_acquire)) return;
+                                if (res.ok && res.data.is_object() && res.data.value("matched", false)) {
+                                    brls::Application::notify("飞牛影库已匹配并打开播放");
+                                } else {
+                                    brls::Application::notify("飞牛本地影库暂未入库该作品，可加入 Arr 下载");
+                                }
+                            },
+                            []() {});
+                    },
+                    [wb, alive, imdb_id, title, kind](const std::string& sort_mode) {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        auto& k = HostKernel::instance();
+                        if (!k.isInitialized()) return;
+                        if (wb->imdb_action_request_) wb->imdb_action_request_->cancel();
+                        auto req = CancelToken::create();
+                        wb->imdb_action_request_ = req;
+                        const std::string arr_kind = (kind == "series") ? "sonarr" : "radarr";
+                        const std::string mode_label =
+                            (sort_mode == "fastest") ? "预计最快下载" : "最优小体积";
+                        brls::Application::notify("正在提交到 " +
+                                                  std::string(arr_kind == "sonarr" ? "Sonarr" : "Radarr") +
+                                                  "（" + mode_label + "）...");
+                        loadInBackground(
+                            k.jobs(),
+                            "Arr 选片 · " + title,
+                            req,
+                            [arr_kind, imdb_id, title, sort_mode](const auto& cancel) {
+                                return HostKernel::instance().capabilities().callCancellable(
+                                    "arr.manage.v1",
+                                    {
+                                        {"action", "add"},
+                                        {"kind", arr_kind},
+                                        {"imdb_id", imdb_id},
+                                        {"title", title},
+                                        {"monitored", true},
+                                        {"search", true},
+                                        {"sort_mode", sort_mode},
+                                    },
+                                    cancel);
+                            },
+                            [alive](CapabilityResult res) {
+                                if (!alive->load(std::memory_order_acquire)) return;
+                                if (res.ok) {
+                                    brls::Application::notify(
+                                        res.data.is_object()
+                                            ? res.data.value("message", "已加入 Arr 选片队列")
+                                            : "已加入 Arr 选片队列");
+                                } else {
+                                    brls::Application::notify("加入 Arr 失败: " + res.error);
+                                }
+                            },
+                            []() {});
+                    },
+                    [alive]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        if (HostKernel::instance().isInitialized()) {
+                            HostKernel::instance().bus().publish("entity.workspace.open",
+                                                                 {{"tab_id", "tab-arr-imdb"}});
+                        }
+                    });
+                return cell;
+            }
+
+            auto* cell = static_cast<MediaVideoGridCell*>(recycler->dequeueReusableCell("media_card"));
+            if (!cell || index >= wb->visible_grid_items_.size()) return cell;
+            const MediaItem item = wb->visible_grid_items_[index];
+            const float inner_cover_w = std::max(160.0f, recycler->cellColumnWidth() - 48.0f);
+            cell->bind(item, inner_cover_w, wb->active_video_cover_h_, [wb, alive, item]() {
+                brls::sync([wb, alive, item]() {
+                    if (alive->load(std::memory_order_acquire)) {
+                        wb->activateMediaItem(item);
+                    }
+                });
+            });
+            return cell;
+        }
+
+    private:
+        MediaWorkbench* owner_ = nullptr;
+    };
+
+    stage_grid_ = new RecyclingGrid();
+    stage_grid_->setId("omnidesk/pane_primary");
+    stage_grid_->setGrow(1.0f);
+    stage_grid_->setShrink(1.0f);
+    stage_grid_->setMinHeight(0);
+    stage_grid_->setWidthPercentage(100);
+    stage_grid_->setColSpace(14.0f);
+    stage_grid_->setEstimatedRowSpace(14.0f);
+    stage_grid_->setPreFetchLine(2);
+    stage_grid_->registerCell("media_card", []() { return new MediaVideoGridCell(); });
+    stage_grid_->registerCell("nas_card", []() { return new NasMediaGridCell(); });
+    stage_grid_->registerCell("imdb_card", []() { return new ImdbDiscoverCell(); });
+    stage_grid_->setOnNextPage([this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (getVisibility() != brls::Visibility::VISIBLE) return;
+        if (sub_mode_ != SubMode::Videos || media_loading_more_ || !media_has_more_ ||
+            visible_grid_items_.empty()) {
+            return;
+        }
+        loadMoreMedia();
+    });
+    stage_grid_->setDataSource(new MediaStageDataSource(this), true);
+    addView(stage_grid_);
 
     mpv_state_sub_ = MPVCore::instance().subscribeState(
         [this, alive = alive_](const MpvPlaybackState& st) {
             brls::sync([this, alive, pos = st.position_sec]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 updateActiveLyricHighlight(pos);
+            });
+        });
+
+    coord_state_sub_ = PlaybackCoordinator::instance().subscribe(
+        [this, alive = alive_](const PlaybackSessionState& st) {
+            brls::sync([this, alive, st]() {
+                if (!alive->load(std::memory_order_acquire)) return;
+                if (st.active_role != PlaybackRole::BackgroundMusic) {
+                    last_coord_track_id_.clear();
+                    return;
+                }
+                const std::string coord_key =
+                    st.active_track.item.source_id + ":" + st.active_track.item.id;
+                const std::string prev_coord_key = last_coord_track_id_;
+                last_coord_track_id_ = coord_key;
+
+                if (has_active_item_ &&
+                    st.active_track.item.id == active_item_.id &&
+                    st.active_track.item.source_id == active_item_.source_id) {
+                    bool changed = false;
+                    if (active_item_.cover_url.empty() && !st.active_track.item.cover_url.empty()) {
+                        active_item_.cover_url = st.active_track.item.cover_url;
+                        changed = true;
+                    }
+                    if (active_item_.quality_label.empty() && !st.active_track.item.quality_label.empty()) {
+                        active_item_.quality_label = st.active_track.item.quality_label;
+                        changed = true;
+                    }
+                    if (active_item_.duration_sec <= 0.0 && st.active_track.item.duration_sec > 0.0) {
+                        active_item_.duration_sec = st.active_track.item.duration_sec;
+                        changed = true;
+                    }
+                    if (active_lyrics_.empty() && !st.active_track.lyrics.empty()) {
+                        active_lyrics_ = st.active_track.lyrics;
+                        changed = true;
+                    }
+                    if (changed) {
+                        for (auto& it : current_items_) {
+                            if (it.id == active_item_.id && it.source_id == active_item_.source_id) {
+                                if (it.cover_url.empty()) it.cover_url = active_item_.cover_url;
+                                if (it.quality_label.empty()) it.quality_label = active_item_.quality_label;
+                                if (it.duration_sec <= 0.0) it.duration_sec = active_item_.duration_sec;
+                            }
+                        }
+                        if (sub_mode_ == SubMode::MusicLyrics) {
+                            rebuildSubContent();
+                        }
+                    }
+                } else if (!prev_coord_key.empty() && coord_key != prev_coord_key &&
+                           has_active_item_ &&
+                           (active_item_.source_id + ":" + active_item_.id) == prev_coord_key &&
+                           !st.active_track.item.id.empty()) {
+                    selectItem(st.active_track.item, false);
+                }
             });
         });
 
@@ -416,7 +1487,7 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
             [this, alive = alive_](const std::string&, const nlohmann::json&) {
                 brls::sync([this, alive]() {
                     if (alive->load(std::memory_order_acquire)) {
-                        refresh();
+                        refresh(false);
                     }
                 });
             });
@@ -428,7 +1499,7 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
         }
     });
 
-    refresh();
+    refresh(false);
 }
 
 MediaWorkbench::~MediaWorkbench() {
@@ -436,6 +1507,10 @@ MediaWorkbench::~MediaWorkbench() {
     if (recommend_sub_ != 0 && HostKernel::instance().isInitialized()) {
         HostKernel::instance().bus().unsubscribe(recommend_sub_);
         recommend_sub_ = 0;
+    }
+    if (coord_state_sub_ != 0) {
+        PlaybackCoordinator::instance().unsubscribe(coord_state_sub_);
+        coord_state_sub_ = 0;
     }
     if (mpv_state_sub_ != 0) {
         MPVCore::instance().unsubscribeState(mpv_state_sub_);
@@ -446,8 +1521,11 @@ MediaWorkbench::~MediaWorkbench() {
         rehydrate_request_.reset();
     }
     if (provenance_request_) provenance_request_->cancel();
+    if (cover_enrich_request_) cover_enrich_request_->cancel();
+    if (nas_cover_enrich_request_) nas_cover_enrich_request_->cancel();
     alive_->store(false, std::memory_order_release);
     cancelActiveFetch();
+    music_queue_grid_ = nullptr;
     mpv_stage_ = nullptr;
 }
 
@@ -501,6 +1579,16 @@ bool MediaWorkbench::cancelActiveFetch() {
         active_fetches_.clear();
         ++fetch_seq_;
     }
+    if (!more_fetches_.empty()) {
+        for (const auto& tok : more_fetches_) {
+            if (tok) {
+                tok->cancel();
+                cancelled_any = true;
+            }
+        }
+        more_fetches_.clear();
+        media_loading_more_ = false;
+    }
     if (detail_request_) {
         if (!detail_request_->isCancelled()) {
             cancelled_any = true;
@@ -522,6 +1610,21 @@ bool MediaWorkbench::cancelActiveFetch() {
         }
         nas_dir_request_->cancel();
         nas_dir_request_.reset();
+    }
+    if (imdb_request_) {
+        if (!imdb_request_->isCancelled()) {
+            cancelled_any = true;
+        }
+        imdb_request_->cancel();
+        imdb_request_.reset();
+        imdb_loading_ = false;
+    }
+    if (imdb_action_request_) {
+        if (!imdb_action_request_->isCancelled()) {
+            cancelled_any = true;
+        }
+        imdb_action_request_->cancel();
+        imdb_action_request_.reset();
     }
     if (!cancelled_any) {
         return false;
@@ -553,42 +1656,63 @@ void MediaWorkbench::rebuildTabs() {
         {SubMode::DailyCuration, "每日策展"},
         {SubMode::MusicLyrics, "音乐与双语歌词"},
         {SubMode::NasLibrary, "飞牛 fnOS 私有影库"},
+        {SubMode::ImdbDiscover, "IMDb 发现与选片"},
         {SubMode::PlayerStage, "MPV 播放舞台 & 章节"},
     };
     for (const auto& t : tabs) {
-        auto* btn = ui::makeButton(t.label, [this, alive = alive_, m = t.mode]() {
+        auto* btn = ui_comfort::makeFilterChip(t.label, [this, alive = alive_, m = t.mode]() {
             brls::sync([this, alive, m]() {
                 if (alive->load(std::memory_order_acquire)) {
                     setSubMode(m);
                 }
             });
-        }, sub_mode_ == t.mode, 34.0f);
-        btn->setMarginRight(8);
+        }, sub_mode_ == t.mode, "domain/media", 32.0f);
+        btn->setMarginRight(7);
         sub_tabs_box_->addView(btn);
     }
 }
 
-void MediaWorkbench::refresh() {
+void MediaWorkbench::refresh(bool force_remote) {
     cached_feeds_.clear();
-    fetchCurrentSubMode();
+    if (sub_mode_ == SubMode::ImdbDiscover) {
+        imdb_loaded_ = false;
+    }
+    if (stage_grid_) {
+        stage_grid_->setContentOffsetY(0.0f, false);
+    }
+    fetchCurrentSubMode(false, force_remote);
 }
 
-void MediaWorkbench::fetchCurrentSubMode(bool preserve_detail) {
+void MediaWorkbench::fetchCurrentSubMode(bool preserve_detail, bool force_refresh) {
     auto detail = preserve_detail ? std::move(detail_request_) : nullptr;
     cancelActiveFetch();
     if (detail) detail_request_ = std::move(detail);
+    media_page_ = 1;
+    media_loading_more_ = false;
+    media_has_more_ = true;
     rebuildTabs();
     if (date_filter_btn_) {
         if (!curation_date_.empty()) {
             date_filter_btn_->setText("日历 · " + curation_date_);
         } else if (search_query_.rfind("date:", 0) == 0 && search_query_.size() > 5) {
-            date_filter_btn_->setText("📅 " + search_query_.substr(5));
+            date_filter_btn_->setText("日历 · " + search_query_.substr(5));
         } else {
-            date_filter_btn_->setText("📅 日历查找");
+            date_filter_btn_->setText("日历查找");
         }
     }
 
     auto& kernel = HostKernel::instance();
+    if (sub_mode_ == SubMode::ImdbDiscover) {
+        const bool has_imdb = kernel.isInitialized() && kernel.capabilities().has("imdb.discover.v1");
+        if (source_status_label_) {
+            source_status_label_->setText(has_imdb
+                ? "已接入 IMDb 发现与 Radarr / Sonarr 选片扩展 (imdb.discover.v1 · arr.manage.v1)"
+                : "未安装 plugin-arr-imdb · 可在插件市场一键启用 IMDb 发现与选片");
+        }
+        rebuildSubContent();
+        return;
+    }
+
     if (!kernel.isInitialized() || kernel.domains().mediaSources().empty()) {
         current_items_ = buildShowcaseMedia();
         source_status_label_->setText("布局预览模式（在插件市场安装 Bilibili / YouTube / 飞牛 NAS / Music 插件后自动接管）");
@@ -618,24 +1742,38 @@ void MediaWorkbench::fetchCurrentSubMode(bool preserve_detail) {
     if (curated) cat = "all";
 
     const std::string cache_key = (curated ? "curated|" : "personal|") + cat + "|" + search_query_;
-    if (auto it = cached_feeds_.find(cache_key); it != cached_feeds_.end()) {
-        current_items_ = it->second;
-        lookupProvenance();
-        if (!has_active_item_ && !current_items_.empty()) {
-            active_item_ = current_items_.front();
-            has_active_item_ = true;
+    if (!force_refresh) {
+        if (auto it = cached_feeds_.find(cache_key); it != cached_feeds_.end()) {
+            current_items_ = it->second;
+            lookupProvenance();
+            enrichMissingMusicCovers();
+            enrichMissingNasCovers();
+            source_status_label_->setText("已接入 " + std::to_string(sources.size()) +
+                                          " 个实时 MediaSource 插件 · 共 " +
+                                          std::to_string(current_items_.size()) + " 项");
+            if (sub_mode_ == SubMode::MusicLyrics) {
+                const std::string prev_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+                ensureVisibleMusicSelection();
+                const std::string next_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+                if (prev_key == next_key) {
+                    rebuildSubContent();
+                }
+            } else {
+                if (!has_active_item_ && !current_items_.empty()) {
+                    active_item_ = current_items_.front();
+                    has_active_item_ = true;
+                }
+                rebuildSubContent();
+            }
+            return;
         }
-        source_status_label_->setText("已接入 " + std::to_string(sources.size()) +
-                                      " 个实时 MediaSource 插件 · 共 " +
-                                      std::to_string(current_items_.size()) + " 项");
-        rebuildSubContent();
-        return;
     }
 
     current_items_.clear();
     if (preserve_detail && has_active_item_) current_items_.push_back(active_item_);
     const uint64_t seq = ++fetch_seq_;
-    source_status_label_->setText("正在异步拉取 " + std::to_string(sources.size()) + " 个实时 MediaSource 插件...");
+    source_status_label_->setText((force_refresh ? "正在强制刷新 " : "正在异步拉取 ") +
+                                  std::to_string(sources.size()) + " 个实时 MediaSource 插件...");
 
     auto pending = std::make_shared<std::atomic<size_t>>(sources.size());
     auto agg_mutex = std::make_shared<std::mutex>();
@@ -643,64 +1781,74 @@ void MediaWorkbench::fetchCurrentSubMode(bool preserve_detail) {
     auto has_rendered_partial = std::make_shared<std::atomic<bool>>(false);
 
     for (const auto& src : sources) {
-        auto tok = src->fetchItemsAsync(
-            cat,
-            curated ? std::string{} : search_query_,
-            [this, alive = alive_, seq, pending, agg_mutex, agg_items, has_rendered_partial,
-             cache_key, preserve_detail, total = sources.size()](std::vector<MediaItem> items, bool cancelled) {
-                bool added = false;
-                if (!cancelled && alive->load(std::memory_order_acquire) && !items.empty()) {
-                    std::lock_guard<std::mutex> lk(*agg_mutex);
-                    agg_items->insert(agg_items->end(),
-                                      std::make_move_iterator(items.begin()),
-                                      std::make_move_iterator(items.end()));
-                    added = true;
-                }
-                const bool is_last = (pending->fetch_sub(1, std::memory_order_acq_rel) == 1);
-                if (is_last || (added && !has_rendered_partial->exchange(true, std::memory_order_acq_rel))) {
-                    brls::sync([this, alive, seq, agg_mutex, agg_items, cache_key, preserve_detail, total, is_last]() {
-                        if (!alive->load(std::memory_order_acquire) || seq != fetch_seq_) {
-                            return;
+        auto cb = [this, alive = alive_, seq, pending, agg_mutex, agg_items, has_rendered_partial,
+                   cache_key, preserve_detail, total = sources.size()](std::vector<MediaItem> items, bool cancelled) {
+            bool added = false;
+            if (!cancelled && alive->load(std::memory_order_acquire) && !items.empty()) {
+                std::lock_guard<std::mutex> lk(*agg_mutex);
+                agg_items->insert(agg_items->end(),
+                                  std::make_move_iterator(items.begin()),
+                                  std::make_move_iterator(items.end()));
+                added = true;
+            }
+            const bool is_last = (pending->fetch_sub(1, std::memory_order_acq_rel) == 1);
+            if (is_last || (added && !has_rendered_partial->exchange(true, std::memory_order_acq_rel))) {
+                brls::sync([this, alive, seq, agg_mutex, agg_items, cache_key, preserve_detail, total, is_last]() {
+                    if (!alive->load(std::memory_order_acquire) || seq != fetch_seq_) {
+                        return;
+                    }
+                    if (is_last) {
+                        active_fetches_.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(*agg_mutex);
+                        current_items_ = *agg_items;
+                        if (preserve_detail && has_active_item_ &&
+                            std::none_of(current_items_.begin(), current_items_.end(), [this](const MediaItem& item) {
+                                return item.id == active_item_.id && item.source_id == active_item_.source_id &&
+                                    item.extra.value("business_date", "") == active_item_.extra.value("business_date", "");
+                            })) current_items_.push_back(active_item_);
+                        std::stable_sort(current_items_.begin(), current_items_.end(), [](const MediaItem& a, const MediaItem& b) {
+                            const auto ae = a.extra.is_object() ? a.extra : nlohmann::json::object();
+                            const auto be = b.extra.is_object() ? b.extra : nlohmann::json::object();
+                            if (ae.value("pinned", false) != be.value("pinned", false)) return ae.value("pinned", false);
+                            if (ae.value("business_date", "") != be.value("business_date", ""))
+                                return ae.value("business_date", "") > be.value("business_date", "");
+                            if (ae.value("priority_rank", 999999) != be.value("priority_rank", 999999))
+                                return ae.value("priority_rank", 999999) < be.value("priority_rank", 999999);
+                            return a.source_id == b.source_id ? a.id < b.id : a.source_id < b.source_id;
+                        });
+                    }
+                    if (is_last) {
+                        cached_feeds_[cache_key] = current_items_;
+                        lookupProvenance();
+                        enrichMissingMusicCovers();
+                        enrichMissingNasCovers();
+                    }
+                    source_status_label_->setText(
+                        (is_last ? "已异步接入 " : "正在加载 ") + std::to_string(total) +
+                        " 个实时 MediaSource 插件 · 共 " +
+                        std::to_string(current_items_.size()) + " 项");
+                    if (sub_mode_ == SubMode::MusicLyrics) {
+                        const std::string prev_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+                        ensureVisibleMusicSelection();
+                        const std::string next_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+                        if (prev_key == next_key) {
+                            rebuildSubContent();
                         }
-                        if (is_last) {
-                            active_fetches_.clear();
-                        }
-                        {
-                            std::lock_guard<std::mutex> lk(*agg_mutex);
-                            current_items_ = *agg_items;
-                            if (preserve_detail && has_active_item_ &&
-                                std::none_of(current_items_.begin(), current_items_.end(), [this](const MediaItem& item) {
-                                    return item.id == active_item_.id && item.source_id == active_item_.source_id &&
-                                        item.extra.value("business_date", "") == active_item_.extra.value("business_date", "");
-                                })) current_items_.push_back(active_item_);
-                            std::stable_sort(current_items_.begin(), current_items_.end(), [](const MediaItem& a, const MediaItem& b) {
-                                const auto ae = a.extra.is_object() ? a.extra : nlohmann::json::object();
-                                const auto be = b.extra.is_object() ? b.extra : nlohmann::json::object();
-                                if (ae.value("pinned", false) != be.value("pinned", false)) return ae.value("pinned", false);
-                                if (ae.value("business_date", "") != be.value("business_date", ""))
-                                    return ae.value("business_date", "") > be.value("business_date", "");
-                                if (ae.value("priority_rank", 999999) != be.value("priority_rank", 999999))
-                                    return ae.value("priority_rank", 999999) < be.value("priority_rank", 999999);
-                                return a.source_id == b.source_id ? a.id < b.id : a.source_id < b.source_id;
-                            });
-
-                        }
-                        if (is_last) {
-                            cached_feeds_[cache_key] = current_items_;
-                            lookupProvenance();
-                        }
+                    } else {
                         if (!has_active_item_ && !current_items_.empty()) {
                             active_item_ = current_items_.front();
                             has_active_item_ = true;
                         }
-                        source_status_label_->setText(
-                            (is_last ? "已异步接入 " : "正在加载 ") + std::to_string(total) +
-                            " 个实时 MediaSource 插件 · 共 " +
-                            std::to_string(current_items_.size()) + " 项");
                         rebuildSubContent();
-                    });
-                }
-            });
+                    }
+                });
+            }
+        };
+        auto tok = (force_refresh && !curated)
+            ? src->fetchItemsPageAsync(cat, search_query_, 1, true, std::move(cb))
+            : src->fetchItemsAsync(cat, curated ? std::string{} : search_query_, std::move(cb));
         if (tok) {
             active_fetches_.push_back(std::move(tok));
         }
@@ -711,9 +1859,119 @@ void MediaWorkbench::fetchCurrentSubMode(bool preserve_detail) {
     }
 }
 
+void MediaWorkbench::loadMoreMedia() {
+    if (sub_mode_ != SubMode::Videos || media_loading_more_ || !media_has_more_) {
+        return;
+    }
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return;
+    auto sources = kernel.domains().mediaSources();
+    sources.erase(std::remove_if(sources.begin(), sources.end(), [](const auto& src) {
+        return src->sourceId() == "plugin-ai-curator";
+    }), sources.end());
+    if (sources.empty()) return;
+
+    media_loading_more_ = true;
+    const int next_page = media_page_ + 1;
+    const uint64_t seq = fetch_seq_;
+    const std::string cache_key = "personal|all|" + search_query_;
+    if (source_status_label_) {
+        source_status_label_->setText("正在加载第 " + std::to_string(next_page) + " 页影视推荐…");
+    }
+    rebuildVideosFooter(visible_grid_items_.size());
+
+    more_fetches_.clear();
+    auto pending = std::make_shared<std::atomic<size_t>>(sources.size());
+    auto agg_mutex = std::make_shared<std::mutex>();
+    auto agg_items = std::make_shared<std::vector<MediaItem>>();
+
+    for (const auto& src : sources) {
+        auto tok = src->fetchItemsPageAsync(
+            "all",
+            search_query_,
+            next_page,
+            false,
+            [this, alive = alive_, seq, next_page, cache_key, pending, agg_mutex, agg_items](
+                std::vector<MediaItem> items, bool cancelled) {
+                if (!cancelled && alive->load(std::memory_order_acquire) && !items.empty()) {
+                    std::lock_guard<std::mutex> lk(*agg_mutex);
+                    agg_items->insert(agg_items->end(),
+                                      std::make_move_iterator(items.begin()),
+                                      std::make_move_iterator(items.end()));
+                }
+                if (pending->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                    brls::sync([this, alive, seq, next_page, cache_key, agg_mutex, agg_items]() {
+                        if (!alive->load(std::memory_order_acquire) || seq != fetch_seq_) {
+                            return;
+                        }
+                        media_loading_more_ = false;
+                        more_fetches_.clear();
+                        size_t added = 0;
+                        std::vector<MediaItem> appended_visible;
+                        {
+                            std::lock_guard<std::mutex> lk(*agg_mutex);
+                            for (auto& item : *agg_items) {
+                                const bool exists = std::any_of(
+                                    current_items_.begin(), current_items_.end(),
+                                    [&](const MediaItem& ex) {
+                                        return ex.source_id == item.source_id && ex.id == item.id;
+                                    });
+                                if (!exists) {
+                                    if (item.kind != "music" && !isCuratedMedia(item) &&
+                                        mediaItemMatchesQuery(item, search_query_)) {
+                                        appended_visible.push_back(item);
+                                    }
+                                    current_items_.push_back(std::move(item));
+                                    ++added;
+                                }
+                            }
+                        }
+                        if (added > 0) {
+                            media_page_ = next_page;
+                            media_has_more_ = true;
+                            cached_feeds_[cache_key] = current_items_;
+                            if (source_status_label_) {
+                                source_status_label_->setText(
+                                    "已加载至第 " + std::to_string(media_page_) + " 页 · 共 " +
+                                    std::to_string(current_items_.size()) + " 项");
+                            }
+                        } else {
+                            media_has_more_ = false;
+                            if (source_status_label_) {
+                                source_status_label_->setText(
+                                    "没有更多新推荐了 · 共 " + std::to_string(current_items_.size()) + " 项");
+                            }
+                        }
+                        if (sub_mode_ == SubMode::Videos) {
+                            if (!appended_visible.empty()) {
+                                visible_grid_items_.insert(
+                                    visible_grid_items_.end(),
+                                    std::make_move_iterator(appended_visible.begin()),
+                                    std::make_move_iterator(appended_visible.end()));
+                                if (stage_grid_) {
+                                    stage_grid_->notifyDataChanged();
+                                }
+                            }
+                            rebuildVideosFooter(visible_grid_items_.size());
+                        }
+                        if (added > 0) {
+                            lookupProvenance();
+                        }
+                    });
+                }
+            });
+        if (tok) {
+            more_fetches_.push_back(std::move(tok));
+        }
+    }
+}
+
 void MediaWorkbench::setSubMode(SubMode m) {
     if (sub_mode_ == m) return;
     sub_mode_ = m;
+    if (stage_grid_) {
+        stage_grid_->setContentOffsetY(0.0f, false);
+    }
     if (m == SubMode::PlayerStage && has_active_item_) {
         rebuildTabs();
         rebuildSubContent();
@@ -723,7 +1981,7 @@ void MediaWorkbench::setSubMode(SubMode m) {
 }
 
 void MediaWorkbench::rebuildSubContent() {
-    const bool had_focus = focusIsInsideView(stage_box_);
+    const bool had_focus = focusIsInsideView(stage_grid_);
     if (had_focus) {
         brls::Application::giveFocus(nullptr);
     }
@@ -731,23 +1989,24 @@ void MediaWorkbench::rebuildSubContent() {
     last_stage_h_ = static_cast<int>(std::round(estimateMediaStageHeight(this, immersive_fullscreen_)));
 
     mpv_stage_ = nullptr;
+    music_queue_grid_ = nullptr;
     lyric_cards_.clear();
     lyric_orig_labels_.clear();
     lyric_times_.clear();
     active_lyric_idx_ = -1;
-    stage_box_->clearViews();
-    if (immersive_fullscreen_ && stage_scroll_) {
-        stage_scroll_->setContentOffsetY(0.0f, false);
+    if (immersive_fullscreen_ && stage_grid_) {
+        stage_grid_->setContentOffsetY(0.0f, false);
     }
     switch (sub_mode_) {
         case SubMode::Videos: renderVideosView(); break;
         case SubMode::DailyCuration: renderDailyCurationView(); break;
         case SubMode::MusicLyrics: renderMusicLyricsView(); break;
         case SubMode::NasLibrary: renderNasView(); break;
+        case SubMode::ImdbDiscover: renderImdbView(); break;
         case SubMode::PlayerStage: renderPlayerStageView(); break;
     }
-    if (had_focus) {
-        if (auto* df = stage_box_->getDefaultFocus()) {
+    if (had_focus && stage_grid_) {
+        if (auto* df = stage_grid_->getDefaultFocus()) {
             brls::Application::giveFocus(df);
         }
     }
@@ -793,14 +2052,31 @@ std::vector<MediaItem> MediaWorkbench::visibleMusicItems() const {
     return items;
 }
 
-void MediaWorkbench::renderScopeControls(bool music) {
+void MediaWorkbench::ensureVisibleMusicSelection() {
+    if (sub_mode_ != SubMode::MusicLyrics) return;
+    const auto vis = visibleMusicItems();
+    if (vis.empty()) return;
+    const bool active_in_vis = has_active_item_ &&
+        std::any_of(vis.begin(), vis.end(), [this](const MediaItem& it) {
+            return it.id == active_item_.id && it.source_id == active_item_.source_id;
+        });
+    if (!active_in_vis) {
+        selectItem(vis.front(), false);
+    }
+}
+
+brls::Box* MediaWorkbench::buildScopeControlsBox(bool music) {
+    auto* wrap = new brls::Box(brls::Axis::COLUMN);
+    wrap->setWidthPercentage(100);
+
     auto* row = new brls::Box(brls::Axis::ROW);
-    row->setMarginBottom(12);
+    row->setMarginBottom(10);
+    ui_comfort::enableFlexWrap(row, 6.0f);
     const std::vector<std::string> labels = music
         ? std::vector<std::string>{"个人曲库", "每日音乐", "交互推荐"}
         : std::vector<std::string>{"每日音乐", "每日视频", "交互推荐"};
     for (int i = 0; i < 3; ++i) {
-        auto* button = ui::makeButton(labels[i], [this, alive = alive_, music, i]() {
+        auto* button = ui_comfort::makeFilterChip(labels[i], [this, alive = alive_, music, i]() {
             brls::sync([this, alive, music, i]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 last_loaded_stream_key_.clear();
@@ -810,11 +2086,11 @@ void MediaWorkbench::renderScopeControls(bool music) {
                 archive_all_ = false;
                 fetchCurrentSubMode();
             });
-        }, music ? static_cast<int>(music_scope_) == i : curation_filter_ == i, 36.0f);
-        button->setMarginRight(8);
+        }, music ? static_cast<int>(music_scope_) == i : curation_filter_ == i, "domain/media", 32.0f);
+        button->setMarginRight(7);
         row->addView(button);
     }
-    stage_box_->addView(row);
+    wrap->addView(row);
     if (!music || music_scope_ != MusicScope::Personal) {
         std::string latest;
         for (const auto& item : current_items_) {
@@ -827,32 +2103,49 @@ void MediaWorkbench::renderScopeControls(bool music) {
         }
         auto* dates = new brls::Box(brls::Axis::ROW);
         dates->setMarginBottom(12);
+        dates->setAlignItems(brls::AlignItems::CENTER);
+        ui_comfort::enableFlexWrap(dates, 6.0f);
         const bool interactive_scope = music ? music_scope_ == MusicScope::Interactive : curation_filter_ == 2;
         dates->addView(ui::makeButton(archive_all_ ? "全部归档 · 选择日期" :
             (interactive_scope && curation_date_.empty()) ? "全部交互会话 · 选择日期" :
             (curation_date_.empty() ? (latest.empty() ? "暂无业务日 · 选择日期" : latest + " · 最新") : curation_date_),
-            [this]() { promptRehydrateOrDateFilter(); }, false, 36.0f));
-        auto* latest_button = ui::makeButton(interactive_scope ? "全部会话" : "最新", [this]() {
+            [this]() { promptRehydrateOrDateFilter(); }, false, 32.0f));
+        auto* latest_button = ui_comfort::makeFilterChip(interactive_scope ? "全部会话" : "最新", [this]() {
             last_loaded_stream_key_.clear();
             curation_date_.clear();
             archive_all_ = false;
-            rebuildSubContent();
-        }, !archive_all_ && curation_date_.empty(), 36.0f);
+            enrichMissingMusicCovers();
+            const std::string prev_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+            ensureVisibleMusicSelection();
+            const std::string next_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+            if (prev_key == next_key) {
+                rebuildSubContent();
+            }
+        }, !archive_all_ && curation_date_.empty(), "domain/media", 32.0f);
         latest_button->setMarginLeft(8);
         dates->addView(latest_button);
-        auto* all = ui::makeButton("全部归档", [this]() {
+        auto* all = ui_comfort::makeFilterChip("全部归档", [this]() {
             last_loaded_stream_key_.clear();
             archive_all_ = true;
-            rebuildSubContent();
-        }, archive_all_, 36.0f);
+            enrichMissingMusicCovers();
+            const std::string prev_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+            ensureVisibleMusicSelection();
+            const std::string next_key = has_active_item_ ? (active_item_.source_id + ":" + active_item_.id) : "";
+            if (prev_key == next_key) {
+                rebuildSubContent();
+            }
+        }, archive_all_, "domain/media", 32.0f);
         all->setMarginLeft(8);
         dates->addView(all);
-        stage_box_->addView(dates);
+        wrap->addView(dates);
     }
+    return wrap;
 }
 
 void MediaWorkbench::renderDailyCurationView() {
-    renderScopeControls(false);
+    auto* hdr = new brls::Box(brls::Axis::COLUMN);
+    hdr->setWidthPercentage(100);
+    hdr->addView(buildScopeControlsBox(false));
     if (curation_filter_ != 1) {
         auto* play = ui::makeButton("播放当前音乐", [this]() {
             const auto first = std::find_if(current_items_.begin(), current_items_.end(), [this](const MediaItem& item) {
@@ -868,9 +2161,48 @@ void MediaWorkbench::renderDailyCurationView() {
             playVisibleMusic();
         }, true, 36.0f);
         play->setMarginBottom(12);
-        stage_box_->addView(play);
+        hdr->addView(play);
     }
-    renderVideosView();
+    renderVideosView(hdr);
+}
+
+void MediaWorkbench::refreshMediaGridInPlace() {
+    if (sub_mode_ == SubMode::Videos || sub_mode_ == SubMode::DailyCuration) {
+        visible_grid_items_.clear();
+        for (const auto& item : current_items_) {
+            if (sub_mode_ == SubMode::DailyCuration) {
+                if (!matchesCurationScope(item, false)) continue;
+            } else if (item.kind == "music" || isCuratedMedia(item)) {
+                continue;
+            }
+            if (!mediaItemMatchesQuery(item, search_query_)) continue;
+            visible_grid_items_.push_back(item);
+        }
+        if (stage_grid_) {
+            stage_grid_->reloadData(false);
+        }
+        return;
+    }
+    if (sub_mode_ == SubMode::NasLibrary) {
+        visible_grid_items_.clear();
+        for (const auto& item : current_items_) {
+            if (!isCuratedMedia(item) && (item.source_id == "plugin-fnos-nas" || item.kind == "nas")) {
+                if (mediaItemMatchesQuery(item, search_query_)) {
+                    visible_grid_items_.push_back(item);
+                }
+            }
+        }
+        if (stage_grid_) {
+            stage_grid_->reloadData(false);
+        }
+        return;
+    }
+    if (sub_mode_ == SubMode::MusicLyrics) {
+        visible_music_items_ = visibleMusicItems();
+        if (music_queue_grid_) {
+            music_queue_grid_->reloadData(false);
+        }
+    }
 }
 
 void MediaWorkbench::playVisibleMusic(double start_sec) {
@@ -922,22 +2254,336 @@ void MediaWorkbench::lookupProvenance() {
             if (!alive->load(std::memory_order_acquire) || sequence != fetch_seq_ || !result.ok) return;
             const auto matches = result.data.value("matches", nlohmann::json::array());
             if (!matches.is_array()) return;
+            bool changed_any = false;
             for (auto& item : current_items_) {
                 for (const auto& match : matches) {
                     if (match.value("id", "") != item.source_id + ":" + item.id) continue;
                     const auto date = match.value("previously_recommended_on", "");
-if (!date.empty()) {
+                    if (!date.empty()) {
                         item.extra["previously_recommended_on"] = date;
+                        changed_any = true;
                         if (active_item_.id == item.id && active_item_.source_id == item.source_id)
                             active_item_.extra["previously_recommended_on"] = date;
                     }
                 }
             }
-            rebuildSubContent();
+            if (changed_any) {
+                refreshMediaGridInPlace();
+            }
         }, []() {});
 }
 
-void MediaWorkbench::renderVideosView() {
+void MediaWorkbench::enrichMissingMusicCovers() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("media.source.v1")) return;
+
+    nlohmann::json batch_items = nlohmann::json::array();
+    std::unordered_map<std::string, bool> seen_ids;
+    auto collectItem = [&](const MediaItem& item) {
+        if (batch_items.size() >= 150 || !item.cover_url.empty()) return;
+        const auto am = extractAppleMusicLookup(item);
+        if (!am.is_apple_music || am.song_id.empty()) return;
+        if (!seen_ids.emplace(am.song_id, true).second) return;
+        batch_items.push_back({
+            {"id", am.song_id},
+            {"storefront", am.storefront},
+            {"url", am.url},
+        });
+    };
+
+    const bool music_mode = (sub_mode_ == SubMode::MusicLyrics);
+    for (const auto& item : current_items_) {
+        if (matchesCurationScope(item, music_mode)) {
+            collectItem(item);
+        }
+    }
+    for (const auto& item : current_items_) {
+        collectItem(item);
+    }
+    if (batch_items.empty()) return;
+
+    if (cover_enrich_request_) cover_enrich_request_->cancel();
+    auto request = CancelToken::create();
+    cover_enrich_request_ = request;
+    const auto sequence = fetch_seq_;
+    loadUiInBackground(kernel.uiTasks(), "media.music_covers", request,
+        [batch_items = std::move(batch_items)](const auto& cancel) {
+            if (cancel && cancel->isCancelled()) return CapabilityResult{};
+            auto& caps = HostKernel::instance().capabilities();
+            nlohmann::json req{{"action", "batch_metadata"}, {"items", batch_items}};
+            auto res = caps.callProvider("plugin-music", "media.source.v1", req);
+            if (!res.ok && res.error.find("not found") != std::string::npos) {
+                res = caps.call("media.source.v1", req);
+            }
+            return res;
+        },
+        [this, alive = alive_, sequence](CapabilityResult result) {
+            if (!alive->load(std::memory_order_acquire) || sequence != fetch_seq_ ||
+                !result.ok || !result.data.is_object()) {
+                return;
+            }
+            if (!result.data.contains("tracks")) return;
+            const auto& tracks = result.data["tracks"];
+            if ((!tracks.is_object() && !tracks.is_array()) || tracks.empty()) return;
+
+            struct CoverMeta {
+                std::string cover_url;
+                double duration_sec = 0.0;
+                std::string quality_label;
+            };
+            std::unordered_map<std::string, CoverMeta> by_id;
+            auto ingestTrackJson = [&](const std::string& fallback_id, const nlohmann::json& t) {
+                if (!t.is_object()) return;
+                std::string id = t.value("id", fallback_id);
+                if (id.empty()) return;
+                CoverMeta cm;
+                cm.cover_url = t.value("cover_url", "");
+                cm.duration_sec = t.value("duration_sec", 0.0);
+                cm.quality_label = t.value("quality_label", "");
+                if (!cm.cover_url.empty() || cm.duration_sec > 0.0 || !cm.quality_label.empty()) {
+                    by_id[id] = std::move(cm);
+                }
+            };
+            if (tracks.is_object()) {
+                for (const auto& kv : tracks.items()) {
+                    ingestTrackJson(kv.key(), kv.value());
+                }
+            } else {
+                for (const auto& t : tracks) {
+                    ingestTrackJson("", t);
+                }
+            }
+            if (by_id.empty()) return;
+
+            auto applyToItem = [&](MediaItem& item) -> bool {
+                const auto am = extractAppleMusicLookup(item);
+                if (!am.is_apple_music || am.song_id.empty()) return false;
+                auto it = by_id.find(am.song_id);
+                if (it == by_id.end()) return false;
+                bool changed = false;
+                if (item.cover_url.empty() && !it->second.cover_url.empty()) {
+                    item.cover_url = it->second.cover_url;
+                    changed = true;
+                }
+                if (item.duration_sec <= 0.0 && it->second.duration_sec > 0.0) {
+                    item.duration_sec = it->second.duration_sec;
+                    changed = true;
+                }
+                if (item.quality_label.empty() && !it->second.quality_label.empty()) {
+                    item.quality_label = it->second.quality_label;
+                    changed = true;
+                }
+                return changed;
+            };
+
+            bool updated_any = false;
+            bool active_changed = false;
+            for (auto& item : current_items_) {
+                if (applyToItem(item)) updated_any = true;
+            }
+            if (has_active_item_) {
+                if (applyToItem(active_item_)) {
+                    updated_any = true;
+                    active_changed = true;
+                }
+            }
+            for (auto& kv : cached_feeds_) {
+                for (auto& item : kv.second) {
+                    applyToItem(item);
+                }
+            }
+            if (updated_any) {
+                if (sub_mode_ == SubMode::MusicLyrics && active_changed) {
+                    rebuildSubContent();
+                } else {
+                    refreshMediaGridInPlace();
+                }
+            }
+        }, []() {});
+}
+
+void MediaWorkbench::enrichMissingNasCovers() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("imdb.discover.v1")) return;
+
+    auto lookupKeyForNas = [](const MediaItem& item) -> std::string {
+        if (item.source_id != "plugin-fnos-nas" || item.kind != "nas" ||
+            item.id.rfind("demo-", 0) == 0) {
+            return {};
+        }
+        std::string q;
+        if (item.extra.is_object()) {
+            q = trimSpaces(item.extra.value("series", ""));
+        }
+        if (q.empty()) {
+            q = trimSpaces(item.title);
+        }
+        return q;
+    };
+
+    bool applied_cached = false;
+    std::vector<std::string> pending_queries;
+    std::unordered_map<std::string, bool> queued;
+
+    for (auto& item : current_items_) {
+        if (!item.cover_url.empty()) continue;
+        std::string q = lookupKeyForNas(item);
+        if (q.empty()) continue;
+        std::string norm_q = toLowerCopy(q);
+        auto cit = nas_imdb_cover_cache_.find(norm_q);
+        if (cit != nas_imdb_cover_cache_.end()) {
+            if (!cit->second.empty()) {
+                item.cover_url = cit->second;
+                applied_cached = true;
+            }
+            continue;
+        }
+        if (pending_queries.size() < 16 && queued.emplace(norm_q, true).second) {
+            pending_queries.push_back(q);
+        }
+    }
+    if (applied_cached) {
+        refreshMediaGridInPlace();
+    }
+    if (pending_queries.empty()) return;
+
+    if (nas_cover_enrich_request_) nas_cover_enrich_request_->cancel();
+    auto request = CancelToken::create();
+    nas_cover_enrich_request_ = request;
+    const auto sequence = fetch_seq_;
+
+    loadUiInBackground(
+        kernel.uiTasks(),
+        "media.nas_covers",
+        request,
+        [pending_queries = std::move(pending_queries)](const auto& cancel) {
+            std::unordered_map<std::string, std::string> resolved;
+            auto& caps = HostKernel::instance().capabilities();
+            for (const auto& q : pending_queries) {
+                if (cancel && cancel->isCancelled()) break;
+                auto res = caps.callCancellable(
+                    "imdb.discover.v1",
+                    {{"action", "search"}, {"query", q}, {"limit", 3}},
+                    cancel);
+                std::string found_poster;
+                if (res.ok && res.data.is_object() &&
+                    res.data.contains("items") && res.data["items"].is_array()) {
+                    for (const auto& it : res.data["items"]) {
+                        if (!it.is_object()) continue;
+                        std::string p = it.value("poster_url", "");
+                        if (!p.empty()) {
+                            found_poster = std::move(p);
+                            break;
+                        }
+                    }
+                }
+                resolved[toLowerCopy(q)] = std::move(found_poster);
+            }
+            CapabilityResult out;
+            out.ok = true;
+            out.data = resolved;
+            return out;
+        },
+        [this, alive = alive_, sequence](CapabilityResult result) {
+            if (!alive->load(std::memory_order_acquire) || sequence != fetch_seq_ ||
+                !result.ok || !result.data.is_object()) {
+                return;
+            }
+            for (const auto& kv : result.data.items()) {
+                if (kv.value().is_string()) {
+                    nas_imdb_cover_cache_[kv.key()] = kv.value().get<std::string>();
+                }
+            }
+            auto applyCover = [&](MediaItem& item) -> bool {
+                if (!item.cover_url.empty() || item.source_id != "plugin-fnos-nas" ||
+                    item.kind != "nas") {
+                    return false;
+                }
+                std::string q = item.extra.is_object() ? trimSpaces(item.extra.value("series", "")) : "";
+                if (q.empty()) q = trimSpaces(item.title);
+                auto it = nas_imdb_cover_cache_.find(toLowerCopy(q));
+                if (it == nas_imdb_cover_cache_.end() || it->second.empty()) return false;
+                item.cover_url = it->second;
+                return true;
+            };
+
+            bool updated = false;
+            for (auto& item : current_items_) {
+                if (applyCover(item)) updated = true;
+            }
+            for (auto& kv : cached_feeds_) {
+                for (auto& item : kv.second) {
+                    applyCover(item);
+                }
+            }
+            if (updated) {
+                refreshMediaGridInPlace();
+            }
+        },
+        []() {});
+}
+
+void MediaWorkbench::rebuildVideosFooter(size_t total_count) {
+    if (!stage_grid_) return;
+    if (total_count == 0 || sub_mode_ != SubMode::Videos) {
+        stage_grid_->setFooterView(nullptr);
+        return;
+    }
+
+    auto* footer = ui::makeCard("desktop/soft", 12.0f, 10.0f);
+    footer->setMarginTop(4);
+    footer->setMarginBottom(16);
+    auto* f_row = new brls::Box(brls::Axis::ROW);
+    f_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    f_row->setAlignItems(brls::AlignItems::CENTER);
+
+    const std::string more_lbl = media_loading_more_
+        ? "⏳ 正在加载下一页…"
+        : (media_has_more_
+               ? ("⬇ 加载下一页 (第 " + std::to_string(media_page_ + 1) + " 页 · 当前 " + std::to_string(total_count) + " 条)")
+               : "✓ 已到底部 · 点击重新检测");
+    auto* more_btn = ui::makeButton(more_lbl, [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (!alive->load(std::memory_order_acquire) || media_loading_more_) return;
+            media_has_more_ = true;
+            loadMoreMedia();
+        });
+    }, media_has_more_ && !media_loading_more_, 36.0f);
+    more_btn->setGrow(1.0f);
+    more_btn->setMarginRight(10);
+    f_row->addView(more_btn);
+
+    auto* ref_btn = ui::makeButton("↻ 换一批 / 刷新", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire)) {
+                refresh(true);
+            }
+        });
+    }, false, 36.0f);
+    ref_btn->setMarginRight(10);
+    f_row->addView(ref_btn);
+
+    auto* top_btn = ui::makeButton("⬆ 回到顶部", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire) && stage_grid_) {
+                stage_grid_->setContentOffsetY(0.0f, false);
+            }
+        });
+    }, false, 36.0f);
+    f_row->addView(top_btn);
+
+    footer->addView(f_row);
+    stage_grid_->setFooterView(footer);
+}
+
+void MediaWorkbench::renderVideosView(brls::Box* header_prefix) {
+    if (!stage_grid_) {
+        if (header_prefix) {
+            delete header_prefix;
+        }
+        return;
+    }
+
     const float stage_w = estimateMediaStageWidth(this, false);
     const int cols = computeVideoGridColumns(stage_w);
     constexpr float kGap = 14.0f;
@@ -945,127 +2591,41 @@ void MediaWorkbench::renderVideosView() {
         std::max(220.0f, (stage_w - kGap * static_cast<float>(cols - 1)) / static_cast<float>(cols));
     // Subtract card padding (14*2) and inner thumb padding (10*2) for true 16:9 cover aspect ratio
     const float inner_cover_w = std::max(160.0f, card_w - 48.0f);
-    const float cover_h = std::round(inner_cover_w * 9.0f / 16.0f);
+    active_video_cover_h_ = std::round(inner_cover_w * 9.0f / 16.0f);
 
-    auto* grid = new brls::Box(brls::Axis::COLUMN);
-    grid->setWidthPercentage(100);
-    brls::Box* row = nullptr;
-    int col = 0;
-
+    visible_grid_items_.clear();
+    visible_imdb_items_.clear();
     for (const auto& item : current_items_) {
         if (sub_mode_ == SubMode::DailyCuration) {
             if (!matchesCurationScope(item, false)) continue;
-        } else if (item.kind == "music" || isCuratedMedia(item)) continue;
+        } else if (item.kind == "music" || isCuratedMedia(item)) {
+            continue;
+        }
         if (!mediaItemMatchesQuery(item, search_query_)) continue;
-
-        if (col % cols == 0) {
-            row = new brls::Box(brls::Axis::ROW);
-            row->setWidthPercentage(100);
-            row->setMarginBottom(14);
-            grid->addView(row);
-        }
-
-        auto* card = ui::makeCard("desktop/surface", 14.0f, 12.0f);
-        card->setWidth(0);
-        card->setGrow(1.0f);
-        card->setShrink(1.0f);
-        if (col % cols != cols - 1) card->setMarginRight(kGap);
-        card->setFocusable(true);
-
-        // 16:9 Cover Canvas (async ImageCache when cover_url is provided)
-        auto* thumb = ui::makeCard("desktop/soft", 10.0f, 8.0f);
-        thumb->setMarginBottom(10);
-
-        auto* badge_row = new brls::Box(brls::Axis::ROW);
-        badge_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-        badge_row->addView(ui::makePill(
-            item.source_badge.empty() ? "Media" : item.source_badge,
-            "desktop/surface", "domain/media"));
-        badge_row->addView(ui::makePill(formatDuration(item.duration_sec), "desktop/surface", "brls/text"));
-        thumb->addView(badge_row);
-
-        if (!item.cover_url.empty()) {
-            auto* cover = new CachedImageView(&ImageCache::instance());
-            cover->setWidthPercentage(100);
-            cover->setHeight(cover_h);
-            cover->setMarginTop(6);
-            cover->setCornerRadius(6.0f);
-            cover->setScalingType(brls::ImageScalingType::FILL);
-            cover->setImageUrl(item.cover_url, extractHeadersFromItem(item));
-            thumb->addView(cover);
-        } else {
-            auto* placeholder = new brls::Box(brls::Axis::COLUMN);
-            placeholder->setWidthPercentage(100);
-            placeholder->setHeight(std::max(96.0f, std::round(cover_h * 0.72f)));
-            placeholder->setMarginTop(6);
-            placeholder->setJustifyContent(brls::JustifyContent::CENTER);
-            placeholder->setAlignItems(brls::AlignItems::CENTER);
-            placeholder->addView(ui::makeLabel("16:9 视频舞台预览", 13.0f, "font/grey"));
-            thumb->addView(placeholder);
-        }
-
-        std::vector<brls::View*> q_pills;
-        // Some sources put their recommendation reason in the quality label.
-        const bool quality_is_reason = item.extra.is_object() &&
-            (item.quality_label == item.extra.value("reason", "") ||
-             item.quality_label == item.extra.value("why_recommended", ""));
-        if (!item.quality_label.empty() && !quality_is_reason) {
-            q_pills.push_back(ui::makePill(item.quality_label, "status/info_bg", "status/info_fg"));
-        }
-        if (item.has_bilingual_sub) {
-            q_pills.push_back(ui::makePill("双语字幕", "status/ok_bg", "status/ok_fg"));
-        }
-        if (item.extra.is_object()) {
-            const std::string prev_date = item.extra.value("previously_recommended_on", "");
-            const std::string cur_mode = item.extra.value("curation_mode", "");
-            if (!prev_date.empty()) {
-                q_pills.push_back(
-                    ui::makePill("经典重温 · " + prev_date, "status/info_bg", "status/info_fg"));
-            } else if (cur_mode == "interactive_ephemeral") {
-                q_pills.push_back(ui::makePill("AI 灵感推荐", "status/info_bg", "domain/core"));
-            }
-        }
-        if (!q_pills.empty()) {
-            auto* q_row = new brls::Box(brls::Axis::ROW);
-            q_row->setMarginTop(6);
-            for (size_t pi = 0; pi < q_pills.size(); ++pi) {
-                if (pi > 0) {
-                    q_pills[pi]->setMarginLeft(6);
-                }
-                q_row->addView(q_pills[pi]);
-            }
-            thumb->addView(q_row);
-        }
-        card->addView(thumb);
-
-        auto* title = ui::makeLabel(item.title, 16.5f, "brls/text", 1.4f);
-        title->setMarginBottom(6);
-        card->addView(title);
-
-        auto* meta = ui::makeLabel(
-            (item.creator.empty() ? "点击进入 MPV 舞台" : (item.creator + " · 点击进入 MPV 舞台")),
-            14.0f, "font/grey");
-        card->addView(meta);
-
-        card->registerClickAction([this, alive = alive_, item](brls::View*) {
-            brls::sync([this, alive, item]() {
-                if (alive->load(std::memory_order_acquire)) {
-                    selectItem(item, true);
-                }
-            });
-            return true;
-        });
-        row->addView(card);
-        ++col;
+        visible_grid_items_.push_back(item);
     }
 
-    if (col == 0) grid->addView(ui::makeLabel("当前筛选暂无媒体，试试切换分类、日期或全部归档", 15.0f, "font/grey"));
-    appendGridRowSpacers(row, col, cols, kGap);
-    stage_box_->addView(grid);
+    auto* empty_lbl = ui::makeLabel("当前筛选暂无媒体，试试切换分类、日期或全部归档", 15.0f, "font/grey");
+    empty_lbl->setMarginTop(8);
+    empty_lbl->setMarginBottom(12);
+
+    stage_grid_->setColSpace(kGap);
+    stage_grid_->setEstimatedRowSpace(14.0f);
+    stage_grid_->setEstimatedRowHeight(active_video_cover_h_ + 186.0f);
+    stage_grid_->setHeaderView(header_prefix);
+    stage_grid_->setEmptyView(empty_lbl);
+    rebuildVideosFooter(visible_grid_items_.size());
+    stage_grid_->setSpanCount(cols);
+    stage_grid_->reloadData(false);
 }
 
 void MediaWorkbench::renderMusicLyricsView() {
-    renderScopeControls(true);
+    if (!stage_grid_) return;
+
+    auto* static_root = new brls::Box(brls::Axis::COLUMN);
+    static_root->setWidthPercentage(100);
+    static_root->addView(buildScopeControlsBox(true));
+
     const float stage_w = estimateMediaStageWidth(this, false);
     const float art_side = std::clamp(std::round(stage_w * 0.38f - 68.0f), 160.0f, 320.0f);
 
@@ -1125,17 +2685,24 @@ void MediaWorkbench::renderMusicLyricsView() {
             brls::Application::notify("请从当前筛选列表选择曲目");
             return;
         }
-        if (!active_item_.play_url.empty()) {
+        const auto coord_st = PlaybackCoordinator::instance().state();
+        const bool same_coord_track =
+            coord_st.active_role != PlaybackRole::None &&
+            coord_st.active_track.item.id == active_item_.id &&
+            coord_st.active_track.item.source_id == active_item_.source_id;
+        if (same_coord_track && (!MPVCore::instance().state().current_url.empty() || !coord_st.mpv.stopped)) {
+            PlaybackCoordinator::instance().playPause();
+            return;
+        }
+        if (isPlayableOrResolvableItem(active_item_)) {
             auto opts = buildPlaybackOptions(active_item_);
-            const std::string key = active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
-            if (last_loaded_stream_key_ != key) {
-                last_loaded_stream_key_ = key;
-                playVisibleMusic();
-                return;
-            }
+            last_loaded_stream_key_ =
+                active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
+            playVisibleMusic();
+            return;
         }
         if (!MPVCore::instance().state().current_url.empty() ||
-            PlaybackCoordinator::instance().state().active_role != PlaybackRole::None) {
+            coord_st.active_role != PlaybackRole::None) {
             PlaybackCoordinator::instance().playPause();
         } else {
             brls::Application::notify("MPV 音频引擎就绪: " + active_item_.title);
@@ -1162,46 +2729,78 @@ void MediaWorkbench::renderMusicLyricsView() {
     left_card->addView(controls);
     appendCuratedMetadataBlock(left_card, active_item_);
 
-    const auto music_list = visibleMusicItems();
-    if (music_list.empty()) {
-        left_card->addView(ui::makeLabel("当前范围暂无曲目，可切换个人曲库、每日音乐或交互推荐", 14.0f, "font/grey"));
-    }
-    if (!music_list.empty()) {
+    visible_music_items_ = visibleMusicItems();
+    if (visible_music_items_.empty()) {
+        auto* empty_lbl = ui::makeLabel("当前范围暂无曲目，可切换个人曲库、每日音乐或交互推荐", 14.0f, "font/grey");
+        empty_lbl->setMarginTop(12);
+        left_card->addView(empty_lbl);
+    } else {
         auto* queue_hdr = ui::makeLabel(
-            "曲库与 AI 策展列表 (" + std::to_string(music_list.size()) + " 首)",
+            "曲库与 AI 策展列表 (" + std::to_string(visible_music_items_.size()) + " 首)",
             15.0f, "brls/text");
         queue_hdr->setMarginTop(14);
         queue_hdr->setMarginBottom(6);
         left_card->addView(queue_hdr);
 
-        for (const auto& tr : music_list) {
-            const bool selected = (tr.id == active_item_.id);
-            auto* row = ui::makeCard(selected ? "desktop/active" : "desktop/soft", 10.0f, 8.0f);
-            row->setMarginBottom(8);
-            row->setFocusable(true);
-            auto* r_top = new brls::Box(brls::Axis::ROW);
-            r_top->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-            r_top->addView(ui::makeLabel(tr.title, 14.5f, selected ? "brls/accent" : "brls/text"));
-            if (tr.extra.is_object() && !tr.extra.value("previously_recommended_on", "").empty()) {
-                r_top->addView(ui::makePill(
-                    "经典重温 · " + tr.extra.value("previously_recommended_on", ""),
-                    "status/info_bg", "status/info_fg"));
+        class MusicQueueDataSource final : public RecyclingGridDataSource {
+        public:
+            explicit MusicQueueDataSource(MediaWorkbench* owner) : owner_(owner) {}
+
+            size_t getItemCount() override {
+                return owner_ ? owner_->visible_music_items_.size() : 0;
             }
-            row->addView(r_top);
-            if (!tr.creator.empty()) {
-                row->addView(ui::makeLabel(tr.creator, 13.5f, "font/grey"));
-            }
-            row->registerClickAction([this, alive = alive_, tr](brls::View*) {
-                brls::sync([this, alive, tr]() {
-                    if (alive->load(std::memory_order_acquire)) {
-                        last_loaded_stream_key_.clear();
-                        selectItem(tr, true);
-                    }
+
+            RecyclingGridCell* cellForRow(RecyclingGrid* recycler, size_t index) override {
+                if (!owner_ || !recycler) return nullptr;
+                auto* cell = static_cast<MusicTrackRowCell*>(recycler->dequeueReusableCell("music_track"));
+                if (!cell || index >= owner_->visible_music_items_.size()) return cell;
+                auto* wb = owner_;
+                auto alive = wb->alive_;
+                const MediaItem tr = wb->visible_music_items_[index];
+                const bool selected =
+                    (tr.id == wb->active_item_.id && tr.source_id == wb->active_item_.source_id);
+                cell->bind(tr, selected, [wb, alive, tr]() {
+                    brls::sync([wb, alive, tr]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        const auto coord_st = PlaybackCoordinator::instance().state();
+                        if (coord_st.active_role == PlaybackRole::BackgroundMusic &&
+                            coord_st.active_track.item.id == tr.id &&
+                            coord_st.active_track.item.source_id == tr.source_id &&
+                            !MPVCore::instance().state().current_url.empty()) {
+                            PlaybackCoordinator::instance().playPause();
+                            return;
+                        }
+                        wb->last_loaded_stream_key_.clear();
+                        wb->selectItem(tr, true);
+                        if (isPlayableOrResolvableItem(tr)) {
+                            auto opts = buildPlaybackOptions(wb->active_item_);
+                            wb->last_loaded_stream_key_ =
+                                wb->active_item_.source_id + ":" + wb->active_item_.id + "|" +
+                                opts.url + "|" + opts.audio_url;
+                            wb->playVisibleMusic();
+                        }
+                    });
                 });
-                return true;
-            });
-            left_card->addView(row);
-        }
+                return cell;
+            }
+
+        private:
+            MediaWorkbench* owner_ = nullptr;
+        };
+
+        music_queue_grid_ = new RecyclingGrid();
+        music_queue_grid_->setWidthPercentage(100);
+        const float queue_h = std::clamp(
+            static_cast<float>(visible_music_items_.size()) * 76.0f, 160.0f, 460.0f);
+        music_queue_grid_->setHeight(queue_h);
+        music_queue_grid_->setSpanCount(1);
+        music_queue_grid_->setColSpace(0.0f);
+        music_queue_grid_->setEstimatedRowHeight(68.0f);
+        music_queue_grid_->setEstimatedRowSpace(8.0f);
+        music_queue_grid_->setPreFetchLine(2);
+        music_queue_grid_->registerCell("music_track", []() { return new MusicTrackRowCell(); });
+        music_queue_grid_->setDataSource(new MusicQueueDataSource(this), true);
+        left_card->addView(music_queue_grid_);
     }
     split->addView(left_card);
 
@@ -1244,8 +2843,8 @@ void MediaWorkbench::renderMusicLyricsView() {
             SelectionContext sctx;
             sctx.context_sentence = line.original;
             sctx.source_title = active_item_.title;
-if (!active_item_.kind.empty()) sctx.source_title += " · " + active_item_.kind;
-if (!active_item_.creator.empty()) sctx.source_title += " · " + active_item_.creator;
+            if (!active_item_.kind.empty()) sctx.source_title += " · " + active_item_.kind;
+            if (!active_item_.creator.empty()) sctx.source_title += " · " + active_item_.creator;
             sctx.source_id = active_item_.source_id;
             sctx.domain = ContentDomain::Media;
             if (k.isInitialized()) {
@@ -1264,15 +2863,18 @@ if (!active_item_.creator.empty()) sctx.source_title += " · " + active_item_.cr
         const double seek_sec = lines[i].time_sec;
         row->registerClickAction([this, alive = alive_, seek_sec](brls::View*) {
             if (!alive->load(std::memory_order_acquire)) return true;
-            if (!active_item_.play_url.empty()) {
+            const auto coord_st = PlaybackCoordinator::instance().state();
+            const bool same_coord_track =
+                coord_st.active_role != PlaybackRole::None &&
+                coord_st.active_track.item.id == active_item_.id &&
+                coord_st.active_track.item.source_id == active_item_.source_id &&
+                !MPVCore::instance().state().current_url.empty();
+            if (!same_coord_track && isPlayableOrResolvableItem(active_item_)) {
                 auto opts = buildPlaybackOptions(active_item_);
-                const std::string key = active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
-                if (last_loaded_stream_key_ != key) {
-                    last_loaded_stream_key_ = key;
-                    opts.start_seconds = seek_sec;
-                    playVisibleMusic(seek_sec);
-                    return true;
-                }
+                last_loaded_stream_key_ =
+                    active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
+                playVisibleMusic(seek_sec);
+                return true;
             }
             PlaybackCoordinator::instance().seekAbsolute(seek_sec);
             return true;
@@ -1284,16 +2886,25 @@ if (!active_item_.creator.empty()) sctx.source_title += " · " + active_item_.cr
     }
 
     split->addView(lyrics_card);
-    stage_box_->addView(split);
+    static_root->addView(split);
+    stage_grid_->setStaticContent(static_root);
 }
 
 void MediaWorkbench::renderNasView() {
+    if (!stage_grid_) return;
+
     auto& kernel = HostKernel::instance();
     const bool has_nas = kernel.isInitialized() && kernel.capabilities().has("nas.connection.v1");
+
+    auto* nas_header = new brls::Box(brls::Axis::COLUMN);
+    nas_header->setWidthPercentage(100);
 
     auto* status_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
     status_card->setMarginBottom(14);
     status_card->addView(ui::makeLabel("飞牛 fnOS NAS 插件解耦接入中心", 19.0f, "brls/text"));
+
+    visible_grid_items_.clear();
+    visible_imdb_items_.clear();
 
     if (!has_nas) {
         auto* hint = ui::makeLabel(
@@ -1309,7 +2920,12 @@ void MediaWorkbench::renderNasView() {
                 on_open_marketplace_();
             }
         }, true, 38.0f));
-        stage_box_->addView(status_card);
+        nas_header->addView(status_card);
+        stage_grid_->setHeaderView(nas_header);
+        stage_grid_->setFooterView(nullptr);
+        stage_grid_->setEmptyView(nullptr);
+        stage_grid_->setSpanCount(1);
+        stage_grid_->reloadData(false);
         return;
     }
 
@@ -1443,7 +3059,7 @@ void MediaWorkbench::renderNasView() {
         }
     }, false, 34.0f));
     status_card->addView(action_row);
-    stage_box_->addView(status_card);
+    nas_header->addView(status_card);
 
     if (!nas_browse_dir_.empty() || !nas_dir_entries_.empty() || !nas_dir_error_.empty()) {
         auto* dir_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
@@ -1567,79 +3183,286 @@ void MediaWorkbench::renderNasView() {
                 if (++shown >= 40) break;
             }
         }
-        stage_box_->addView(dir_card);
+        nas_header->addView(dir_card);
     }
 
-    std::vector<MediaItem> nas_items;
     for (const auto& item : current_items_) {
         if (!isCuratedMedia(item) && (item.source_id == "plugin-fnos-nas" || item.kind == "nas")) {
-            if (search_query_.empty() || item.title.find(search_query_) != std::string::npos) {
-                nas_items.push_back(item);
+            if (mediaItemMatchesQuery(item, search_query_)) {
+                visible_grid_items_.push_back(item);
             }
         }
     }
-    if (!nas_items.empty()) {
+    if (!visible_grid_items_.empty()) {
         auto* lib_hdr = ui::makeLabel(
-            "NAS 已索引媒体库 (" + std::to_string(nas_items.size()) + " 项)",
+            "NAS 已索引媒体库 (" + std::to_string(visible_grid_items_.size()) + " 项)",
             17.5f, "brls/text");
         lib_hdr->setMarginBottom(10);
-        stage_box_->addView(lib_hdr);
-
-        const float stage_w = estimateMediaStageWidth(this, false);
-        const int cols = computeVideoGridColumns(stage_w);
-        constexpr float kGap = 14.0f;
-
-        auto* grid = new brls::Box(brls::Axis::COLUMN);
-        grid->setWidthPercentage(100);
-        brls::Box* row = nullptr;
-        int col = 0;
-        for (const auto& item : nas_items) {
-            if (col % cols == 0) {
-                row = new brls::Box(brls::Axis::ROW);
-                row->setWidthPercentage(100);
-                row->setMarginBottom(12);
-                grid->addView(row);
-            }
-            auto* card = ui::makeCard("desktop/surface", 14.0f, 12.0f);
-            card->setWidth(0);
-            card->setGrow(1.0f);
-            card->setShrink(1.0f);
-            if (col % cols != cols - 1) card->setMarginRight(kGap);
-            card->setFocusable(true);
-
-            auto* top = new brls::Box(brls::Axis::ROW);
-            top->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-            top->setMarginBottom(6);
-            top->addView(ui::makePill(item.source_badge.empty() ? "飞牛 NAS" : item.source_badge,
-                                      "status/info_bg", "domain/media"));
-            if (item.has_bilingual_sub) {
-                top->addView(ui::makePill("双语字幕", "status/ok_bg", "status/ok_fg"));
-            }
-            card->addView(top);
-            card->addView(ui::makeLabel(item.title, 16.0f, "brls/text", 1.38f));
-            auto* sub = ui::makeLabel(
-                (item.quality_label.empty() ? item.kind : item.quality_label) + " · 点击播放",
-                13.5f, "font/grey");
-            sub->setMarginTop(6);
-            card->addView(sub);
-
-            card->registerClickAction([this, alive = alive_, item](brls::View*) {
-                brls::sync([this, alive, item]() {
-                    if (alive->load(std::memory_order_acquire)) {
-                        selectItem(item, true);
-                    }
-                });
-                return true;
-            });
-            row->addView(card);
-            ++col;
-        }
-        appendGridRowSpacers(row, col, cols, kGap);
-        stage_box_->addView(grid);
+        nas_header->addView(lib_hdr);
     }
+
+    const float stage_w = estimateMediaStageWidth(this, false);
+    const int cols = computeVideoGridColumns(stage_w);
+    constexpr float kGap = 14.0f;
+    const float card_w =
+        std::max(220.0f, (stage_w - kGap * static_cast<float>(cols - 1)) / static_cast<float>(cols));
+    const float inner_cover_w = std::max(160.0f, card_w - 48.0f);
+    active_video_cover_h_ = std::round(inner_cover_w * 9.0f / 16.0f);
+
+    stage_grid_->setColSpace(kGap);
+    stage_grid_->setEstimatedRowSpace(14.0f);
+    stage_grid_->setEstimatedRowHeight(active_video_cover_h_ + 186.0f);
+    stage_grid_->setHeaderView(nas_header);
+    stage_grid_->setFooterView(nullptr);
+    stage_grid_->setEmptyView(nullptr);
+    stage_grid_->setSpanCount(cols);
+    stage_grid_->reloadData(false);
+}
+
+void MediaWorkbench::loadImdbDiscover(const std::string& chart_id, const std::string& query) {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("imdb.discover.v1")) {
+        return;
+    }
+    if (imdb_request_) {
+        imdb_request_->cancel();
+        imdb_request_.reset();
+    }
+    if (!chart_id.empty()) {
+        imdb_chart_ = chart_id;
+    }
+    imdb_query_ = trimSpaces(query);
+    imdb_loading_ = true;
+    imdb_error_.clear();
+    if (sub_mode_ == SubMode::ImdbDiscover) {
+        rebuildSubContent();
+    }
+
+    auto req = CancelToken::create();
+    imdb_request_ = req;
+    const std::string target_chart = imdb_chart_;
+    const std::string target_query = imdb_query_;
+
+    loadUiInBackground(
+        kernel.uiTasks(),
+        "media.imdb_discover",
+        req,
+        [target_chart, target_query](const auto& cancel) {
+            nlohmann::json payload;
+            if (!target_query.empty()) {
+                payload = {{"action", "search"}, {"query", target_query}, {"limit", 36}};
+            } else {
+                payload = {{"action", "chart"}, {"chart", target_chart}, {"limit", 50}};
+            }
+            return HostKernel::instance().capabilities().callCancellable(
+                "imdb.discover.v1", payload, cancel);
+        },
+        [this, alive = alive_, req](CapabilityResult res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (imdb_request_ == req) {
+                imdb_request_.reset();
+            }
+            imdb_loading_ = false;
+            imdb_loaded_ = true;
+            if (!res.ok) {
+                imdb_items_ = nlohmann::json::array();
+                imdb_error_ = res.error.empty() ? "加载 IMDb 数据失败" : res.error;
+            } else {
+                imdb_items_ = res.data.is_object()
+                                  ? res.data.value("items", nlohmann::json::array())
+                                  : nlohmann::json::array();
+                imdb_error_.clear();
+            }
+            if (sub_mode_ == SubMode::ImdbDiscover) {
+                rebuildSubContent();
+            }
+        },
+        [this, alive = alive_, req]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (imdb_request_ == req) {
+                imdb_request_.reset();
+            }
+            imdb_loading_ = false;
+        });
+}
+
+void MediaWorkbench::renderImdbView() {
+    if (!stage_grid_) return;
+
+    auto& kernel = HostKernel::instance();
+    const bool has_imdb = kernel.isInitialized() && kernel.capabilities().has("imdb.discover.v1");
+
+    visible_grid_items_.clear();
+    visible_imdb_items_.clear();
+
+    auto* imdb_header = new brls::Box(brls::Axis::COLUMN);
+    imdb_header->setWidthPercentage(100);
+
+    auto* ctrl_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
+    ctrl_card->setWidthPercentage(100);
+    ctrl_card->setShrink(0.0f);
+    ctrl_card->setMarginBottom(14);
+
+    auto* hdr_row = new brls::Box(brls::Axis::ROW);
+    hdr_row->setWidthPercentage(100);
+    hdr_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    hdr_row->setAlignItems(brls::AlignItems::CENTER);
+    hdr_row->addView(ui::makeLabel("IMDb 发现与 Radarr / Sonarr 对数做种分档选片", 19.0f, "brls/text"));
+
+    if (has_imdb) {
+        auto* full_btn = ui::makeButton(
+            "打开完整 IMDb 选片与下载队列",
+            [alive = alive_]() {
+                if (!alive->load(std::memory_order_acquire)) return;
+                if (HostKernel::instance().isInitialized()) {
+                    HostKernel::instance().bus().publish("entity.workspace.open",
+                                                         {{"tab_id", "tab-arr-imdb"}});
+                }
+            },
+            false, 34.0f);
+        hdr_row->addView(full_btn);
+    }
+    ctrl_card->addView(hdr_row);
+
+    auto finishHeaderOnly = [&]() {
+        stage_grid_->setColSpace(0.0f);
+        stage_grid_->setEstimatedRowSpace(10.0f);
+        stage_grid_->setEstimatedRowHeight(152.0f);
+        stage_grid_->setHeaderView(imdb_header);
+        stage_grid_->setFooterView(nullptr);
+        stage_grid_->setEmptyView(nullptr);
+        stage_grid_->setSpanCount(1);
+        stage_grid_->reloadData(false);
+    };
+
+    if (!has_imdb) {
+        auto* hint = ui::makeLabel(
+            "IMDb 发现与选片作为独立插件 (plugin-arr-imdb) 从宿主解耦。\n"
+            "安装启用后即可在此浏览 IMDb Top 250 / 热门电影与剧集、检索 tt 编号，并联动飞牛 NAS 本地匹配播放与 Radarr / Sonarr 对数做种分档选小体积下载。",
+            15.0f, "font/grey", 1.5f);
+        hint->setMarginTop(8);
+        hint->setMarginBottom(12);
+        ctrl_card->addView(hint);
+        ctrl_card->addView(ui::makeButton("前往插件市场启用 plugin-arr-imdb", [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire) && on_open_marketplace_) {
+                on_open_marketplace_();
+            }
+        }, true, 38.0f));
+        imdb_header->addView(ctrl_card);
+        finishHeaderOnly();
+        return;
+    }
+
+    auto* rule_lbl = ui::makeLabel(
+        "选片策略：最高做种档 round(log10(seeders)) 内优先较小体积 · 自动过滤枪版 · 可一键匹配飞牛本地片库直连播放",
+        13.5f, "font/grey");
+    rule_lbl->setMarginTop(6);
+    ctrl_card->addView(rule_lbl);
+
+    auto* chart_row = new brls::Box(brls::Axis::ROW);
+    chart_row->setMarginTop(10);
+    struct ChartOpt {
+        const char* id;
+        const char* label;
+    };
+    const ChartOpt charts[] = {
+        {"top250", "Top 250 电影"},
+        {"moviemeter", "热门电影趋势"},
+        {"toptv", "Top 250 剧集"},
+        {"tvmeter", "热门剧集趋势"},
+    };
+    for (const auto& c : charts) {
+        const bool active = imdb_query_.empty() && imdb_chart_ == c.id;
+        auto* btn = ui::makeButton(
+            c.label,
+            [this, alive = alive_, cid = std::string(c.id)]() {
+                if (alive->load(std::memory_order_acquire)) {
+                    loadImdbDiscover(cid, "");
+                }
+            },
+            active, 32.0f);
+        btn->setMarginRight(8);
+        chart_row->addView(btn);
+    }
+
+    auto* search_btn = ui::makeButton(
+        imdb_query_.empty() ? "搜索片名 / ttID" : ("搜索: " + imdb_query_),
+        [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire)) {
+                promptSearch();
+            }
+        },
+        !imdb_query_.empty(), 32.0f);
+    search_btn->setMarginRight(8);
+    chart_row->addView(search_btn);
+
+    auto* reload_btn = ui::makeButton(
+        "刷新",
+        [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire)) {
+                loadImdbDiscover(imdb_chart_, imdb_query_);
+            }
+        },
+        false, 32.0f);
+    chart_row->addView(reload_btn);
+    ctrl_card->addView(chart_row);
+    imdb_header->addView(ctrl_card);
+
+    if (!imdb_loaded_ && !imdb_loading_) {
+        finishHeaderOnly();
+        loadImdbDiscover(imdb_chart_, imdb_query_);
+        return;
+    }
+
+    if (imdb_loading_) {
+        auto* loading_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
+        loading_card->setWidthPercentage(100);
+        loading_card->setShrink(0.0f);
+        loading_card->addView(ui::makeLabel(
+            imdb_query_.empty() ? ("正在拉取 IMDb 榜单 (" + imdb_chart_ + ")...")
+                                : ("正在检索 IMDb: \"" + imdb_query_ + "\"..."),
+            14.5f, "font/grey"));
+        imdb_header->addView(loading_card);
+        finishHeaderOnly();
+        return;
+    }
+
+    if (!imdb_error_.empty()) {
+        auto* err_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
+        err_card->setWidthPercentage(100);
+        err_card->setShrink(0.0f);
+        err_card->addView(ui::makeLabel("IMDb 加载失败: " + imdb_error_, 14.5f, "status/warn_fg"));
+        imdb_header->addView(err_card);
+        finishHeaderOnly();
+        return;
+    }
+
+    if (imdb_items_.is_array()) {
+        for (const auto& entry : imdb_items_) {
+            if (entry.is_object()) {
+                visible_imdb_items_.push_back(entry);
+            }
+        }
+    }
+
+    auto* empty_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
+    empty_card->setWidthPercentage(100);
+    empty_card->setShrink(0.0f);
+    empty_card->addView(ui::makeLabel("暂无匹配的 IMDb 影视条目。", 14.5f, "font/grey"));
+
+    stage_grid_->setColSpace(0.0f);
+    stage_grid_->setEstimatedRowSpace(10.0f);
+    stage_grid_->setEstimatedRowHeight(152.0f);
+    stage_grid_->setHeaderView(imdb_header);
+    stage_grid_->setFooterView(nullptr);
+    stage_grid_->setEmptyView(empty_card);
+    stage_grid_->setSpanCount(1);
+    stage_grid_->reloadData(false);
 }
 
 void MediaWorkbench::renderPlayerStageView() {
+    if (!stage_grid_) return;
+
     const float stage_w = estimateMediaStageWidth(this, immersive_fullscreen_);
     const float stage_h = estimateMediaStageHeight(this, immersive_fullscreen_);
 
@@ -1677,7 +3500,13 @@ void MediaWorkbench::renderPlayerStageView() {
 
     MediaRequestOptions opts = buildPlaybackOptions(active_item_);
     const std::string stream_key = active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
-    if (!opts.url.empty() && last_loaded_stream_key_ != stream_key) {
+    const auto coord_st = PlaybackCoordinator::instance().state();
+    const bool already_active_in_coord =
+        coord_st.active_role != PlaybackRole::None &&
+        coord_st.active_track.item.id == active_item_.id &&
+        coord_st.active_track.item.source_id == active_item_.source_id &&
+        !MPVCore::instance().state().current_url.empty();
+    if (isPlayableOrResolvableItem(active_item_) && last_loaded_stream_key_ != stream_key && !already_active_in_coord) {
         last_loaded_stream_key_ = stream_key;
         mpv_stage_->setDanmaku(active_danmaku_);
         mpv_stage_->setSubtitles(active_lyrics_);
@@ -1688,10 +3517,15 @@ void MediaWorkbench::renderPlayerStageView() {
         tr.lyrics = active_lyrics_;
         tr.danmaku = active_danmaku_;
         tr.chapters = chapters;
-        tr.auto_enrich_timeline = true;
+        tr.auto_enrich_timeline = (active_item_.kind != "music");
+        const PlaybackRole target_role =
+            (active_item_.kind == "music") ? PlaybackRole::BackgroundMusic : PlaybackRole::ForegroundVideo;
         PlaybackCoordinator::instance().play(
-            PlaybackRole::ForegroundVideo, "host.media_workbench", std::move(tr));
+            target_role, "host.media_workbench", std::move(tr));
     } else {
+        if (already_active_in_coord) {
+            last_loaded_stream_key_ = stream_key;
+        }
         mpv_stage_->setTitle(active_item_.title);
         mpv_stage_->setSubtitles(active_lyrics_);
         mpv_stage_->setDanmaku(active_danmaku_);
@@ -1706,7 +3540,7 @@ void MediaWorkbench::renderPlayerStageView() {
         immersive_wrap->setBackgroundColor(nvgRGBA(8, 8, 10, 255));
         mpv_stage_->setStageMinHeight(std::max(240.0f, stage_h - 94.0f));
         immersive_wrap->addView(mpv_stage_);
-        stage_box_->addView(immersive_wrap);
+        stage_grid_->setStaticContent(immersive_wrap);
         return;
     }
 
@@ -1719,12 +3553,84 @@ void MediaWorkbench::renderPlayerStageView() {
     player_card->addView(ui::makeLabel("MPV 桌面播放舞台 · " + active_item_.title, 19.0f, "brls/text"));
     player_card->addView(mpv_stage_);
 
-    if (opts.url.empty()) {
+    if (!isPlayableOrResolvableItem(active_item_)) {
         auto* preview_hint = ui::makeLabel(
             "当前为布局预览条目（play_url 为空）；接入 Bilibili / YouTube / fnOS NAS 插件返回直连流与 Referer/Cookie 后，libmpv OpenGL/FBO 将自动硬解播放",
             13.5f, "font/grey", 1.4f);
         preview_hint->setMarginTop(8);
         player_card->addView(preview_hint);
+    }
+
+    const auto season_eps = extractSeasonEpisodes(active_item_);
+    if (season_eps.size() > 1) {
+        int cur_ep_idx = -1;
+        for (size_t i = 0; i < season_eps.size(); ++i) {
+            if (season_eps[i].id == active_item_.id ||
+                (!active_item_.play_url.empty() && season_eps[i].play_url == active_item_.play_url)) {
+                cur_ep_idx = static_cast<int>(i);
+                break;
+            }
+        }
+        const std::string group_title = active_item_.extra.is_object()
+                                            ? active_item_.extra.value("season_group_title", std::string{})
+                                            : std::string{};
+
+        auto* ep_hdr_row = new brls::Box(brls::Axis::ROW);
+        ep_hdr_row->setWidthPercentage(100);
+        ep_hdr_row->setMarginTop(14);
+        ep_hdr_row->setMarginBottom(8);
+        ep_hdr_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        ep_hdr_row->setAlignItems(brls::AlignItems::CENTER);
+
+        const std::string hdr_txt =
+            "本季选集" + (group_title.empty() ? std::string{} : (" · " + group_title)) +
+            " (" + std::to_string(season_eps.size()) + " 集)";
+        ep_hdr_row->addView(ui::makeLabel(hdr_txt, 16.0f, "brls/text"));
+
+        if (cur_ep_idx >= 0 && static_cast<size_t>(cur_ep_idx + 1) < season_eps.size()) {
+            const MediaItem next_ep = season_eps[static_cast<size_t>(cur_ep_idx + 1)];
+            std::string next_code = next_ep.extra.is_object()
+                                        ? next_ep.extra.value("episode_code", std::string{})
+                                        : std::string{};
+            auto* next_btn = ui::makeButton(
+                "下一集" + (next_code.empty() ? std::string{} : (" · " + next_code)),
+                [this, alive = alive_, next_ep]() {
+                    brls::sync([this, alive, next_ep]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        last_loaded_stream_key_.clear();
+                        selectItem(next_ep, true);
+                    });
+                },
+                true, 32.0f);
+            ep_hdr_row->addView(next_btn);
+        }
+        player_card->addView(ep_hdr_row);
+
+        auto* ep_chips = new brls::Box(brls::Axis::ROW);
+        ui_comfort::enableFlexWrap(ep_chips, 6.0f);
+        for (size_t i = 0; i < season_eps.size(); ++i) {
+            const MediaItem ep = season_eps[i];
+            const bool is_cur = (static_cast<int>(i) == cur_ep_idx);
+            std::string code = ep.extra.is_object() ? ep.extra.value("episode_code", "") : "";
+            std::string sub_t = ep.extra.is_object() ? ep.extra.value("episode_title", "") : "";
+            std::string lbl = !code.empty() ? code : ("第 " + std::to_string(i + 1) + " 集");
+            if (!sub_t.empty()) {
+                lbl += " · " + clipUtf8Bytes(sub_t, 20);
+            }
+            auto* chip = ui_comfort::makeFilterChip(
+                lbl,
+                [this, alive = alive_, ep, is_cur]() {
+                    brls::sync([this, alive, ep, is_cur]() {
+                        if (!alive->load(std::memory_order_acquire) || is_cur) return;
+                        last_loaded_stream_key_.clear();
+                        selectItem(ep, true);
+                    });
+                },
+                is_cur, "domain/media", 32.0f);
+            chip->setMarginRight(6);
+            ep_chips->addView(chip);
+        }
+        player_card->addView(ep_chips);
     }
 
     auto* chap_hdr = ui::makeLabel("AI 智能章节与 SponsorBlock 时间轴标记 (F9 跳过赞助)", 16.0f, "brls/text");
@@ -1816,7 +3722,7 @@ void MediaWorkbench::renderPlayerStageView() {
 
     player_card->addView(chap_row);
     appendCuratedMetadataBlock(player_card, active_item_);
-    stage_box_->addView(player_card);
+    stage_grid_->setStaticContent(player_card);
 }
 
 void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
@@ -1846,7 +3752,9 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
             std::vector<ChapterSegment> chapters;
             std::string play_url;
             std::string audio_url;
+            std::string cover_url;
             std::string quality_label;
+            double duration_sec = 0.0;
             bool android_media = false;
             bool has_stream = false;
         };
@@ -1854,6 +3762,7 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
             [sources = kernel.domains().mediaSources(), &caps = kernel.capabilities(), item](const auto& cancel) {
                 LoadedMediaDetails details;
                 const bool is_demo = (item.id.rfind("demo-", 0) == 0);
+                const auto am = extractAppleMusicLookup(item);
                 if (!is_demo && item.play_url.empty() &&
                     (item.source_id == "bilibili" || item.source_id == "youtube") &&
                     caps.has("media.source.v1")) {
@@ -1870,6 +3779,29 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                         details.quality_label = res.data.value("quality_label", std::string{});
                         details.android_media = res.data.value("android_media", false);
                         details.has_stream = !details.play_url.empty();
+                    }
+                }
+                if (!cancel->isCancelled() && !is_demo && am.is_apple_music &&
+                    (item.cover_url.empty() || item.duration_sec <= 0.0) &&
+                    caps.has("media.source.v1")) {
+                    nlohmann::json meta_req = {
+                        {"action", "metadata"},
+                        {"id", am.song_id},
+                        {"url", am.url},
+                    };
+                    if (!am.storefront.empty()) {
+                        meta_req["storefront"] = am.storefront;
+                    }
+                    auto meta_res = caps.callProvider("plugin-music", "media.source.v1", meta_req);
+                    if (!meta_res.ok && meta_res.error.find("not found") != std::string::npos) {
+                        meta_res = caps.call("media.source.v1", meta_req);
+                    }
+                    if (meta_res.ok && meta_res.data.is_object()) {
+                        details.cover_url = meta_res.data.value("cover_url", std::string{});
+                        details.duration_sec = meta_res.data.value("duration_sec", 0.0);
+                        if (item.quality_label.empty()) {
+                            details.quality_label = meta_res.data.value("quality_label", std::string{});
+                        }
                     }
                 }
                 if (!cancel->isCancelled() && item.source_id == "bilibili" && caps.has("media.danmaku.v1")) {
@@ -1893,7 +3825,49 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                     if (cancel->isCancelled()) break;
                     if (details.chapters.empty()) details.chapters = source->fetchChapters(item.id);
                 }
-                if (!cancel->isCancelled() && caps.has("player.timeline.v1")) {
+                if (!cancel->isCancelled() && details.lyrics.empty() && am.is_apple_music) {
+                    const std::string lookup_id =
+                        !am.storefront.empty() ? ("am-" + am.storefront + "-" + am.song_id) : am.song_id;
+                    for (const auto& source : sources) {
+                        if (cancel->isCancelled()) break;
+                        if (source->sourceId() != "plugin-music") continue;
+                        details.lyrics = source->fetchLyrics(lookup_id);
+                        break;
+                    }
+                    if (!cancel->isCancelled() && details.lyrics.empty() && caps.has("media.source.v1")) {
+                        nlohmann::json lyr_req = {
+                            {"action", "lyrics"},
+                            {"id", am.song_id},
+                            {"url", am.url},
+                        };
+                        if (!am.storefront.empty()) {
+                            lyr_req["storefront"] = am.storefront;
+                        }
+                        auto lyr_res = caps.callProvider("plugin-music", "media.source.v1", lyr_req);
+                        if (!lyr_res.ok && lyr_res.error.find("not found") != std::string::npos) {
+                            lyr_res = caps.call("media.source.v1", lyr_req);
+                        }
+                        if (lyr_res.ok && lyr_res.data.is_object()) {
+                            const nlohmann::json* larr = nullptr;
+                            if (lyr_res.data.contains("lyrics") && lyr_res.data["lyrics"].is_array()) {
+                                larr = &lyr_res.data["lyrics"];
+                            } else if (lyr_res.data.contains("lines") && lyr_res.data["lines"].is_array()) {
+                                larr = &lyr_res.data["lines"];
+                            }
+                            if (larr) {
+                                for (const auto& l : *larr) {
+                                    if (!l.is_object()) continue;
+                                    details.lyrics.push_back(LyricLine{
+                                        l.value("time_sec", 0.0),
+                                        l.value("original", std::string{}),
+                                        l.value("translation", std::string{}),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!cancel->isCancelled() && caps.has("player.timeline.v1") && item.kind != "music") {
                     std::string timeline_vid = item.id;
                     uint64_t timeline_cid = 0;
                     if (item.extra.is_object()) {
@@ -1936,9 +3910,33 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                     detail_request_.reset();
                 }
                 if (active_item_.id != item_id || active_item_.source_id != source_id) return;
-                active_lyrics_ = std::move(details.lyrics);
+                if (!details.lyrics.empty()) {
+                    active_lyrics_ = std::move(details.lyrics);
+                }
                 active_danmaku_ = std::move(details.danmaku);
                 active_chapters_ = std::move(details.chapters);
+                if (!details.cover_url.empty() && active_item_.cover_url.empty()) {
+                    active_item_.cover_url = std::move(details.cover_url);
+                }
+                if (details.duration_sec > 0.0 && active_item_.duration_sec <= 0.0) {
+                    active_item_.duration_sec = details.duration_sec;
+                }
+                if (!details.quality_label.empty() && active_item_.quality_label.empty()) {
+                    active_item_.quality_label = details.quality_label;
+                }
+                for (auto& it : current_items_) {
+                    if (it.id == active_item_.id && it.source_id == active_item_.source_id) {
+                        if (it.cover_url.empty() && !active_item_.cover_url.empty()) {
+                            it.cover_url = active_item_.cover_url;
+                        }
+                        if (it.duration_sec <= 0.0 && active_item_.duration_sec > 0.0) {
+                            it.duration_sec = active_item_.duration_sec;
+                        }
+                        if (it.quality_label.empty() && !active_item_.quality_label.empty()) {
+                            it.quality_label = active_item_.quality_label;
+                        }
+                    }
+                }
                 if (details.has_stream) {
                     active_item_.play_url = std::move(details.play_url);
                     if (!details.quality_label.empty()) {
@@ -1974,7 +3972,12 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
         kernel.bus().publish("entity.media.open", {
                                                       {"id", item.id},
                                                       {"title", item.title},
+                                                      {"creator", item.creator},
+                                                      {"kind", item.kind},
                                                       {"source_id", item.source_id},
+                                                      {"play_url", item.play_url},
+                                                      {"cover_url", item.cover_url},
+                                                      {"extra", item.extra},
                                                       {"origin", "host_workbench"},
                                                   });
         kernel.bus().publish("host.focus_changed", {
@@ -2027,7 +4030,12 @@ void MediaWorkbench::selectAdjacentMusicTrack(int delta) {
     const MediaItem& target = pool[static_cast<size_t>(next_idx)];
     last_loaded_stream_key_.clear();
     selectItem(target, true);
-    if (!target.play_url.empty()) playVisibleMusic();
+    if (isPlayableOrResolvableItem(target)) {
+        auto opts = buildPlaybackOptions(active_item_);
+        last_loaded_stream_key_ =
+            active_item_.source_id + ":" + active_item_.id + "|" + opts.url + "|" + opts.audio_url;
+        playVisibleMusic();
+    }
 }
 
 void MediaWorkbench::updateActiveLyricHighlight(double position_sec) {
@@ -2163,11 +4171,17 @@ void MediaWorkbench::openExternalMedia(const nlohmann::json& payload) {
         }
     }
     if (!found) {
+        std::string default_kind = "video";
+        if (payload.value("source_id", "") == "plugin-music" ||
+            play_url.find("music.apple.com/") != std::string::npos ||
+            id.rfind("am-", 0) == 0 || id.rfind("ix-am-", 0) == 0) {
+            default_kind = "music";
+        }
         target.id = !id.empty() ? id : ("ext:" + play_url);
         target.source_id = payload.value("source_id", "");
         target.title = payload.value("title", "外部跳转媒体");
         target.creator = payload.value("creator", target.source_id);
-        target.kind = payload.value("kind", "video");
+        target.kind = payload.value("kind", default_kind);
         target.source_badge = payload.value("source_badge", target.source_id);
         target.cover_url = payload.value("cover_url", "");
         target.play_url = play_url;
@@ -2200,10 +4214,10 @@ void MediaWorkbench::openExternalMedia(const nlohmann::json& payload) {
     last_loaded_stream_key_.clear();
     selectItem(target, true);
     if (target.kind == "music") fetchCurrentSubMode(true);
-    if (start_sec > 0.0 && !target.play_url.empty() && sub_mode_ == SubMode::MusicLyrics) {
+    if (target.kind == "music" && isPlayableOrResolvableItem(target) && sub_mode_ == SubMode::MusicLyrics) {
         auto opts = buildPlaybackOptions(target);
         last_loaded_stream_key_ = target.source_id + ":" + target.id + "|" + opts.url + "|" + opts.audio_url;
-        playVisibleMusic(start_sec);
+        playVisibleMusic(start_sec > 0.0 ? start_sec : -1.0);
     }
 }
 
@@ -2233,6 +4247,20 @@ void MediaWorkbench::showVideoCommentsDialog() {
 
 void MediaWorkbench::promptSearch() {
     if (auto* plat = brls::Application::getPlatform()) {
+        if (sub_mode_ == SubMode::ImdbDiscover) {
+            plat->getImeManager()->openForText(
+                [this, alive = alive_](std::string q) {
+                    brls::sync([this, alive, q = std::move(q)]() {
+                        if (!alive->load(std::memory_order_acquire)) return;
+                        loadImdbDiscover(imdb_chart_, q);
+                    });
+                },
+                "搜索 IMDb 电影 / 剧集 / ttID",
+                "输入中英文片名或 IMDb 编号 (如 tt0111161)，留空返回当前榜单",
+                160,
+                imdb_query_);
+            return;
+        }
         plat->getImeManager()->openForText(
             [this, alive = alive_](std::string q) {
                 brls::sync([this, alive, q = std::move(q)]() {
@@ -2249,6 +4277,23 @@ void MediaWorkbench::promptSearch() {
     }
 }
 
+void MediaWorkbench::applyDateFilter(const std::string& date, const std::string& domain) {
+    if (date.empty()) return;
+    last_loaded_stream_key_.clear();
+    curation_date_ = date;
+    archive_all_ = false;
+    if (domain == "music") {
+        sub_mode_ = SubMode::MusicLyrics;
+        music_scope_ = MusicScope::Daily;
+    } else if (domain == "youtube" || domain == "video") {
+        sub_mode_ = SubMode::DailyCuration;
+        curation_filter_ = 1;
+    } else if (sub_mode_ != SubMode::MusicLyrics && sub_mode_ != SubMode::DailyCuration) {
+        sub_mode_ = SubMode::DailyCuration;
+    }
+    refresh();
+}
+
 void MediaWorkbench::promptRehydrateOrDateFilter() {
     std::string init_date = curation_date_;
     if (search_query_.rfind("date:", 0) == 0 && search_query_.size() >= 15) {
@@ -2261,12 +4306,9 @@ void MediaWorkbench::promptRehydrateOrDateFilter() {
     CurationCalendarDialog::open({
         .initial_date = init_date,
         .initial_domain = init_dom,
-        .on_apply_date_filter = [this, alive = alive_](const std::string& d) {
+        .on_apply_date_filter = [this, alive = alive_, init_dom](const std::string& d) {
             if (!alive->load(std::memory_order_acquire)) return;
-            last_loaded_stream_key_.clear();
-            curation_date_ = d;
-            archive_all_ = false;
-            refresh();
+            applyDateFilter(d, init_dom);
         },
         .on_clear_date_filter = [this, alive = alive_]() {
             if (!alive->load(std::memory_order_acquire)) return;

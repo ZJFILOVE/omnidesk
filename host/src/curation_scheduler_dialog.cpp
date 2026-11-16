@@ -12,7 +12,12 @@ namespace {
 
 std::string workflowStatusText(const nlohmann::json& wf) {
     const std::string st = wf.value("status", "pending");
-    if (st == "published") return "今日已完成";
+    const std::string gs = wf.value("git_sync_status", "");
+    if (st == "published") {
+        if (gs == "pushed" || gs == "synced" || gs == "pulled") return "今日已完成 · GitHub 已同步";
+        if (gs == "push_failed") return "今日已完成 · 待推送 GitHub";
+        return "今日已完成";
+    }
     if (st == "running") return "后台运行中…";
     if (st == "queued") return "排队等待";
     if (st == "prepared_recovery") return "待恢复事务";
@@ -36,13 +41,13 @@ public:
         : brls::Box(brls::Axis::COLUMN),
           on_open_calendar_(std::move(on_open_calendar)) {
         setPadding(20, 22, 18, 22);
-        setWidth(820);
+        setWidth(860);
 
         auto* hdr = new brls::Box(brls::Axis::ROW);
         hdr->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
         hdr->setAlignItems(brls::AlignItems::CENTER);
         hdr->setMarginBottom(8);
-        hdr->addView(ui::makeLabel("每日定时推荐 · 自动检测与后台 Agent 调度", 19.5f, "brls/text"));
+        hdr->addView(ui::makeLabel("每日定时推荐 · GitHub 双向同步与后台调度", 19.5f, "brls/text"));
         date_badge_ = ui::makeLabel("Asia/Shanghai · 今日检测", 13.0f, "font/grey");
         hdr->addView(date_badge_);
         addView(hdr);
@@ -78,7 +83,7 @@ public:
         if (cached.is_object() && !cached.empty()) {
             renderStatus(cached);
         }
-        CurationSchedulerManager::instance().refreshStatus(false);
+        CurationSchedulerManager::instance().refreshStatus(false, false);
     }
 
     ~SchedulerDialogBox() override {
@@ -103,6 +108,7 @@ private:
 
         const bool running = st.value("running", false);
         const bool auto_on = st.value("auto_run_enabled", true);
+        const bool git_sync_on = st.value("git_sync_enabled", true);
         const std::string summary = st.value("summary_text", "");
         const std::string live_line = st.value("live_output_line", "");
         if (summary_label_) {
@@ -122,7 +128,7 @@ private:
             row1->setMarginBottom(8);
 
             auto* auto_btn = ui::makeButton(
-                auto_on ? "自动补跑开关: 已开启 ✓" : "自动补跑开关: 已关闭",
+                auto_on ? "自动补跑: 已开启 ✓" : "自动补跑: 已关闭",
                 [auto_on]() {
                     CurationSchedulerManager::instance().setAutoRunEnabled(!auto_on);
                 },
@@ -130,13 +136,29 @@ private:
             auto_btn->setMarginRight(8);
             row1->addView(auto_btn);
 
+            auto* git_btn = ui::makeButton(
+                git_sync_on ? "GitHub 同步: 已开启 ✓" : "GitHub 同步: 已关闭",
+                [git_sync_on]() {
+                    CurationSchedulerManager::instance().setGitSyncEnabled(!git_sync_on);
+                },
+                git_sync_on, 36.0f);
+            git_btn->setMarginRight(8);
+            row1->addView(git_btn);
+
             if (!running) {
                 auto* run_all = ui::makeButton(
-                    "▶ 立即检测并补跑今日未完成",
+                    "▶ 同步并补跑今日缺失",
                     []() { CurationSchedulerManager::instance().runMissingToday("manual"); },
                     true, 36.0f);
                 run_all->setMarginRight(8);
                 row1->addView(run_all);
+
+                auto* sync_now_btn = ui::makeButton(
+                    "⇄ 同步 GitHub",
+                    []() { CurationSchedulerManager::instance().syncGitHubNow(); },
+                    false, 36.0f);
+                sync_now_btn->setMarginRight(8);
+                row1->addView(sync_now_btn);
             } else {
                 auto* stop_btn = ui::makeButton(
                     "■ 停止当前后台运行",
@@ -148,31 +170,26 @@ private:
 
             if (on_open_calendar_) {
                 auto* cal_btn = ui::makeButton(
-                    "📅 打开推荐日历",
+                    "推荐日历",
                     [this]() {
                         auto cb = on_open_calendar_;
                         if (dialog_) dialog_->dismiss();
                         if (cb) brls::sync([cb]() { cb(); });
                     },
                     false, 36.0f);
-                cal_btn->setMarginRight(8);
                 row1->addView(cal_btn);
             }
-
-            row1->addView(ui::makeButton(
-                "刷新",
-                []() { CurationSchedulerManager::instance().refreshStatus(false); },
-                false, 36.0f));
             controls_box_->addView(row1);
 
             // Agent runner row
             auto* row2 = new brls::Box(brls::Axis::ROW);
             row2->setAlignItems(brls::AlignItems::CENTER);
-            auto* r_lbl = ui::makeLabel("后台 Agent:", 13.5f, "font/grey");
+            auto* r_lbl = ui::makeLabel("Agent 基座:", 13.5f, "font/grey");
             r_lbl->setMarginRight(8);
             row2->addView(r_lbl);
 
-            const std::string selected_runner = st.value("agent_runner", "auto");
+            std::string selected_runner = st.value("agent_runner", "auto");
+            if (selected_runner == "agy") selected_runner = "agy-cli";
             const std::string resolved_runner = st.value("resolved_runner", "");
             std::vector<std::string> avail_ids;
             if (st.contains("available_agents") && st["available_agents"].is_array()) {
@@ -186,6 +203,7 @@ private:
                 const char* label;
             } kRunners[] = {
                 {"auto", "自动"},
+                {"agy-cli", "agy-cli"},
                 {"codex", "Codex"},
                 {"claude", "Claude"},
                 {"opencode", "OpenCode"},
@@ -349,13 +367,13 @@ void CurationSchedulerManager::start() {
         "entity.recommend.updated",
         "host.curation_scheduler",
         [this](const std::string&, const nlohmann::json&) {
-            refreshStatus(false);
+            refreshStatus(false, false);
         });
 
     const auto alive = alive_;
     brls::delay(1800, [this, alive]() {
         if (!alive->load(std::memory_order_acquire)) return;
-        refreshStatus(true);
+        refreshStatus(true, true);
     });
 
     bool schedule_periodic = false;
@@ -367,24 +385,24 @@ void CurationSchedulerManager::start() {
         }
     }
     if (schedule_periodic) {
-        std::function<void()> tick;
-        tick = [this, alive]() {
-            brls::delay(600000, [this, alive]() {
-                if (!alive->load(std::memory_order_acquire)) return;
-                bool still_started = false;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    still_started = started_;
-                }
-                if (!still_started) return;
-                refreshStatus(true);
-                // Re-arm every 10 minutes while running
-                std::lock_guard<std::mutex> lock(mutex_);
-                periodic_scheduled_ = false;
-            });
-        };
-        tick();
+        schedulePeriodicTick();
     }
+}
+
+void CurationSchedulerManager::schedulePeriodicTick() {
+    const auto alive = alive_;
+    brls::delay(600000, [this, alive]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!started_) {
+                periodic_scheduled_ = false;
+                return;
+            }
+        }
+        refreshStatus(true, true);
+        schedulePeriodicTick();
+    });
 }
 
 void CurationSchedulerManager::stop() {
@@ -445,14 +463,14 @@ nlohmann::json CurationSchedulerManager::latestStatus() const {
     return latest_status_;
 }
 
-void CurationSchedulerManager::refreshStatus(bool trigger_auto_if_needed) {
+void CurationSchedulerManager::refreshStatus(bool trigger_auto_if_needed, bool sync_remote) {
     auto& kernel = HostKernel::instance();
     if (!kernel.isInitialized() || !kernel.capabilities().has("recommend.feed.v1")) return;
 
     const auto alive = alive_;
     kernel.capabilities().callAsync(
         "recommend.feed.v1",
-        {{"action", "daily_status"}},
+        {{"action", "daily_status"}, {"sync_remote", sync_remote}},
         [this, alive, trigger_auto_if_needed](CapabilityResult res) {
             if (!alive->load(std::memory_order_acquire) || !res.ok || !res.data.is_object()) return;
             applyStatusUpdate(res.data, false);
@@ -489,11 +507,11 @@ void CurationSchedulerManager::runMissingToday(const std::string& trigger) {
                     const std::string runner = res.data.value("active_runner", "agent");
                     brls::sync([n, runner, trigger]() {
                         brls::Application::notify(
-                            (trigger == "auto" ? "检测到今日未运行推荐：已后台调用 " : "已后台调用 ") +
+                            (trigger == "auto" ? "已同步 GitHub 并后台调用 " : "已同步 GitHub 并调用 ") +
                             runner + " 补跑 " + std::to_string(n) + " 项每日工作流");
                     });
                 } else if (trigger != "auto" && res.data.value("skipped_reason", "") == "nothing_pending_today") {
-                    brls::sync([]() { brls::Application::notify("今日已启用工作流已全部完成"); });
+                    brls::sync([]() { brls::Application::notify("已与 GitHub 同步，今日已启用工作流已全部完成"); });
                 }
             }
         });
@@ -538,7 +556,34 @@ void CurationSchedulerManager::cancelRun() {
             if (res.ok && res.data.value("was_running", false)) {
                 brls::sync([]() { brls::Application::notify("已请求停止后台 Agent 工作流"); });
             }
-            refreshStatus(false);
+            refreshStatus(false, false);
+        });
+}
+
+void CurationSchedulerManager::syncGitHubNow() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("recommend.feed.v1")) return;
+
+    brls::Application::notify("正在双向同步 GitHub 双仓 (obsidian-vault & music-daily)…");
+    const auto alive = alive_;
+    kernel.capabilities().callAsync(
+        "recommend.feed.v1",
+        {{"action", "sync_github"}, {"push_remote", true}, {"clone_if_missing", true}},
+        [this, alive](CapabilityResult res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (res.data.is_object() && res.data.contains("scheduler") &&
+                res.data["scheduler"].is_object()) {
+                applyStatusUpdate(res.data["scheduler"], false);
+            } else {
+                refreshStatus(false, false);
+            }
+            const std::string msg = res.data.is_object()
+                                        ? res.data.value("summary", res.error)
+                                        : res.error;
+            brls::sync([ok = res.ok, msg]() {
+                brls::Application::notify(ok ? ("GitHub 同步完成: " + msg)
+                                             : ("GitHub 同步提示: " + msg));
+            });
         });
 }
 
@@ -556,6 +601,26 @@ void CurationSchedulerManager::setAutoRunEnabled(bool enabled) {
                 applyStatusUpdate(res.data, false);
                 brls::sync([enabled]() {
                     brls::Application::notify(enabled ? "已开启每日定时推荐自动补跑" : "已关闭每日定时推荐自动补跑");
+                });
+            }
+        });
+}
+
+void CurationSchedulerManager::setGitSyncEnabled(bool enabled) {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized() || !kernel.capabilities().has("recommend.feed.v1")) return;
+
+    const auto alive = alive_;
+    kernel.capabilities().callAsync(
+        "recommend.feed.v1",
+        {{"action", "configure_daily_scheduler"}, {"git_sync_enabled", enabled}},
+        [this, alive, enabled](CapabilityResult res) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            if (res.ok && res.data.is_object()) {
+                applyStatusUpdate(res.data, false);
+                brls::sync([enabled]() {
+                    brls::Application::notify(enabled ? "已开启每日推荐 GitHub 自动双向同步"
+                                                      : "已关闭每日推荐 GitHub 自动双向同步");
                 });
             }
         });
@@ -737,10 +802,26 @@ void CurationSchedulerManager::notifyListeners(const nlohmann::json& status) {
 }
 
 void CurationSchedulerDialog::open(std::function<void()> on_open_calendar) {
+    if (!brls::Application::getPlatform()) {
+        return;
+    }
     auto* box = new SchedulerDialogBox(std::move(on_open_calendar));
     auto* dialog = new brls::Dialog(box);
     box->setDialog(dialog);
-    dialog->addButton("关闭", []() {});
+    if (auto* applet = dynamic_cast<brls::Box*>(dialog->getView("brls/dialog/applet"))) {
+        applet->setWidth(860.0f);
+        applet->setCornerRadius(14.0f);
+        applet->setBorderThickness(1.0f);
+        applet->setBorderColor(ui::color("desktop/line"));
+        applet->setBackgroundColor(ui::color("brls/background"));
+        applet->setClipsToBounds(true);
+    }
+    dialog->addButton("关闭 Esc", []() {});
+    if (auto* btn1 = dialog->getView("brls/dialog/button1")) {
+        if (auto* btn_row = btn1->getParent()) {
+            btn_row->setHeight(52.0f);
+        }
+    }
     dialog->open();
 }
 

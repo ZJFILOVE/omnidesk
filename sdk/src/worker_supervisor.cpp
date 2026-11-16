@@ -146,7 +146,24 @@ struct WorkerSupervisor::InboundExecutor {
         std::shared_ptr<std::atomic<bool>> exited;
     };
 
+    struct SpawnRequest {
+        std::function<pid_t(int&)> do_fork;
+        std::mutex mutex;
+        std::condition_variable cv;
+        pid_t pid = -1;
+        int err = 0;
+        bool done = false;
+    };
+
+    struct SpawnerState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::queue<std::shared_ptr<SpawnRequest>> queue;
+        bool stopping = false;
+    };
+
     explicit InboundExecutor(size_t num_threads = 12) {
+        spawner_thread = std::thread([sp = spawner_state]() { spawnerLoop(sp); });
         state->active_workers = num_threads;
         workers.reserve(num_threads);
         for (size_t i = 0; i < num_threads; ++i) {
@@ -162,6 +179,84 @@ struct WorkerSupervisor::InboundExecutor {
 
     ~InboundExecutor() {
         shutdown(200);
+        shutdownSpawner();
+    }
+
+    pid_t spawnOnPersistentThread(std::function<pid_t(int&)> fn, int& out_errno) {
+        if (std::this_thread::get_id() == spawner_thread.get_id()) {
+            return fn(out_errno);
+        }
+        auto req = std::make_shared<SpawnRequest>();
+        req->do_fork = std::move(fn);
+        {
+            std::lock_guard lock(spawner_state->mutex);
+            if (spawner_state->stopping) {
+                out_errno = ECANCELED;
+                return -1;
+            }
+            spawner_state->queue.push(req);
+        }
+        spawner_state->cv.notify_one();
+        std::unique_lock rlk(req->mutex);
+        req->cv.wait(rlk, [&req]() { return req->done; });
+        out_errno = req->err;
+        return req->pid;
+    }
+
+    void shutdownSpawner() {
+        std::queue<std::shared_ptr<SpawnRequest>> dropped;
+        {
+            std::lock_guard lock(spawner_state->mutex);
+            if (!spawner_state->stopping) {
+                spawner_state->stopping = true;
+                std::swap(dropped, spawner_state->queue);
+            }
+        }
+        while (!dropped.empty()) {
+            auto r = std::move(dropped.front());
+            dropped.pop();
+            std::lock_guard rlk(r->mutex);
+            r->pid = -1;
+            r->err = ECANCELED;
+            r->done = true;
+            r->cv.notify_all();
+        }
+        spawner_state->cv.notify_all();
+        if (spawner_thread.joinable()) {
+            if (spawner_thread.get_id() == std::this_thread::get_id()) {
+                spawner_thread.detach();
+            } else {
+                spawner_thread.join();
+            }
+        }
+    }
+
+    static void spawnerLoop(std::shared_ptr<SpawnerState> sp) {
+        while (true) {
+            std::shared_ptr<SpawnRequest> req;
+            {
+                std::unique_lock lock(sp->mutex);
+                sp->cv.wait(lock, [&sp]() { return sp->stopping || !sp->queue.empty(); });
+                if (sp->stopping && sp->queue.empty()) return;
+                req = std::move(sp->queue.front());
+                sp->queue.pop();
+            }
+            int local_err = 0;
+            pid_t pid = -1;
+            try {
+                if (req->do_fork) pid = req->do_fork(local_err);
+            } catch (...) {
+                pid = -1;
+                local_err = EIO;
+            }
+            {
+                std::lock_guard rlk(req->mutex);
+                req->pid = pid;
+                req->err = local_err;
+                req->done = true;
+            }
+            req->cv.notify_all();
+        }
     }
 
     void submit(const std::string& worker_id, std::function<void()> fn) {
@@ -275,6 +370,8 @@ struct WorkerSupervisor::InboundExecutor {
     }
 
     std::shared_ptr<State> state = std::make_shared<State>();
+    std::shared_ptr<SpawnerState> spawner_state = std::make_shared<SpawnerState>();
+    std::thread spawner_thread;
     std::vector<WorkerEntry> workers;
 };
 
@@ -375,6 +472,7 @@ bool WorkerSupervisor::registerWorker(const WorkerSpec& spec) {
         }
         auto rt = std::make_shared<WorkerRuntime>();
         rt->spec = spec;
+        rt->registration_id = next_registration_id_++;
         workers_[spec.worker_id] = std::move(rt);
     }
     if (previous) {
@@ -646,75 +744,86 @@ bool WorkerSupervisor::spawnLocked(const std::shared_ptr<WorkerRuntime>& rt_ptr,
     }
 
     const pid_t parent_pid = getpid();
-    pid_t pid = fork();
+    auto fork_body = [&](int& fork_err) -> pid_t {
+        pid_t child = fork();
+        if (child < 0) {
+            fork_err = errno;
+            return -1;
+        }
+        if (child == 0) {
+            setpgid(0, 0);
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
+            if (getppid() != parent_pid) {
+                _exit(1);
+            }
+
+            if (rt.spec.transport == WorkerTransport::UnixSocket) {
+                int devnull = open("/dev/null", O_RDWR);
+                if (devnull >= 0) {
+                    dup2(devnull, STDIN_FILENO);
+                    dup2(devnull, STDOUT_FILENO);
+                    if (devnull > STDERR_FILENO) close(devnull);
+                }
+                dup2(err_pipe[1], STDERR_FILENO);
+                close(err_pipe[0]);
+                close(err_pipe[1]);
+                if (listen_fd >= 0) close(listen_fd);
+                if (sock_pair[0] >= 0) close(sock_pair[0]);
+                if (sock_pair[1] >= 0) {
+                    int fd_flags = fcntl(sock_pair[1], F_GETFD, 0);
+                    if (fd_flags >= 0) {
+                        fcntl(sock_pair[1], F_SETFD, fd_flags & ~FD_CLOEXEC);
+                    }
+                    const std::string fd_str = std::to_string(sock_pair[1]);
+                    setenv("OMNIDESK_WORKER_SOCKET_FD", fd_str.c_str(), 1);
+                    setenv("OMNIDESK_WORKER_SOCKET", ("fd://" + fd_str).c_str(), 1);
+                } else {
+                    setenv("OMNIDESK_WORKER_SOCKET", sock_path.c_str(), 1);
+                }
+            } else {
+                dup2(in_pipe[0], STDIN_FILENO);
+                dup2(out_pipe[1], STDOUT_FILENO);
+                dup2(err_pipe[1], STDERR_FILENO);
+                for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
+                    close(fd);
+                }
+            }
+
+            if (!rt.spec.working_dir.empty()) {
+                if (chdir(rt.spec.working_dir.c_str()) != 0) {
+                    _exit(126);
+                }
+            }
+            for (const auto& [k, v] : rt.spec.env) {
+                setenv(k.c_str(), v.c_str(), 1);
+            }
+
+            std::vector<char*> argv;
+            argv.reserve(rt.spec.args.size() + 2);
+            argv.push_back(const_cast<char*>(rt.spec.executable.c_str()));
+            for (const auto& arg : rt.spec.args) {
+                argv.push_back(const_cast<char*>(arg.c_str()));
+            }
+            argv.push_back(nullptr);
+
+            execvp(rt.spec.executable.c_str(), argv.data());
+            _exit(127);
+        }
+        return child;
+    };
+
+    int fork_errno = 0;
+    pid_t pid = inbound_executor_
+                    ? inbound_executor_->spawnOnPersistentThread(fork_body, fork_errno)
+                    : fork_body(fork_errno);
     if (pid < 0) {
-        if (error) *error = std::string("fork failed: ") + std::strerror(errno);
+        if (error) *error = std::string("fork failed: ") + std::strerror(fork_errno ? fork_errno : EIO);
         for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1],
                        err_pipe[0], err_pipe[1], listen_fd, sock_pair[0], sock_pair[1]}) {
             closeFd(fd);
         }
         if (!sock_path.empty()) ::unlink(sock_path.c_str());
         return false;
-    }
-
-    if (pid == 0) {
-        setpgid(0, 0);
-        prctl(PR_SET_PDEATHSIG, SIGKILL);
-        if (getppid() != parent_pid) {
-            _exit(1);
-        }
-
-        if (rt.spec.transport == WorkerTransport::UnixSocket) {
-            int devnull = open("/dev/null", O_RDWR);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                dup2(devnull, STDOUT_FILENO);
-                if (devnull > STDERR_FILENO) close(devnull);
-            }
-            dup2(err_pipe[1], STDERR_FILENO);
-            close(err_pipe[0]);
-            close(err_pipe[1]);
-            if (listen_fd >= 0) close(listen_fd);
-            if (sock_pair[0] >= 0) close(sock_pair[0]);
-            if (sock_pair[1] >= 0) {
-                int fd_flags = fcntl(sock_pair[1], F_GETFD, 0);
-                if (fd_flags >= 0) {
-                    fcntl(sock_pair[1], F_SETFD, fd_flags & ~FD_CLOEXEC);
-                }
-                const std::string fd_str = std::to_string(sock_pair[1]);
-                setenv("OMNIDESK_WORKER_SOCKET_FD", fd_str.c_str(), 1);
-                setenv("OMNIDESK_WORKER_SOCKET", ("fd://" + fd_str).c_str(), 1);
-            } else {
-                setenv("OMNIDESK_WORKER_SOCKET", sock_path.c_str(), 1);
-            }
-        } else {
-            dup2(in_pipe[0], STDIN_FILENO);
-            dup2(out_pipe[1], STDOUT_FILENO);
-            dup2(err_pipe[1], STDERR_FILENO);
-            for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
-                close(fd);
-            }
-        }
-
-        if (!rt.spec.working_dir.empty()) {
-            if (chdir(rt.spec.working_dir.c_str()) != 0) {
-                _exit(126);
-            }
-        }
-        for (const auto& [k, v] : rt.spec.env) {
-            setenv(k.c_str(), v.c_str(), 1);
-        }
-
-        std::vector<char*> argv;
-        argv.reserve(rt.spec.args.size() + 2);
-        argv.push_back(const_cast<char*>(rt.spec.executable.c_str()));
-        for (const auto& arg : rt.spec.args) {
-            argv.push_back(const_cast<char*>(arg.c_str()));
-        }
-        argv.push_back(nullptr);
-
-        execvp(rt.spec.executable.c_str(), argv.data());
-        _exit(127);
     }
 
     setpgid(pid, pid);
@@ -938,9 +1047,9 @@ void WorkerSupervisor::stopRuntime(WorkerRuntime& rt) {
         if (pid > 0) {
             if (have_exit_code) {
                 rt.last_exit_code = exit_code;
-                rt.last_signal = sig;
-                rt.last_signal_name = sig > 0 ? signalNameFromNumber(sig) : "";
             }
+            rt.last_signal = 0;
+            rt.last_signal_name.clear();
             rt.pid = -1;
         }
         rt.pending_auto_restart = false;
@@ -2181,6 +2290,11 @@ std::vector<WorkerStatus> WorkerSupervisor::listWorkers() const {
         if (auto st = status(id)) out.push_back(std::move(*st));
     }
     return out;
+}
+
+uint64_t WorkerSupervisor::registrationGeneration(const std::string& worker_id) const {
+    auto rt = findRuntime(worker_id);
+    return rt ? rt->registration_id : 0;
 }
 
 }  // namespace omnidesk

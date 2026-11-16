@@ -822,6 +822,7 @@ int main(int argc, char** argv) {
                             {"source_id", s->sourceId()},
                             {"display_name", s->displayName()},
                             {"category", s->category()},
+                            {"channels", omnidesk::toJsonArray(s->channels())},
                         });
                     }
                     nlohmann::json book_arr = nlohmann::json::array();
@@ -894,7 +895,13 @@ int main(int argc, char** argv) {
                     auto src = findSourceById(domains.mediaSources(), req.value("source_id", ""));
                     if (!src) sendResp(false, nlohmann::json::object(), "media source not found");
                     else {
-                        auto items = src->fetchItems(req.value("category", "all"), req.value("query", ""));
+                        const std::string category = req.value("category", "all");
+                        const std::string query = req.value("query", "");
+                        const int page = req.value("page", 1);
+                        const bool force_refresh = req.value("force_refresh", false);
+                        auto items = (page > 1 || force_refresh)
+                                         ? src->fetchItemsPage(category, query, page, force_refresh)
+                                         : src->fetchItems(category, query);
                         sendResp(true, {{"items", omnidesk::toJsonArray(items)}}, "");
                     }
                     return;
@@ -932,9 +939,13 @@ int main(int argc, char** argv) {
                     else {
                         const std::string channel_id = req.value("channel_id", "");
                         const std::string query = req.value("query", "");
-                        auto items = channel_id.empty()
-                                         ? src->fetchFeed(query)
-                                         : src->fetchFeedInChannel(channel_id, query);
+                        const int page = req.value("page", 1);
+                        const bool force_refresh = req.value("force_refresh", false);
+                        auto items = (page > 1 || force_refresh)
+                                         ? src->fetchFeedPage(channel_id, query, page, force_refresh)
+                                         : (channel_id.empty()
+                                                ? src->fetchFeed(query)
+                                                : src->fetchFeedInChannel(channel_id, query));
                         sendResp(true, {{"items", omnidesk::toJsonArray(items)}}, "");
                     }
                     return;
@@ -1376,6 +1387,7 @@ int main(int argc, char** argv) {
                         {"source_id", s->sourceId()},
                         {"display_name", s->displayName()},
                         {"category", s->category()},
+                        {"channels", omnidesk::toJsonArray(s->channels())},
                     });
                 }
 

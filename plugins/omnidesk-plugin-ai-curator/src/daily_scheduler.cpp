@@ -63,7 +63,10 @@ std::vector<fs::path> candidateBinSearchDirs() {
     if (const char* home = std::getenv("HOME")) {
         const fs::path h(home);
         add_unique(h / ".local" / "bin");
+        add_unique(h / ".local" / "npm" / "bin");
         add_unique(h / ".npm-global" / "bin");
+        add_unique(h / ".local" / "share" / "pnpm");
+        add_unique(h / ".volta" / "bin");
         add_unique(h / ".bun" / "bin");
         add_unique(h / ".cargo" / "bin");
         add_unique(h / "bin");
@@ -242,6 +245,7 @@ void DailyWorkflowScheduler::loadConfigAndStateLocked(const std::string& curatio
         if (auto cj = readJsonFile((sched_dir / "config.json").string())) {
             if (cj->is_object()) {
                 config_.auto_run_enabled = cj->value("auto_run_enabled", true);
+                config_.git_sync_enabled = cj->value("git_sync_enabled", true);
                 config_.agent_runner = cj->value("agent_runner", std::string("auto"));
                 config_.custom_agent_command = cj->value("custom_agent_command", std::string(""));
                 if (cj->contains("project_enabled") && (*cj)["project_enabled"].is_object()) {
@@ -257,6 +261,10 @@ void DailyWorkflowScheduler::loadConfigAndStateLocked(const std::string& curatio
         }
 
         if (auto sj = readJsonFile((sched_dir / "state.json").string())) {
+            if (sj->is_object()) {
+                last_git_sync_at_ = sj->value("last_git_sync_at", "");
+                last_git_sync_summary_ = sj->value("last_git_sync_summary", "");
+            }
             if (sj->is_object() && sj->value("business_date", "") == today &&
                 sj->contains("attempts") && (*sj)["attempts"].is_object()) {
                 attempts_date_ = today;
@@ -274,6 +282,8 @@ void DailyWorkflowScheduler::loadConfigAndStateLocked(const std::string& curatio
                     rec.last_finished_at = aj.value("last_finished_at", "");
                     rec.last_runner = aj.value("last_runner", "");
                     rec.log_path = aj.value("log_path", "");
+                    rec.git_sync_status = aj.value("git_sync_status", "");
+                    rec.git_sync_detail = aj.value("git_sync_detail", "");
                     today_attempts_[def.id] = std::move(rec);
                 }
             }
@@ -296,6 +306,7 @@ void DailyWorkflowScheduler::saveConfigLocked(const std::string& curation_dir) c
     nlohmann::json j = {
         {"schema_version", 1},
         {"auto_run_enabled", config_.auto_run_enabled},
+        {"git_sync_enabled", config_.git_sync_enabled},
         {"agent_runner", config_.agent_runner},
         {"custom_agent_command", config_.custom_agent_command},
         {"project_enabled", std::move(pe)},
@@ -319,12 +330,16 @@ void DailyWorkflowScheduler::saveStateLocked(const std::string& curation_dir) co
             {"last_finished_at", rec.last_finished_at},
             {"last_runner", rec.last_runner},
             {"log_path", rec.log_path},
+            {"git_sync_status", rec.git_sync_status},
+            {"git_sync_detail", rec.git_sync_detail},
         };
     }
     nlohmann::json j = {
         {"schema_version", 1},
         {"business_date", attempts_date_.empty() ? currentShanghaiDate() : attempts_date_},
         {"last_run_summary", last_run_summary_},
+        {"last_git_sync_at", last_git_sync_at_},
+        {"last_git_sync_summary", last_git_sync_summary_},
         {"attempts", std::move(attempts)},
         {"updated_at", currentShanghaiTimestamp()},
     };
@@ -334,22 +349,40 @@ void DailyWorkflowScheduler::saveStateLocked(const std::string& curation_dir) co
 
 std::vector<DailyWorkflowScheduler::AgentBinary>
 DailyWorkflowScheduler::detectAvailableAgentsLocked() const {
-    static const std::vector<std::pair<std::string, std::string>> kKnownAgents = {
-        {"codex", "Codex CLI"},
-        {"claude", "Claude Code"},
-        {"opencode", "OpenCode"},
-        {"gemini", "Gemini CLI"},
+    struct KnownAgentSpec {
+        const char* id;
+        const char* bin_name;
+        const char* alt_bin;
+        const char* label;
+    };
+    static const KnownAgentSpec kKnownAgents[] = {
+        {"agy-cli", "agy", "agy-cli", "Antigravity CLI (直连免 Magpie)"},
+        {"codex", "codex", nullptr, "Codex CLI"},
+        {"claude", "claude", nullptr, "Claude Code"},
+        {"opencode", "opencode", nullptr, "OpenCode"},
+        {"gemini", "gemini", nullptr, "Gemini CLI"},
     };
     const auto search_dirs = candidateBinSearchDirs();
     std::vector<AgentBinary> found;
-    for (const auto& [id, label] : kKnownAgents) {
+    for (const auto& spec : kKnownAgents) {
+        bool matched = false;
         for (const auto& dir : search_dirs) {
-            const fs::path candidate = dir / id;
+            const fs::path candidate = dir / spec.bin_name;
             if (isExecutableFile(candidate)) {
-                found.push_back({id, label, candidate.string()});
+                found.push_back({spec.id, spec.label, candidate.string()});
+                matched = true;
                 break;
             }
+            if (spec.alt_bin != nullptr) {
+                const fs::path alt_cand = dir / spec.alt_bin;
+                if (isExecutableFile(alt_cand)) {
+                    found.push_back({spec.id, spec.label, alt_cand.string()});
+                    matched = true;
+                    break;
+                }
+            }
         }
+        (void)matched;
     }
     return found;
 }
@@ -359,7 +392,10 @@ bool DailyWorkflowScheduler::resolveSelectedRunnerLocked(
     std::string& out_runner_id,
     std::string& out_binary_or_cmd,
     std::string& out_error) const {
-    const std::string pref = trim(config_.agent_runner.empty() ? "auto" : config_.agent_runner);
+    std::string pref = trim(config_.agent_runner.empty() ? "auto" : config_.agent_runner);
+    if (pref == "agy") {
+        pref = "agy-cli";
+    }
     if (pref == "custom") {
         if (trim(config_.custom_agent_command).empty()) {
             out_error = "已选择自定义 Agent 命令，但尚未配置 custom_agent_command。";
@@ -381,7 +417,7 @@ bool DailyWorkflowScheduler::resolveSelectedRunnerLocked(
             out_binary_or_cmd = config_.custom_agent_command;
             return true;
         }
-        out_error = "未在系统 PATH / ~/.local/bin 中检测到可用的 CLI Agent（codex / claude / opencode / gemini）。";
+        out_error = "未在系统 PATH / ~/.local/bin 中检测到可用的 CLI Agent（agy-cli / codex / claude / opencode / gemini）。";
         return false;
     }
 
@@ -518,6 +554,98 @@ std::string DailyWorkflowScheduler::inspectSingleProjectArtifactState(
     return "pending";
 }
 
+nlohmann::json DailyWorkflowScheduler::syncGitHubRepos(const RepoPaths& paths,
+                                                       bool push_ahead,
+                                                       bool force) {
+    std::lock_guard<std::mutex> sync_lock(git_sync_mutex_);
+
+    const auto now_tp = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        loadConfigAndStateLocked(paths.curation_dir);
+        if (!force && !push_ahead && last_remote_pull_tp_.time_since_epoch().count() > 0) {
+            const auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                 now_tp - last_remote_pull_tp_)
+                                 .count();
+            if (sec < 25) {
+                return {
+                    {"ok", true},
+                    {"skipped_recent", true},
+                    {"pulled_any", false},
+                    {"pushed_any", false},
+                    {"last_git_sync_at", last_git_sync_at_},
+                    {"summary", last_git_sync_summary_},
+                };
+            }
+        }
+    }
+
+    BidirectionalSyncStatus obs_bi;
+    BidirectionalSyncStatus mus_bi;
+    if (push_ahead) {
+        obs_bi = GitMirror::syncBidirectional(paths.obsidian_vault_dir, kObsidianVaultRemoteUrl, false);
+        mus_bi = GitMirror::syncBidirectional(paths.music_daily_dir, kMusicDailyRemoteUrl, false);
+    } else {
+        obs_bi.pull = GitMirror::syncRepo(paths.obsidian_vault_dir, kObsidianVaultRemoteUrl, false, true);
+        mus_bi.pull = GitMirror::syncRepo(paths.music_daily_dir, kMusicDailyRemoteUrl, false, true);
+    }
+
+    const bool pulled_any = obs_bi.pull.pulled || mus_bi.pull.pulled;
+    const bool pushed_any = obs_bi.push.pushed || mus_bi.push.pushed;
+    const bool has_any_remote = obs_bi.pull.has_remote || mus_bi.pull.has_remote;
+    const bool ok = obs_bi.pull.error.empty() && mus_bi.pull.error.empty() &&
+                    (!push_ahead || (obs_bi.push.error.empty() && mus_bi.push.error.empty()));
+
+    std::string summary;
+    if (!has_any_remote) {
+        summary = "本地仓库未配置 GitHub origin 远端";
+    } else if (!ok) {
+        std::string err = !obs_bi.pull.error.empty() ? obs_bi.pull.error
+                          : (!mus_bi.pull.error.empty() ? mus_bi.pull.error
+                          : (!obs_bi.push.error.empty() ? obs_bi.push.error : mus_bi.push.error));
+        summary = "GitHub 同步异常: " + utf8Truncate(err, 96);
+    } else if (pulled_any && pushed_any) {
+        summary = "已双向同步 GitHub（拉取远端更新并推送本地提交）";
+    } else if (pulled_any) {
+        summary = "已从 GitHub 拉取最新每日推荐并刷新本地归档";
+    } else if (pushed_any) {
+        summary = "已将本地每日推荐提交推送至 GitHub";
+    } else if (obs_bi.pull.dirty_worktree_preserved || mus_bi.pull.dirty_worktree_preserved) {
+        summary = "检测到本地未提交手写修改，已安全保留现场";
+    } else {
+        summary = "已与 GitHub origin/main 保持最新同步";
+    }
+
+    const std::string ts = currentShanghaiTimestamp();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_remote_pull_tp_ = std::chrono::steady_clock::now();
+        if (has_any_remote) {
+            last_git_sync_at_ = ts;
+            last_git_sync_summary_ = summary;
+            saveStateLocked(paths.curation_dir);
+        }
+    }
+
+    if (pulled_any && on_pipeline_finished_) {
+        try {
+            on_pipeline_finished_("git_sync", currentShanghaiDate(), paths);
+        } catch (...) {
+        }
+    }
+
+    return {
+        {"ok", ok},
+        {"has_remote", has_any_remote},
+        {"pulled_any", pulled_any},
+        {"pushed_any", pushed_any},
+        {"synced_at", ts},
+        {"summary", summary},
+        {"obsidian_vault", push_ahead ? obs_bi.toJson() : obs_bi.pull.toJson()},
+        {"music_daily", push_ahead ? mus_bi.toJson() : mus_bi.pull.toJson()},
+    };
+}
+
 nlohmann::json DailyWorkflowScheduler::inspectStatus(const RepoPaths& paths) {
     std::lock_guard<std::mutex> lock(mutex_);
     loadConfigAndStateLocked(paths.curation_dir);
@@ -621,6 +749,8 @@ nlohmann::json DailyWorkflowScheduler::inspectStatus(const RepoPaths& paths) {
             {"last_started_at", has_attempt ? att_it->second.last_started_at : ""},
             {"last_finished_at", has_attempt ? att_it->second.last_finished_at : ""},
             {"last_runner", has_attempt ? att_it->second.last_runner : ""},
+            {"git_sync_status", has_attempt ? att_it->second.git_sync_status : ""},
+            {"git_sync_detail", has_attempt ? att_it->second.git_sync_detail : ""},
             {"log_path", has_attempt ? att_it->second.log_path
                                      : (paths.curation_dir.empty()
                                             ? std::string("")
@@ -655,6 +785,9 @@ nlohmann::json DailyWorkflowScheduler::inspectStatus(const RepoPaths& paths) {
         summary_text = "今日待补跑 " + std::to_string(missing_enabled_count) + " 项（已完成 " +
                        std::to_string(published_count) + " 项）";
     }
+    if (!running_ && !last_git_sync_summary_.empty()) {
+        summary_text += " · " + last_git_sync_summary_;
+    }
 
     nlohmann::json pe = nlohmann::json::object();
     for (const auto& def : workflowDefinitions()) {
@@ -668,6 +801,7 @@ nlohmann::json DailyWorkflowScheduler::inspectStatus(const RepoPaths& paths) {
         {"weekday_index", weekday},
         {"weekday_label", kWeekdayNames[std::clamp(weekday, 0, 6)]},
         {"auto_run_enabled", config_.auto_run_enabled},
+        {"git_sync_enabled", config_.git_sync_enabled},
         {"agent_runner", config_.agent_runner},
         {"custom_agent_command", config_.custom_agent_command},
         {"project_enabled", std::move(pe)},
@@ -688,6 +822,8 @@ nlohmann::json DailyWorkflowScheduler::inspectStatus(const RepoPaths& paths) {
         {"stage_message", active_stage_message_},
         {"live_output_line", active_live_line_},
         {"last_run_summary", last_run_summary_},
+        {"last_git_sync_at", last_git_sync_at_},
+        {"last_git_sync_summary", last_git_sync_summary_},
         {"published_count", published_count},
         {"enabled_count", enabled_count},
         {"missing_enabled_count", missing_enabled_count},
@@ -709,10 +845,17 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::configure(const RepoPaths& pa
         if (req.contains("auto_run_enabled") && req["auto_run_enabled"].is_boolean()) {
             config_.auto_run_enabled = req["auto_run_enabled"].get<bool>();
         }
+        if (req.contains("git_sync_enabled") && req["git_sync_enabled"].is_boolean()) {
+            config_.git_sync_enabled = req["git_sync_enabled"].get<bool>();
+        }
         if (req.contains("agent_runner") && req["agent_runner"].is_string()) {
-            const std::string runner = toLowerAscii(trim(req["agent_runner"].get<std::string>()));
-            if (runner != "auto" && runner != "codex" && runner != "claude" &&
-                runner != "opencode" && runner != "gemini" && runner != "custom") {
+            std::string runner = toLowerAscii(trim(req["agent_runner"].get<std::string>()));
+            if (runner == "agy") {
+                runner = "agy-cli";
+            }
+            if (runner != "auto" && runner != "agy-cli" && runner != "codex" &&
+                runner != "claude" && runner != "opencode" && runner != "gemini" &&
+                runner != "custom") {
                 return makeSchedError("invalid_agent_runner",
                                       "Unsupported agent_runner: " + runner);
             }
@@ -842,12 +985,13 @@ std::string DailyWorkflowScheduler::buildWorkflowPrompt(const std::string& proje
         << "4. Preserve any user handwritten content outside `<!-- AUTO:START -->` ... `<!-- AUTO:END -->` (`## Notes`).\n"
         << "5. For `english`, keep any `今日饮食` suggestion strictly ephemeral in stdout/summary only (`ephemeral_chat_note`); NEVER write it to Vault files.\n"
         << "6. For `music`, ONLY sync Apple Music playlist `p.YJXV7dEIeb3GzZX` (`ChatGPT Daily 5`) AFTER verified dual-repo publication succeeds.\n"
-        << "7. Publish the curated bundle back into OmniDesk live frontend via:\n"
+        << "7. Commit all verified stage payloads, history ledgers, and run receipts to the local `main` branch per `.recommendation/PUBLISHING.md` (for `music`, in BOTH `music-daily` and `obsidian-vault`). When `git remote get-url origin` is configured, push `main` to GitHub (`git push origin main`) and verify `HEAD == origin/main` with no uncommitted target files.\n"
+        << "8. Publish the curated bundle back into OmniDesk live frontend via:\n"
         << "   `" << pm_bin << " rpc recommend.feed.v1 '{\"action\":\"publish_daily_bundle\",\"mode\":\"daily_immutable\",\"pipeline\":\""
         << project << "\",\"business_date\":\"" << today << "\",\"operation_id\":\"" << project << ":"
         << today << "\", ...}'`\n"
-        << "8. Do not ask interactive follow-up questions; complete the workflow end-to-end and exit 0 only when `"
-        << project << "` for `" << today << "` is genuinely published.\n";
+        << "9. Do not ask interactive follow-up questions; complete the workflow end-to-end and exit 0 only when `"
+        << project << "` for `" << today << "` is genuinely published and synced.\n";
     return oss.str();
 }
 
@@ -903,11 +1047,7 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
 
     std::unique_lock<std::mutex> tlock(thread_lifecycle_mutex_);
 
-    std::string run_id;
-    std::vector<std::string> to_run;
-    std::string runner_id;
-    std::string runner_bin_or_cmd;
-
+    bool do_pre_pull = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         loadConfigAndStateLocked(paths.curation_dir);
@@ -931,6 +1071,23 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
             res.data["skipped_reason"] = "auto_run_disabled";
             return res;
         }
+
+        do_pre_pull = config_.git_sync_enabled && req.value("sync_remote", true);
+    }
+
+    nlohmann::json pre_sync_result = nlohmann::json::object();
+    if (do_pre_pull) {
+        pre_sync_result = syncGitHubRepos(paths, false, true);
+    }
+
+    std::string run_id;
+    std::vector<std::string> to_run;
+    std::string runner_id;
+    std::string runner_bin_or_cmd;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        loadConfigAndStateLocked(paths.curation_dir);
 
         std::vector<std::string> candidates;
         if (!explicit_projects.empty()) {
@@ -969,6 +1126,9 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
             res.data = inspectStatus(paths);
             res.data["started"] = false;
             res.data["skipped_reason"] = "nothing_pending_today";
+            if (!pre_sync_result.empty()) {
+                res.data["git_sync"] = std::move(pre_sync_result);
+            }
             return res;
         }
 
@@ -1045,6 +1205,9 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
     res.data["started"] = true;
     res.data["run_id"] = run_id;
     res.data["scheduled_projects"] = to_run;
+    if (!pre_sync_result.empty()) {
+        res.data["git_sync"] = std::move(pre_sync_result);
+    }
     return res;
 }
 
@@ -1089,6 +1252,8 @@ void DailyWorkflowScheduler::executeRunLoop(std::string run_id,
     int succeeded = 0;
     int failed = 0;
     int cancelled_count = 0;
+    int github_synced_count = 0;
+    int github_push_warn_count = 0;
     const int total = static_cast<int>(projects.size());
 
     for (int idx = 0; idx < total; ++idx) {
@@ -1112,6 +1277,21 @@ void DailyWorkflowScheduler::executeRunLoop(std::string run_id,
             }
         }
 
+        bool do_git_sync = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            do_git_sync = config_.git_sync_enabled;
+        }
+        if (do_git_sync && idx > 0) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_stage_message_ = "[" + std::to_string(idx + 1) + "/" + std::to_string(total) +
+                                        "] 正在同步 GitHub 双仓最新提交 (" + wf_label + ")…";
+            }
+            publishSchedulerChanged("git_pulling", paths);
+            (void)syncGitHubRepos(paths, false, true);
+        }
+
         bool repo_ok = false, live_ok = false, receipt_ok = false, prep_ok = false;
         std::vector<std::string> existing_targets;
         const std::string pre_state = inspectSingleProjectArtifactState(
@@ -1121,8 +1301,16 @@ void DailyWorkflowScheduler::executeRunLoop(std::string run_id,
             ++succeeded;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                auto& rec = today_attempts_[project];
+                rec.business_date = today;
+                rec.last_status = "published";
+                if (do_git_sync) {
+                    rec.git_sync_status = "pulled";
+                    rec.git_sync_detail = "已从 GitHub 同步今日已完成内容";
+                }
                 completed_projects_in_run_ = idx + 1;
                 active_progress_ = static_cast<float>(idx + 1) / static_cast<float>(std::max(1, total));
+                saveStateLocked(paths.curation_dir);
             }
             continue;
         }
@@ -1151,6 +1339,8 @@ void DailyWorkflowScheduler::executeRunLoop(std::string run_id,
             rec.attempt_count += 1;
             rec.last_status = "running";
             rec.last_error.clear();
+            rec.git_sync_status.clear();
+            rec.git_sync_detail.clear();
             rec.last_started_at = currentShanghaiTimestamp();
             rec.last_runner = runner_id;
             rec.log_path = log_path;
@@ -1186,24 +1376,89 @@ void DailyWorkflowScheduler::executeRunLoop(std::string run_id,
         const std::string post_state = inspectSingleProjectArtifactState(
             project, today, paths, post_repo, post_live, post_receipt, post_prep, post_existing);
 
+        std::string git_sync_status;
+        std::string git_sync_detail;
+        std::string git_push_warning;
+        if (!was_cancelled && post_state == "published" && do_git_sync) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_stage_message_ = "[" + std::to_string(idx + 1) + "/" + std::to_string(total) +
+                                        "] 正在同步推送今日更新至 GitHub (" + wf_label + ")…";
+            }
+            publishSchedulerChanged("git_pushing", paths);
+
+            auto check_paths = canonicalRepoTargets(project, today, paths);
+            if (project == "music" && !paths.obsidian_vault_dir.empty()) {
+                check_paths.push_back(
+                    (fs::path(paths.obsidian_vault_dir) / "Music" / "Daily" / (today + ".md")).string());
+            }
+
+            RepoPushStatus obs_push;
+            RepoPushStatus mus_push;
+            {
+                std::lock_guard<std::mutex> sync_lock(git_sync_mutex_);
+                obs_push = GitMirror::pushRepo(paths.obsidian_vault_dir, "main", check_paths);
+                if (project == "music") {
+                    mus_push = GitMirror::pushRepo(paths.music_daily_dir, "main", check_paths);
+                }
+            }
+
+            std::ofstream log_append(log_path, std::ios::out | std::ios::app);
+            if (log_append.is_open()) {
+                log_append << "\n=== GitHub Sync Verification ===\n"
+                           << "obsidian_vault: " << obs_push.toJson().dump() << "\n";
+                if (project == "music") {
+                    log_append << "music_daily: " << mus_push.toJson().dump() << "\n";
+                }
+                log_append.flush();
+            }
+
+            const bool any_remote = obs_push.has_remote || (project == "music" && mus_push.has_remote);
+            const bool both_ok = obs_push.ok() && (project != "music" || mus_push.ok());
+            const bool any_pushed = obs_push.pushed || (project == "music" && mus_push.pushed);
+
+            if (!any_remote) {
+                git_sync_status = "local_only";
+                git_sync_detail = "本地仓库未配置 origin 远端";
+            } else if (both_ok) {
+                git_sync_status = any_pushed ? "pushed" : "synced";
+                git_sync_detail = any_pushed ? "已推送至 GitHub origin/main" : "已与 GitHub origin/main 同步";
+                ++github_synced_count;
+            } else {
+                git_sync_status = "push_failed";
+                git_push_warning = !obs_push.error.empty() ? obs_push.error : mus_push.error;
+                git_sync_detail = git_push_warning;
+                ++github_push_warn_count;
+            }
+        }
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto& rec = today_attempts_[project];
             rec.last_finished_at = currentShanghaiTimestamp();
+            rec.git_sync_status = git_sync_status;
+            rec.git_sync_detail = git_sync_detail;
+
+            if (git_sync_status == "pushed" || git_sync_status == "synced") {
+                last_git_sync_at_ = rec.last_finished_at;
+                last_git_sync_summary_ = git_sync_detail;
+            } else if (git_sync_status == "push_failed" && !git_push_warning.empty()) {
+                last_git_sync_at_ = rec.last_finished_at;
+                last_git_sync_summary_ = "GitHub 待同步: " + utf8Truncate(git_push_warning, 72);
+            }
 
             if (was_cancelled) {
                 ++cancelled_count;
                 rec.last_status = "cancelled";
                 rec.last_error = "用户已手动停止运行";
-            } else if (post_state == "published" && !timed_out && exit_code == 0) {
+            } else if (post_state == "published") {
                 ++succeeded;
                 rec.last_status = "published";
-                rec.last_error.clear();
-            } else if (post_state == "published" && exit_code != 0) {
-                // Artifacts landed before non-zero exit: still surface warning if needed, but count published
-                ++succeeded;
-                rec.last_status = "published";
-                rec.last_error.clear();
+                if (!git_push_warning.empty()) {
+                    rec.last_error = "本地已发布，但同步 GitHub 待处理: " + git_push_warning;
+                } else {
+                    rec.last_error.clear();
+                }
             } else {
                 ++failed;
                 rec.last_status = "failed";
@@ -1239,7 +1494,9 @@ void DailyWorkflowScheduler::executeRunLoop(std::string run_id,
             last_run_summary_ = "已停止后台运行（完成 " + std::to_string(succeeded) + "/" +
                                 std::to_string(total) + " 项）";
         } else if (failed == 0) {
-            last_run_summary_ = "今日定时推荐已完成（本次成功运行 " + std::to_string(succeeded) + " 项）";
+            last_run_summary_ = "今日定时推荐已完成（本次成功运行 " + std::to_string(succeeded) + " 项" +
+                                (github_synced_count > 0 ? " · 已同步 GitHub" : "") +
+                                (github_push_warn_count > 0 ? " · GitHub 待推送" : "") + "）";
         } else {
             last_run_summary_ = "后台运行结束：成功 " + std::to_string(succeeded) + " 项，失败 " +
                                 std::to_string(failed) + " 项";
@@ -1277,6 +1534,26 @@ int DailyWorkflowScheduler::runAgentSubprocess(const std::string& project,
     std::vector<std::string> argv_strings;
     if (runner_id == "custom") {
         argv_strings = {"/bin/sh", "-c", runner_bin_or_cmd};
+    } else if (runner_id == "agy-cli" || runner_id == "agy") {
+        argv_strings = {
+            runner_bin_or_cmd,
+            "-p",
+            prompt,
+            "--dangerously-skip-permissions",
+            "--disable-slash-commands",
+        };
+        if (!paths.obsidian_vault_dir.empty() && fs::is_directory(paths.obsidian_vault_dir, ec)) {
+            argv_strings.push_back("--add-dir");
+            argv_strings.push_back(paths.obsidian_vault_dir);
+        }
+        if (!paths.music_daily_dir.empty() && fs::is_directory(paths.music_daily_dir, ec)) {
+            argv_strings.push_back("--add-dir");
+            argv_strings.push_back(paths.music_daily_dir);
+        }
+        if (!paths.curation_dir.empty() && fs::is_directory(paths.curation_dir, ec)) {
+            argv_strings.push_back("--add-dir");
+            argv_strings.push_back(paths.curation_dir);
+        }
     } else if (runner_id == "codex") {
         const CodexFlagSupport flags = probeCodexFlags(runner_bin_or_cmd);
         argv_strings.push_back(runner_bin_or_cmd);
@@ -1340,6 +1617,13 @@ int DailyWorkflowScheduler::runAgentSubprocess(const std::string& project,
             if (::chdir(workdir.c_str()) != 0) {
                 // Keep current dir if chdir fails
             }
+        }
+
+        if (runner_id == "agy-cli" || runner_id == "agy") {
+            // Never route Antigravity CLI through Magpie's blocked proxy port
+            ::unsetenv("GEMINI_API_KEY");
+            ::unsetenv("GOOGLE_GEMINI_BASE_URL");
+            ::unsetenv("GOOGLE_GENAI_USE_VERTEXAI");
         }
 
         ::setenv("TZ", "Asia/Shanghai", 1);

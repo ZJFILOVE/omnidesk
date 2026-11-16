@@ -8,6 +8,29 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(OMNIDESK_BUILD_TESTS "Build OmniDesk SDK & PM tests" ON)
+option(OMNIDESK_ENABLE_LTO "Enable interprocedural optimization (ThinLTO/LTO) in Release builds" ON)
+
+include(CheckCCompilerFlag)
+include(CheckCXXCompilerFlag)
+include(CheckLinkerFlag)
+check_c_compiler_flag("-fno-semantic-interposition" OMNIDESK_HAS_C_NO_SEMANTIC_INTERPOSITION)
+check_cxx_compiler_flag("-fno-semantic-interposition" OMNIDESK_HAS_CXX_NO_SEMANTIC_INTERPOSITION)
+check_linker_flag(CXX "-Wl,-Bsymbolic-functions" OMNIDESK_HAS_LD_BSYMBOLIC_FUNCTIONS)
+
+if(OMNIDESK_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _omnidesk_ipo_supported OUTPUT _omnidesk_ipo_error)
+    if(_omnidesk_ipo_supported)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
+        if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+        endif()
+    else()
+        message(STATUS "OmniDesk LTO/IPO unavailable: ${_omnidesk_ipo_error}")
+    endif()
+endif()
 
 # Options expected by upstream borealis / wiliwili dependency stack
 set(PLATFORM_DESKTOP ON CACHE BOOL "" FORCE)
@@ -30,6 +53,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(LIBWEBP REQUIRED IMPORTED_TARGET libwebp)
+pkg_check_modules(TURBOJPEG QUIET IMPORTED_TARGET libturbojpeg)
 pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 
@@ -69,6 +93,7 @@ add_library(omnidesk_sdk SHARED
     sdk/src/file_lock.cpp
     sdk/src/image_cache.cpp
     sdk/src/job_center.cpp
+    sdk/src/markdown_view.cpp
     sdk/src/mpris2.cpp
     sdk/src/mpv_core.cpp
     sdk/src/playback_coordinator.cpp
@@ -140,7 +165,23 @@ set_target_properties(omnidesk_sdk PROPERTIES
     INSTALL_RPATH "$ORIGIN"
 )
 
+foreach(_sdk_internal_tgt omnidesk_sdk borealis yogacore fmt tinyxml2 lunasvg)
+    if(TARGET ${_sdk_internal_tgt})
+        if(OMNIDESK_HAS_CXX_NO_SEMANTIC_INTERPOSITION)
+            target_compile_options(${_sdk_internal_tgt} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-fno-semantic-interposition>)
+        endif()
+        if(OMNIDESK_HAS_C_NO_SEMANTIC_INTERPOSITION)
+            target_compile_options(${_sdk_internal_tgt} PRIVATE
+                $<$<COMPILE_LANGUAGE:C>:-fno-semantic-interposition>)
+        endif()
+    endif()
+endforeach()
+
 target_link_options(omnidesk_sdk PRIVATE "-Wl,--wrap=SDL_Init")
+if(OMNIDESK_HAS_LD_BSYMBOLIC_FUNCTIONS)
+    target_link_options(omnidesk_sdk PRIVATE "-Wl,-Bsymbolic-functions")
+endif()
 
 target_link_libraries(omnidesk_sdk
     PRIVATE
@@ -151,6 +192,7 @@ target_link_libraries(omnidesk_sdk
         lunasvg
         PkgConfig::MPV
         PkgConfig::LIBWEBP
+        $<$<TARGET_EXISTS:PkgConfig::TURBOJPEG>:PkgConfig::TURBOJPEG>
         PkgConfig::SQLITE3
         PkgConfig::SYSTEMD
         CURL::libcurl
@@ -162,6 +204,9 @@ target_link_libraries(omnidesk_sdk
         Threads::Threads
         ${CMAKE_DL_LIBS}
 )
+if(TARGET PkgConfig::TURBOJPEG)
+    target_compile_definitions(omnidesk_sdk PRIVATE OMNIDESK_HAS_TURBOJPEG=1)
+endif()
 
 # Generate build-tree OmniDeskSDKConfig.cmake so omnidesk-pm can compile out-of-tree plugins immediately
 include(CMakePackageConfigHelpers)
@@ -242,6 +287,10 @@ add_dependencies(omnidesk-pm omnidesk-plugin-worker)
 # 3. OmniDesk Host Desktop Workbench (omnidesk GUI)
 # ------------------------------------------------------------------------------
 add_executable(omnidesk
+    host/src/ai_composer.cpp
+    host/src/ai_workbench.cpp
+    host/src/auth_center_dialog.cpp
+    host/src/book_library_store.cpp
     host/src/book_workbench.cpp
     host/src/companion_dock.cpp
     host/src/desktop_ui.cpp
@@ -254,6 +303,7 @@ add_executable(omnidesk
     host/src/curation_calendar_dialog.cpp
     host/src/curation_scheduler_dialog.cpp
     host/src/plugin_store_view.cpp
+    host/src/recycling_grid.cpp
     host/src/shell_activity.cpp
     host/src/svg_view.cpp
     host/src/text_workbench.cpp
@@ -303,7 +353,11 @@ add_dependencies(omnidesk-pm omnidesk_resources)
 # ------------------------------------------------------------------------------
 if(OMNIDESK_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sdk_bus.cpp")
     enable_testing()
-    add_executable(test_sdk_bus tests/test_sdk_bus.cpp)
+    add_executable(test_sdk_bus
+        tests/test_sdk_bus.cpp
+        host/src/recycling_grid.cpp
+    )
+    target_include_directories(test_sdk_bus PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/host/include")
     target_link_libraries(test_sdk_bus PRIVATE omnidesk_sdk)
     add_test(NAME test_sdk_bus COMMAND test_sdk_bus)
 

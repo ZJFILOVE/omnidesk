@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <filesystem>
+#include <omnidesk/markdown_view.hpp>
 #include <omnidesk/types_json.hpp>
 #include <sstream>
 
@@ -40,6 +41,14 @@ void recordProvenance(std::unordered_map<std::string, std::string>& map,
     if (it == map.end() || date < it->second) {
         map[key] = date;
     }
+}
+
+std::string rtrim(const std::string& s) {
+    size_t end = s.size();
+    while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '\t' || s[end - 1] == '\r')) {
+        --end;
+    }
+    return s.substr(0, end);
 }
 
 std::vector<std::string> splitLines(const std::string& s) {
@@ -916,6 +925,7 @@ void parseJournalDailyStream(const std::string& obsidian_vault_dir, HydratedArch
             std::string title;
             std::string chinese_sub;
             std::string bib_line;
+            std::string bib_line_md;
             std::string doi;
             std::string doi_url;
             std::string pubmed_url;
@@ -963,14 +973,14 @@ void parseJournalDailyStream(const std::string& obsidian_vault_dir, HydratedArch
             if (in_sci_q) {
                 if (!t.empty()) {
                     if (!sci_question.empty()) sci_question += "\n";
-                    sci_question += t;
+                    sci_question += rtrim(line);
                 }
                 continue;
             }
             if (in_order) {
                 if (!t.empty() && !startsWith(t, "[[") && !startsWith(t, "[Journal 索引]")) {
                     if (!reading_order.empty()) reading_order += "\n";
-                    reading_order += t;
+                    reading_order += rtrim(line);
                 }
                 continue;
             }
@@ -1019,9 +1029,10 @@ void parseJournalDailyStream(const std::string& obsidian_vault_dir, HydratedArch
                 if (endsWith(cs, "**")) cs = cs.substr(0, cs.size() - 2);
                 cur.chinese_sub = trim(cs);
             } else if (cur.bib_line.empty()) {
+                cur.bib_line_md = t;
                 cur.bib_line = stripMarkdownLinks(t);
             } else if (!cur.sections.empty()) {
-                cur.sections.back().second += "\n" + t;
+                cur.sections.back().second += "\n" + rtrim(line);
             }
         }
         flush_paper();
@@ -1079,7 +1090,8 @@ void parseJournalDailyStream(const std::string& obsidian_vault_dir, HydratedArch
                 art.paragraphs.push_back({"p-" + std::to_string(pidx++), "quote", sci_question, ""});
             }
             if (!p.bib_line.empty()) {
-                art.paragraphs.push_back({"p-" + std::to_string(pidx++), "quote", p.bib_line, ""});
+                art.paragraphs.push_back({"p-" + std::to_string(pidx++), "quote",
+                                          p.bib_line_md.empty() ? p.bib_line : p.bib_line_md, ""});
             }
             for (const auto& [label, content] : p.sections) {
                 art.paragraphs.push_back({"p-" + std::to_string(pidx++), "heading", label, ""});
@@ -1173,15 +1185,29 @@ std::vector<omnidesk::BookPageBlock> parseTranslationBlocks(const std::string& m
     return blocks;
 }
 
-std::vector<omnidesk::BookPageBlock> parseMarkdownAsBlocks(const std::string& md_body,
-                                                          const std::vector<std::string>& vocab_words = {}) {
+std::vector<omnidesk::BookPageBlock> parseMarkdownAsBlocks(
+    const std::string& md_body,
+    const std::vector<std::string>& vocab_words = {},
+    const std::string& skip_h1_title = "") {
     std::vector<omnidesk::BookPageBlock> blocks;
     const auto lines = splitLines(stripAutoComments(md_body));
     std::string cur_para;
     int bidx = 1;
+    bool skipped_h1 = false;
+    bool in_fence = false;
+    char fence_ch = 0;
+    size_t fence_len = 0;
+
     auto flush_para = [&]() {
-        std::string p = trim(cur_para);
-        if (!p.empty()) {
+        size_t start = 0;
+        while (start < cur_para.size() && (cur_para[start] == '\n' || cur_para[start] == '\r')) ++start;
+        size_t end = cur_para.size();
+        while (end > start && (cur_para[end - 1] == ' ' || cur_para[end - 1] == '\t' ||
+                               cur_para[end - 1] == '\n' || cur_para[end - 1] == '\r')) {
+            --end;
+        }
+        std::string p = cur_para.substr(start, end - start);
+        if (!p.empty() && !trim(p).empty()) {
             std::vector<std::string> hits;
             std::string lp = toLowerAscii(p);
             for (const auto& w : vocab_words) {
@@ -1193,22 +1219,48 @@ std::vector<omnidesk::BookPageBlock> parseMarkdownAsBlocks(const std::string& md
         }
         cur_para.clear();
     };
+
     for (const auto& line : lines) {
         std::string t = trim(line);
+        if (!in_fence && (startsWith(t, "```") || startsWith(t, "~~~"))) {
+            in_fence = true;
+            fence_ch = t[0];
+            fence_len = 0;
+            while (fence_len < t.size() && t[fence_len] == fence_ch) ++fence_len;
+            if (!cur_para.empty()) cur_para += "\n";
+            cur_para += rtrim(line);
+            continue;
+        }
+        if (in_fence) {
+            if (!cur_para.empty()) cur_para += "\n";
+            cur_para += rtrim(line);
+            size_t run = 0;
+            while (run < t.size() && t[run] == fence_ch) ++run;
+            if (run >= fence_len && trim(t.substr(run)).empty()) {
+                in_fence = false;
+                flush_para();
+            }
+            continue;
+        }
         if (t.empty()) {
             flush_para();
             continue;
         }
         if (startsWith(t, "# ")) {
             flush_para();
-            blocks.push_back({"b-" + std::to_string(bidx++), "heading", trim(t.substr(2)), "", {}});
+            std::string h1_txt = trim(t.substr(2));
+            if (!skipped_h1 && !skip_h1_title.empty() && h1_txt == skip_h1_title) {
+                skipped_h1 = true;
+                continue;
+            }
+            blocks.push_back({"b-" + std::to_string(bidx++), "heading", h1_txt, "", {}});
         } else if (startsWith(t, "## ") || startsWith(t, "### ")) {
             flush_para();
             size_t off = startsWith(t, "### ") ? 4 : 3;
             blocks.push_back({"b-" + std::to_string(bidx++), "heading", trim(t.substr(off)), "", {}});
         } else {
             if (!cur_para.empty()) cur_para += "\n";
-            cur_para += t;
+            cur_para += rtrim(line);
         }
     }
     flush_para();
@@ -1279,12 +1331,14 @@ void parseEnglishStream(const std::string& obsidian_vault_dir, HydratedArchive& 
 
             std::vector<std::string> vocab_words;
             for (const auto& vc : day_vocabs) vocab_words.push_back(vc.word);
-            std::vector<omnidesk::BookPageBlock> blocks;
+            const std::vector<omnidesk::BookPageBlock> full_md_blocks =
+                parseMarkdownAsBlocks(clean_body, vocab_words, title);
+            std::vector<omnidesk::BookPageBlock> book_blocks;
             if (spec.component == "translation") {
-                blocks = parseTranslationBlocks(clean_body);
+                book_blocks = parseTranslationBlocks(clean_body);
             }
-            if (blocks.empty()) {
-                blocks = parseMarkdownAsBlocks(clean_body, vocab_words);
+            if (book_blocks.empty()) {
+                book_blocks = full_md_blocks;
             }
 
             EnglishNoteEntry note;
@@ -1293,7 +1347,7 @@ void parseEnglishStream(const std::string& obsidian_vault_dir, HydratedArchive& 
             note.title = title;
             note.rel_path = "50-courses/English/" + spec.sub_rel + "/" + date + ".md";
             note.raw_markdown = clean_body;
-            note.blocks = blocks;
+            note.blocks = book_blocks;
             note.vocab_cards = day_vocabs;
             auto& day_bundle = out.english_days[date];
             day_bundle.date = date;
@@ -1306,7 +1360,16 @@ void parseEnglishStream(const std::string& obsidian_vault_dir, HydratedArchive& 
             fi.source_name = spec.label;
             fi.category = "english";
             fi.title = title;
-            fi.excerpt = utf8Truncate(fm.count("source_title") ? (fm["source_title"] + " · " + fm["level"]) : clean_body, 220);
+            std::string eng_excerpt;
+            if (fm.count("source_title") && !fm["source_title"].empty()) {
+                eng_excerpt = fm["source_title"];
+                if (fm.count("level") && !fm["level"].empty()) {
+                    eng_excerpt += " · " + fm["level"];
+                }
+            } else {
+                eng_excerpt = omnidesk::sanitizeMarkdownExcerpt(clean_body, 180);
+            }
+            fi.excerpt = utf8Truncate(eng_excerpt, 220);
             fi.author = fm.count("source") ? fm["source"] : "AI Curation";
             fi.published_at = date;
             fi.url = fm.count("source_url") ? fm["source_url"] : "";
@@ -1319,13 +1382,14 @@ void parseEnglishStream(const std::string& obsidian_vault_dir, HydratedArchive& 
             art.source_name = spec.label;
             art.category = "english";
             art.title = title;
-            art.subtitle = spec.label + " · " + date + (fm.count("level") ? (" · " + fm["level"]) : "");
+            art.subtitle = spec.label + " · " + date +
+                           (fm.count("level") && !fm["level"].empty() ? (" · " + fm["level"]) : "");
             art.authors = fi.author;
             art.published_at = date;
             art.url = fi.url;
             art.tags = fi.tags;
             int pidx = 1;
-            for (const auto& blk : blocks) {
+            for (const auto& blk : full_md_blocks) {
                 art.paragraphs.push_back({"p-" + std::to_string(pidx++), blk.kind, blk.original, blk.translated});
             }
             out.articles[eid] = std::move(art);
@@ -1432,7 +1496,7 @@ nlohmann::json serializeArchive(const HydratedArchive& a) {
     }
 
     return {
-        {"schema_version", 2},
+        {"schema_version", 3},
         {"media_items", omnidesk::toJsonArray(a.media_items)},
         {"text_items", omnidesk::toJsonArray(a.text_items)},
         {"articles", std::move(arts)},
@@ -1463,7 +1527,7 @@ nlohmann::json serializeArchive(const HydratedArchive& a) {
 }
 
 bool deserializeArchive(const nlohmann::json& j, HydratedArchive& out) {
-    if (!j.is_object() || j.value("schema_version", 0) != 2) return false;
+    if (!j.is_object() || j.value("schema_version", 0) != 3) return false;
     out = HydratedArchive{};
     if (j.contains("media_items")) out.media_items = omnidesk::fromJsonArray<omnidesk::MediaItem>(j["media_items"]);
     if (j.contains("text_items")) out.text_items = omnidesk::fromJsonArray<omnidesk::TextFeedItem>(j["text_items"]);

@@ -58,7 +58,11 @@ SdlInitFn resolveRealSdlInit() {
 
 } // namespace
 
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" __attribute__((used)) int __wrap_SDL_Init(Uint32 flags) {
+#else
 extern "C" int __wrap_SDL_Init(Uint32 flags) {
+#endif
     SdlInitFn real_init = resolveRealSdlInit();
     if (!real_init) {
         SDL_SetError("Unable to resolve real SDL_Init");

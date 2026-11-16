@@ -4,11 +4,13 @@
 #include <borealis/core/application.hpp>
 #include <borealis/core/thread.hpp>
 #include <cctype>
+#include <SDL2/SDL.h>
 #include <nanovg.h>
 #include <thread>
 
 #include "omnidesk/capabilities.hpp"
 #include "omnidesk/entity_bus.hpp"
+#include "omnidesk/markdown_view.hpp"
 #include "omnidesk/selection_action_popover.hpp"
 #include "omnidesk/types_json.hpp"
 #include "omnidesk/ui_task_runner.hpp"
@@ -557,8 +559,9 @@ brls::Box* CommentTreeView::buildRowCard(const FlatCommentRow& row) {
                 return;
             }
             SelectionContext sctx;
-            sctx.context_sentence = node_copy.body;
-            sctx.source_title = article_title_;
+            const std::string clean_body = stripMarkdownToPlainText(node_copy.body);
+            sctx.context_sentence = clean_body.empty() ? node_copy.body : clean_body;
+            sctx.source_title = stripMarkdownToPlainText(article_title_, true);
             sctx.source_id = source_plugin_id_;
             sctx.domain = ContentDomain::Text;
             sctx.capabilities = caps_;
@@ -586,15 +589,41 @@ brls::Box* CommentTreeView::buildRowCard(const FlatCommentRow& row) {
     c_card->addView(hdr);
 
     if (!row.collapsed) {
+        auto onLink = [caps = caps_, alive = alive_](const std::string& url, const std::string& label) {
+            if (!alive->load(std::memory_order_acquire) || url.empty()) return;
+            if (caps && caps->has("web.embed.v1") &&
+                (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)) {
+                caps->callAsync("web.embed.v1",
+                                {{"action", "open"}, {"url", url}, {"title", label.empty() ? url : label}},
+                                [url](const CapabilityResult& r) {
+                                    if (!r.ok) SDL_OpenURL(url.c_str());
+                                });
+            } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                SDL_OpenURL(url.c_str());
+            }
+        };
+
         if (display_mode_ != CommentDisplayMode::TranslatedOnly || cached_tr.empty()) {
-            auto* b_lbl = ui::makeLabel(node.body, 15.5f, "brls/text", 1.52f);
-            b_lbl->setMarginTop(8);
-            c_card->addView(b_lbl);
+            MarkdownStyle b_style;
+            b_style.font_size = 15.5f;
+            b_style.line_height = 1.54f;
+            b_style.text_color_token = "brls/text";
+            b_style.block_gap = 6.0f;
+            b_style.on_link_click = onLink;
+            auto* b_md = new MarkdownView(node.body, std::move(b_style));
+            b_md->setMarginTop(8);
+            c_card->addView(b_md);
         }
         if (!cached_tr.empty() && display_mode_ != CommentDisplayMode::OriginalOnly) {
-            auto* t_lbl = ui::makeLabel(cached_tr, 14.5f, "font/grey", 1.50f);
-            t_lbl->setMarginTop(6);
-            c_card->addView(t_lbl);
+            MarkdownStyle t_style;
+            t_style.font_size = 14.5f;
+            t_style.line_height = 1.52f;
+            t_style.text_color_token = "font/grey";
+            t_style.block_gap = 5.0f;
+            t_style.on_link_click = onLink;
+            auto* t_md = new MarkdownView(cached_tr, std::move(t_style));
+            t_md->setMarginTop(6);
+            c_card->addView(t_md);
         }
     }
 

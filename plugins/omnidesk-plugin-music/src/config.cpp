@@ -99,16 +99,23 @@ MusicConfig loadConfigFromContext(const omnidesk::PluginContext& ctx) {
         return (raw.is_object() && raw.contains(key)) ? raw[key] : nlohmann::json{};
     };
 
+    const std::string configured_data_dir = getStr("engine_data_dir", "");
+    cfg.engine_data_dir_explicit = !configured_data_dir.empty();
     cfg.engine_bin = resolveEngineBinary(getStr("engine_bin", ""));
-    cfg.engine_data_dir = resolveEngineDataDir(getStr("engine_data_dir", ""));
+    cfg.engine_data_dir = resolveEngineDataDir(configured_data_dir);
     cfg.engine_port = std::clamp(
         parseIntValue(field("engine_port"), ctx.getConfigString("engine_port", ""), 20025),
         1024, 65535);
     cfg.auto_launch_engine = parseBoolValue(field("auto_launch_engine"),
                                             ctx.getConfigString("auto_launch_engine", ""), true);
-    cfg.storefront = getStr("storefront", "us");
+    const std::string configured_sf = getStr("storefront", "");
+    cfg.storefront_explicit = !configured_sf.empty();
+    cfg.storefront = configured_sf.empty() ? "us" : configured_sf;
     for (char& c : cfg.storefront) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (cfg.storefront.size() != 2) cfg.storefront = "us";
+    if (cfg.storefront.size() != 2) {
+        cfg.storefront = "us";
+        cfg.storefront_explicit = false;
+    }
 
     cfg.language = getStr("language", "zh-CN");
     cfg.lossless_enabled = parseBoolValue(field("lossless_enabled"),

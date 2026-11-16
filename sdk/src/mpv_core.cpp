@@ -17,6 +17,7 @@
 #include <borealis/views/button.hpp>
 #include <borealis/views/dialog.hpp>
 #include <borealis/views/label.hpp>
+#include <yoga/Yoga.h>
 
 #include <algorithm>
 #include <atomic>
@@ -346,27 +347,50 @@ struct MPVCore::Impl {
     uint64_t next_sub_token = 1;
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
     std::atomic<bool> dirty_frame{false};
+    std::atomic<bool> video_playing_fast{false};
+    std::atomic<bool> wake_event_pending{false};
+    std::atomic<bool> init_sync_pending{false};
     int exit_sub = -1;
+
+    static void pushSdlWakeEvent() {
+        if (SDL_WasInit(SDL_INIT_EVENTS) == 0) return;
+        static const Uint32 kMpvWakeType = SDL_RegisterEvents(1);
+        if (kMpvWakeType == static_cast<Uint32>(-1)) return;
+        SDL_Event ev{};
+        ev.type = kMpvWakeType;
+        SDL_PushEvent(&ev);
+    }
 
     static void onMpvWakeup(void* userdata) {
         auto* self = static_cast<Impl*>(userdata);
         if (!self) return;
+        const bool need_wake = !self->wake_event_pending.exchange(true, std::memory_order_acq_rel);
         auto alive = self->alive;
         brls::sync([self, alive]() {
             if (!alive->load()) return;
+            self->wake_event_pending.store(false, std::memory_order_release);
             self->drainEvents();
         });
+        if (need_wake) {
+            pushSdlWakeEvent();
+        }
     }
 
     static void onMpvRenderUpdate(void* userdata) {
         auto* self = static_cast<Impl*>(userdata);
         if (!self) return;
         self->dirty_frame.store(true, std::memory_order_release);
+        const bool need_wake = !self->wake_event_pending.exchange(true, std::memory_order_acq_rel);
         auto alive = self->alive;
         brls::sync([self, alive]() {
             if (!alive->load()) return;
+            self->wake_event_pending.store(false, std::memory_order_release);
+            brls::Application::setActiveEvent(true);
             self->renderDirtyFbo();
         });
+        if (need_wake) {
+            pushSdlWakeEvent();
+        }
     }
 
     void commandAsync(const std::vector<std::string>& args) {
@@ -392,6 +416,9 @@ struct MPVCore::Impl {
         {
             std::lock_guard lock(mutex);
             snap = state;
+            const bool vplay = state.initialized && state.playing && !state.paused && !state.stopped &&
+                               (state.video_width > 0 || state.video_height > 0 || !state.video_codec.empty());
+            video_playing_fast.store(vplay, std::memory_order_release);
             for (const auto& [_, cb] : subscribers) cbs.push_back(cb);
         }
         emitStateLocked(snap, cbs);
@@ -556,6 +583,12 @@ struct MPVCore::Impl {
                         case 17: state.audio_samplerate = static_cast<int>(*static_cast<int64_t*>(prop->data)); break;
                         case 18: state.audio_channels = static_cast<int>(*static_cast<int64_t*>(prop->data)); break;
                         case 19: state.cache_duration_sec = *static_cast<double*>(prop->data); break;
+                        case 20:
+                            if (*static_cast<int*>(prop->data) != 0 && !state.stopped) {
+                                state.playing = false;
+                                state.stopped = true;
+                            }
+                            break;
                         default: break;
                     }
                     break;
@@ -593,6 +626,7 @@ struct MPVCore::Impl {
         state.initialized = false;
         state.playing = false;
         state.stopped = true;
+        video_playing_fast.store(false, std::memory_order_release);
     }
 };
 
@@ -635,8 +669,14 @@ bool MPVCore::ensureInitialized() {
         mpv_set_option_string(handle, "keep-open", "yes");
         mpv_set_option_string(handle, "hr-seek", "yes");
         mpv_set_option_string(handle, "ytdl", "no");
+        mpv_set_option_string(handle, "cache", "yes");
+        mpv_set_option_string(handle, "demuxer-max-bytes", "150MiB");
+        mpv_set_option_string(handle, "demuxer-max-back-bytes", "64MiB");
         mpv_set_option_string(handle, "audio-channels", "stereo");
-        mpv_set_option_string(handle, "reset-on-next-file", "speed,pause,http-header-fields,referrer,user-agent");
+        mpv_set_option_string(
+            handle,
+            "reset-on-next-file",
+            "speed,pause,http-header-fields,referrer,user-agent,stream-lavf-o,force-seekable");
         mpv_set_option_string(handle, "terminal", "no");
         mpv_request_log_messages(handle, "error");
 
@@ -665,6 +705,7 @@ bool MPVCore::ensureInitialized() {
         mpv_observe_property(handle, 17, "audio-params/samplerate", MPV_FORMAT_INT64);
         mpv_observe_property(handle, 18, "audio-params/channel-count", MPV_FORMAT_INT64);
         mpv_observe_property(handle, 19, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(handle, 20, "eof-reached", MPV_FORMAT_FLAG);
 
         int advanced_control = 1;
         mpv_opengl_init_params gl_init{sdlGetProcAddress, nullptr};
@@ -708,6 +749,10 @@ bool MPVCore::ensureInitialized() {
 bool MPVCore::isInitialized() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->state.initialized;
+}
+
+bool MPVCore::isVideoPlaying() const {
+    return impl_->video_playing_fast.load(std::memory_order_acquire);
 }
 
 void MPVCore::shutdown() {
@@ -755,7 +800,27 @@ std::string MPVCore::buildLoadfileOptions(const MediaRequestOptions& opts) {
         parts.push_back("http-header-fields=\"" + escapeMpvQuoted(joined) + "\"");
     }
 
-    parts.push_back("network-timeout=10");
+    auto isLoopbackUrl = [](const std::string& u) {
+        return u.rfind("https://127.0.0.1:", 0) == 0 ||
+               u.rfind("http://127.0.0.1:", 0) == 0 ||
+               u.rfind("https://localhost:", 0) == 0 ||
+               u.rfind("http://localhost:", 0) == 0 ||
+               u.rfind("https://[::1]:", 0) == 0 ||
+               u.rfind("http://[::1]:", 0) == 0;
+    };
+    const bool loopback_stream = isLoopbackUrl(opts.url) || isLoopbackUrl(opts.audio_url);
+    if (loopback_stream) {
+        parts.push_back("network-timeout=30");
+        parts.push_back("tls-verify=no");
+        parts.push_back("http-proxy=\"\"");
+        if (opts.url.find("/api/v1/playback/") != std::string::npos ||
+            opts.audio_url.find("/api/v1/playback/") != std::string::npos) {
+            parts.push_back("stream-lavf-o=\"seekable=0\"");
+            parts.push_back("force-seekable=yes");
+        }
+    } else {
+        parts.push_back("network-timeout=10");
+    }
     parts.push_back(std::string("hwdec=") + (opts.hwdec ? "\"auto-safe\"" : "\"no\""));
     if (opts.start_seconds > 0.0) {
         std::ostringstream ss;
@@ -819,14 +884,24 @@ bool MPVCore::load(const MediaRequestOptions& opts) {
         impl_->state.stopped = false;
         impl_->state.paused = false;
         impl_->state.playing = true;
-        if (!impl_->state.initialized || !impl_->mpv) {
-            impl_->pending_load = opts;
-        }
     }
     impl_->notifyState();
 
     if (!isInitialized() && !ensureInitialized()) {
-        // Queued in pending_load_ cleanly; will start as soon as OpenGL surface draws.
+        {
+            std::lock_guard lock(impl_->mutex);
+            impl_->pending_load = opts;
+        }
+        if (SDL_WasInit(SDL_INIT_VIDEO) != 0 &&
+            !impl_->init_sync_pending.exchange(true, std::memory_order_acq_rel)) {
+            auto alive = impl_->alive;
+            brls::sync([this, alive]() {
+                if (!alive->load()) return;
+                impl_->init_sync_pending.store(false, std::memory_order_release);
+                ensureInitialized();
+            });
+            Impl::pushSdlWakeEvent();
+        }
         return true;
     }
 
@@ -1030,6 +1105,16 @@ public:
     VideoCanvas(MPVCore* core, SubtitleOverlay* sub, DanmakuOverlay* dm)
         : core_(core), sub_(sub), dm_(dm) {
         setFocusable(true);
+        YGNodeSetMeasureFunc(this->ygNode, &VideoCanvas::measureCanvas);
+        YGNodeSetNodeType(this->ygNode, YGNodeTypeDefault);
+    }
+
+    void setMinStageHeight(float height) {
+        min_stage_h_ = std::max(120.0f, height);
+        if (YGNodeHasMeasureFunc(this->ygNode)) {
+            YGNodeMarkDirty(this->ygNode);
+        }
+        invalidate();
     }
 
     void draw(NVGcontext* vg,
@@ -1042,17 +1127,6 @@ public:
         const float alpha = getAlpha();
         core_->drawVideo(vg, x, y, width, height, alpha);
         const auto st = core_->state();
-        if (st.stopped) {
-            nvgSave(vg);
-            int font = brls::Application::getDefaultFont();
-            if (font >= 0) nvgFontFaceId(vg, font);
-            nvgFontSize(vg, 14.0f);
-            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(vg, nvgRGBA(205, 203, 198, 220));
-            nvgText(vg, x + width * 0.5f, y + height * 0.5f,
-                    "OpenGL libmpv 硬解舞台就绪 · 点击任意媒体条目开始播放", nullptr);
-            nvgRestore(vg);
-        }
         if (dm_) {
             dm_->draw(vg, x, y, width, height, st.position_sec, alpha);
         }
@@ -1060,9 +1134,46 @@ public:
     }
 
 private:
+    static YGSize measureCanvas(YGNodeRef node,
+                                float width,
+                                YGMeasureMode widthMode,
+                                float height,
+                                YGMeasureMode heightMode) {
+        auto* self = static_cast<VideoCanvas*>(YGNodeGetContext(node));
+        const float min_h = self ? self->min_stage_h_ : 240.0f;
+
+        float resolved_w = 426.0f;
+        if (widthMode != YGMeasureModeUndefined && !YGFloatIsUndefined(width) && width > 0.0f) {
+            resolved_w = width;
+        }
+
+        if (heightMode == YGMeasureModeExactly && !YGFloatIsUndefined(height) && height > 0.0f) {
+            return YGSize{resolved_w, height};
+        }
+
+        YGNodeRef parent = YGNodeGetOwner(node);
+        const bool parent_grows = parent && YGNodeStyleGetFlexGrow(parent) > 0.0f;
+        float desired_h = std::min(min_h, 240.0f);
+        if (!parent_grows) {
+            const float ideal_16_9 = std::round(resolved_w * 9.0f / 16.0f);
+            const float win_h = brls::Application::contentHeight > 0.0f
+                                    ? brls::Application::contentHeight
+                                    : 900.0f;
+            const float max_embedded_h = std::max(min_h, std::round(win_h * 0.62f));
+            desired_h = std::clamp(ideal_16_9, min_h, max_embedded_h);
+        }
+
+        if (heightMode == YGMeasureModeAtMost && !YGFloatIsUndefined(height) && height > 0.0f) {
+            desired_h = std::min(desired_h, height);
+        }
+
+        return YGSize{resolved_w, desired_h};
+    }
+
     MPVCore* core_ = nullptr;
     SubtitleOverlay* sub_ = nullptr;
     DanmakuOverlay* dm_ = nullptr;
+    float min_stage_h_ = 240.0f;
 };
 
 class MpvStageView::ChapterProgressBar : public brls::View {
@@ -1140,13 +1251,15 @@ MpvStageView::MpvStageView(MPVCore* core)
     : brls::Box(brls::Axis::COLUMN),
       core_(core ? core : &MPVCore::instance()),
       alive_(std::make_shared<std::atomic<bool>>(true)) {
-    setGrow(1.0f);
+    setGrow(0.0f);
+    setShrink(0.0f);
+    setWidthPercentage(100);
     setPadding(0);
 
     canvas_ = new VideoCanvas(core_, &subtitles_, &danmaku_);
     canvas_->setGrow(1.0f);
-    canvas_->setHeightPercentage(100);
-    canvas_->setMinHeight(240);
+    canvas_->setShrink(1.0f);
+    canvas_->setWidthPercentage(100);
     addView(canvas_);
 
     // SponsorBlock F9 hint pill
@@ -1301,7 +1414,7 @@ void MpvStageView::setTitle(const std::string& title) {
 
 void MpvStageView::setStageMinHeight(float height) {
     if (canvas_) {
-        canvas_->setMinHeight(height);
+        canvas_->setMinStageHeight(height);
     }
 }
 

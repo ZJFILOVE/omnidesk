@@ -390,6 +390,14 @@ public:
                          [&]() { return inner_->fetchItems(category, query); },
                          []() { return std::vector<MediaItem>{}; });
     }
+    std::vector<MediaItem> fetchItemsPage(const std::string& category,
+                                          const std::string& query,
+                                          int page,
+                                          bool force_refresh) override {
+        return guardCall(disp_, tracker_, plugin_id_, "media.fetchItemsPage",
+                         [&]() { return inner_->fetchItemsPage(category, query, page, force_refresh); },
+                         []() { return std::vector<MediaItem>{}; });
+    }
     std::shared_ptr<CancelToken> fetchItemsAsync(
         const std::string& category,
         const std::string& query,
@@ -398,6 +406,21 @@ public:
         return guardCall(
             disp_, tracker_, plugin_id_, "media.fetchItemsAsync",
             [&]() { return inner_->fetchItemsAsync(category, query, std::move(callback), std::move(cancel)); },
+            []() { return CancelToken::create(); });
+    }
+    std::shared_ptr<CancelToken> fetchItemsPageAsync(
+        const std::string& category,
+        const std::string& query,
+        int page,
+        bool force_refresh,
+        std::function<void(std::vector<MediaItem> items, bool cancelled)> callback,
+        std::shared_ptr<CancelToken> cancel) override {
+        return guardCall(
+            disp_, tracker_, plugin_id_, "media.fetchItemsPageAsync",
+            [&]() {
+                return inner_->fetchItemsPageAsync(
+                    category, query, page, force_refresh, std::move(callback), std::move(cancel));
+            },
             []() { return CancelToken::create(); });
     }
     std::vector<LyricLine> fetchLyrics(const std::string& item_id) override {
@@ -460,6 +483,14 @@ public:
                          [&]() { return inner_->fetchFeedInChannel(channel_id, query); },
                          []() { return std::vector<TextFeedItem>{}; });
     }
+    std::vector<TextFeedItem> fetchFeedPage(const std::string& channel_id,
+                                            const std::string& query,
+                                            int page,
+                                            bool force_refresh) override {
+        return guardCall(disp_, tracker_, plugin_id_, "text.fetchFeedPage",
+                         [&]() { return inner_->fetchFeedPage(channel_id, query, page, force_refresh); },
+                         []() { return std::vector<TextFeedItem>{}; });
+    }
     std::shared_ptr<CancelToken> fetchFeedAsync(
         const std::string& query,
         std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
@@ -479,6 +510,21 @@ public:
             [&]() {
                 return inner_->fetchFeedInChannelAsync(
                     channel_id, query, std::move(callback), std::move(cancel));
+            },
+            []() { return CancelToken::create(); });
+    }
+    std::shared_ptr<CancelToken> fetchFeedPageAsync(
+        const std::string& channel_id,
+        const std::string& query,
+        int page,
+        bool force_refresh,
+        std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
+        std::shared_ptr<CancelToken> cancel) override {
+        return guardCall(
+            disp_, tracker_, plugin_id_, "text.fetchFeedPageAsync",
+            [&]() {
+                return inner_->fetchFeedPageAsync(
+                    channel_id, query, page, force_refresh, std::move(callback), std::move(cancel));
             },
             []() { return CancelToken::create(); });
     }
@@ -850,6 +896,25 @@ std::shared_ptr<CancelToken> IMediaSource::fetchItemsAsync(
         std::move(cancel));
 }
 
+std::shared_ptr<CancelToken> IMediaSource::fetchItemsPageAsync(
+    const std::string& category,
+    const std::string& query,
+    int page,
+    bool force_refresh,
+    std::function<void(std::vector<MediaItem> items, bool cancelled)> callback,
+    std::shared_ptr<CancelToken> cancel) {
+    return submitDomainAsyncFetch<MediaItem>(
+        this,
+        "media.fetchItemsPage",
+        [this, category, query, page, force_refresh]() {
+            return (page > 1 || force_refresh)
+                       ? fetchItemsPage(category, query, page, force_refresh)
+                       : fetchItems(category, query);
+        },
+        std::move(callback),
+        std::move(cancel));
+}
+
 std::shared_ptr<CancelToken> ITextSource::fetchFeedAsync(
     const std::string& query,
     std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
@@ -871,6 +936,26 @@ std::shared_ptr<CancelToken> ITextSource::fetchFeedInChannelAsync(
         this,
         "text.fetchFeedInChannel",
         [this, channel_id, query]() { return fetchFeedInChannel(channel_id, query); },
+        std::move(callback),
+        std::move(cancel));
+}
+
+std::shared_ptr<CancelToken> ITextSource::fetchFeedPageAsync(
+    const std::string& channel_id,
+    const std::string& query,
+    int page,
+    bool force_refresh,
+    std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
+    std::shared_ptr<CancelToken> cancel) {
+    return submitDomainAsyncFetch<TextFeedItem>(
+        this,
+        "text.fetchFeedPage",
+        [this, channel_id, query, page, force_refresh]() {
+            if (page > 1 || force_refresh) {
+                return fetchFeedPage(channel_id, query, page, force_refresh);
+            }
+            return channel_id.empty() ? fetchFeed(query) : fetchFeedInChannel(channel_id, query);
+        },
         std::move(callback),
         std::move(cancel));
 }

@@ -84,6 +84,18 @@ omnidesk::MediaItem parseIncomingMediaItem(const nlohmann::json& j, const std::s
         std::string sid = extractAppleMusicSongId(item.play_url);
         if (!sid.empty()) item.extra["apple_music_song_id"] = sid;
     }
+    if (item.extra.value("storefront", "").empty() && !item.play_url.empty()) {
+        size_t host_pos = item.play_url.find("music.apple.com/");
+        if (host_pos != std::string::npos) {
+            size_t p = host_pos + std::char_traits<char>::length("music.apple.com/");
+            size_t slash = item.play_url.find('/', p);
+            if (slash != std::string::npos && slash - p == 2 &&
+                std::isalpha(static_cast<unsigned char>(item.play_url[p])) &&
+                std::isalpha(static_cast<unsigned char>(item.play_url[p + 1]))) {
+                item.extra["storefront"] = toLowerAscii(item.play_url.substr(p, 2));
+            }
+        }
+    }
     if (item.extra.value("video_id", "").empty() && !item.play_url.empty()) {
         std::string vid = extractYouTubeVideoId(item.play_url);
         if (!vid.empty()) item.extra["video_id"] = vid;
@@ -265,16 +277,14 @@ void CurationEngine::initializeOnLoad() {
 
         auto cfg = ctx_.loadConfig();
         const bool auto_rehydrate = cfg.value("auto_rehydrate_on_load", true);
-        const bool auto_pull = cfg.value("auto_pull_remote", false);
+        const bool auto_pull = cfg.value("auto_pull_remote", true);
 
         ArchiveRehydrator::loadCachedIndex(last_paths_.curation_dir, archive_);
         loadPersistedLocalStateLocked(last_paths_.curation_dir);
 
         if (auto_rehydrate) {
-            if (auto_pull && ctx_.jobs()) {
-                should_bg_pull = true;
-            } else if (fs::exists(last_paths_.obsidian_vault_dir, ec) ||
-                       fs::exists(last_paths_.music_daily_dir, ec)) {
+            if (fs::exists(last_paths_.obsidian_vault_dir, ec) ||
+                fs::exists(last_paths_.music_daily_dir, ec)) {
                 std::string err;
                 bool cache_hit = false;
                 ArchiveRehydrator::rehydrate(last_paths_.obsidian_vault_dir,
@@ -287,6 +297,9 @@ void CurationEngine::initializeOnLoad() {
                 last_cache_hit_ = cache_hit;
                 last_rehydrate_time_ = currentShanghaiDate();
             }
+            if (auto_pull && ctx_.jobs()) {
+                should_bg_pull = true;
+            }
         }
         loaded_vocabs = archive_.vocab_cards;
     }
@@ -297,22 +310,32 @@ void CurationEngine::initializeOnLoad() {
 
     if (should_bg_pull && ctx_.jobs()) {
         omnidesk::JobSpec spec;
-        spec.title = "同步并回灌 AI 策展历史归档";
+        spec.title = "同步 GitHub 双仓并回灌 AI 策展归档";
         spec.plugin_id = "plugin-ai-curator";
         spec.kind = "curation.rehydrate";
+        const auto alive = alive_;
         ctx_.submitJob(std::move(spec),
-                       [this](omnidesk::JobHandle& job, std::string& error) -> bool {
-                           if (job.isCancelled()) return false;
-                           job.reportProgress(0.2f, "正在同步双仓并回灌历史归档…");
+                       [this, alive](omnidesk::JobHandle& job, std::string& error) -> bool {
+                           // Short grace window so ephemeral CLI smoke-loads exit cleanly without spawning git fetch
+                           for (int i = 0; i < 6; ++i) {
+                               if (job.isCancelled() || !alive->load(std::memory_order_acquire)) {
+                                   return false;
+                               }
+                               std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                           }
+                           if (job.isCancelled() || !alive->load(std::memory_order_acquire)) {
+                               return false;
+                           }
+                           job.reportProgress(0.2f, "正在从 GitHub 同步双仓最新推荐…");
                            auto res = actionBootstrapAndRehydrate({
                                {"pull_remote", true},
-                               {"clone_if_missing", false},
+                               {"clone_if_missing", true},
                            });
                            if (!res.ok) {
                                error = res.error;
                                return false;
                            }
-                           job.reportProgress(1.0f, "历史归档回灌完成");
+                           job.reportProgress(1.0f, "GitHub 归档同步与回灌完成");
                            return true;
                        });
     }
@@ -320,6 +343,7 @@ void CurationEngine::initializeOnLoad() {
 }
 
 void CurationEngine::shutdown() {
+    alive_->store(false, std::memory_order_release);
     if (scheduler_) {
         scheduler_->shutdown();
     }
@@ -601,6 +625,7 @@ omnidesk::CapabilityResult CurationEngine::handleRecommendFeed(const nlohmann::j
         return actionRunDailyWorkflows(req);
     }
     if (action == "cancel_daily_workflows") return actionCancelDailyWorkflows(req);
+    if (action == "sync_github") return actionSyncGitHub(req);
     return makeError("unknown_action", "Unsupported recommend.feed.v1 action: " + action);
 }
 
@@ -616,6 +641,7 @@ omnidesk::CapabilityResult CurationEngine::handleAiCuration(const nlohmann::json
         return actionRunDailyWorkflows(req);
     }
     if (action == "cancel_daily_workflows") return actionCancelDailyWorkflows(req);
+    if (action == "sync_github") return actionSyncGitHub(req);
     if (action == "rehydrate_archive") return actionBootstrapAndRehydrate(req);
     if (action == "curate_interactive") {
         const std::string prompt = trim(req.value("user_prompt", req.value("prompt", "")));
@@ -635,7 +661,7 @@ omnidesk::CapabilityResult CurationEngine::handleAiCuration(const nlohmann::json
             {"title", req.value("title", "AI 灵感推荐 · " + utf8Truncate(prompt, 32))},
             {"user_prompt", prompt},
             {"media_items", search_res.data.value("media_items", nlohmann::json::array())},
-            {"text_items", search_res.data.value("text_items", nlohmann::json::array())},
+            {"text_items", search_res.data.value("text_items", search_res.data.value("text_items", nlohmann::json::array()))},
         };
         return actionPushInteractiveSet(push_req);
     }
@@ -647,8 +673,9 @@ omnidesk::CapabilityResult CurationEngine::actionBootstrapAndRehydrate(const nlo
     const RepoPaths paths = GitMirror::resolveRepoPaths(&ctx_, &req);
     auto cfg = ctx_.loadConfig();
     const bool pull_remote = req.contains("pull_remote")
-                                 ? req.value("pull_remote", false)
-                                 : cfg.value("auto_pull_remote", false);
+                                 ? req.value("pull_remote", true)
+                                 : cfg.value("auto_pull_remote", true);
+    const bool push_remote = req.value("push_remote", false);
     const bool clone_if_missing = req.value("clone_if_missing", false);
     const bool force_full = req.value("force_full", false);
     const bool sync_vocab = req.value("sync_vocab", true);
@@ -657,6 +684,17 @@ omnidesk::CapabilityResult CurationEngine::actionBootstrapAndRehydrate(const nlo
         paths.obsidian_vault_dir, kObsidianVaultRemoteUrl, clone_if_missing, pull_remote);
     RepoSyncStatus mus_sync = GitMirror::syncRepo(
         paths.music_daily_dir, kMusicDailyRemoteUrl, clone_if_missing, pull_remote);
+
+    RepoPushStatus obs_push;
+    RepoPushStatus mus_push;
+    if (push_remote) {
+        if (obs_sync.exists && obs_sync.is_git_repo && obs_sync.error.empty()) {
+            obs_push = GitMirror::pushRepo(paths.obsidian_vault_dir, "main");
+        }
+        if (mus_sync.exists && mus_sync.is_git_repo && mus_sync.error.empty()) {
+            mus_push = GitMirror::pushRepo(paths.music_daily_dir, "main");
+        }
+    }
 
     HydratedArchive hydrated;
     {
@@ -721,6 +759,12 @@ omnidesk::CapabilityResult CurationEngine::actionBootstrapAndRehydrate(const nlo
             {"cache_hit", cache_hit},
             {"elapsed_ms", elapsed_ms},
         };
+        if (push_remote) {
+            result_data["git_push"] = {
+                {"obsidian_vault", obs_push.toJson()},
+                {"music_daily", mus_push.toJson()},
+            };
+        }
     }
 
     if (sync_vocab) {
@@ -1817,6 +1861,14 @@ omnidesk::CapabilityResult CurationEngine::actionDailyStatus(const nlohmann::jso
         return makeError("scheduler_unavailable", "DailyWorkflowScheduler is not initialized.");
     }
     nlohmann::json st = scheduler_->inspectStatus(paths);
+    if (req.value("sync_remote", false) &&
+        st.value("git_sync_enabled", true) &&
+        !st.value("running", false)) {
+        nlohmann::json sync_res =
+            scheduler_->syncGitHubRepos(paths, false, req.value("force_sync", false));
+        st = scheduler_->inspectStatus(paths);
+        st["git_sync"] = std::move(sync_res);
+    }
 
     // If today's repo targets already exist but archive_ doesn't index today yet, refresh incrementally
     const std::string today = st.value("business_date", "");
@@ -1831,7 +1883,9 @@ omnidesk::CapabilityResult CurationEngine::actionDailyStatus(const nlohmann::jso
         }
         if (need_rehydrate) {
             rehydrateLocalIncremental(paths);
+            nlohmann::json prev_git = st.value("git_sync", nlohmann::json::object());
             st = scheduler_->inspectStatus(paths);
+            if (!prev_git.empty()) st["git_sync"] = std::move(prev_git);
         }
     }
 
@@ -1862,6 +1916,29 @@ omnidesk::CapabilityResult CurationEngine::actionCancelDailyWorkflows(const nloh
         return makeError("scheduler_unavailable", "DailyWorkflowScheduler is not initialized.");
     }
     return scheduler_->cancelWorkflows();
+}
+
+omnidesk::CapabilityResult CurationEngine::actionSyncGitHub(const nlohmann::json& req) {
+    const RepoPaths paths = GitMirror::resolveRepoPaths(&ctx_, &req);
+    if (!scheduler_) {
+        return makeError("scheduler_unavailable", "DailyWorkflowScheduler is not initialized.");
+    }
+    if (req.value("clone_if_missing", false)) {
+        (void)GitMirror::syncRepo(paths.obsidian_vault_dir, kObsidianVaultRemoteUrl, true, false);
+        (void)GitMirror::syncRepo(paths.music_daily_dir, kMusicDailyRemoteUrl, true, false);
+    }
+    const bool push_remote = req.value("push_remote", true);
+    nlohmann::json sync_data = scheduler_->syncGitHubRepos(paths, push_remote, true);
+    rehydrateLocalIncremental(paths);
+    sync_data["scheduler"] = scheduler_->inspectStatus(paths);
+
+    omnidesk::CapabilityResult res;
+    res.ok = sync_data.value("ok", true);
+    if (!res.ok) {
+        res.error = sync_data.value("summary", "GitHub sync failed");
+    }
+    res.data = std::move(sync_data);
+    return res;
 }
 
 // --- Domain query methods ---

@@ -1,5 +1,6 @@
 #include "omnidesk/image_cache.hpp"
 
+#include <SDL.h>
 #include <borealis/core/application.hpp>
 #include <borealis/core/logger.hpp>
 #include <borealis/core/thread.hpp>
@@ -7,10 +8,16 @@
 #include <lunasvg.h>
 #include <openssl/evp.h>
 #include <stb_image.h>
+#ifdef OMNIDESK_HAS_TURBOJPEG
+#include <turbojpeg.h>
+#endif
 #include <webp/decode.h>
+#include <yoga/Yoga.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
@@ -27,6 +34,18 @@ namespace fs = std::filesystem;
 namespace omnidesk {
 
 namespace {
+
+thread_local CURL* g_worker_curl = nullptr;
+std::atomic<bool> g_ui_wake_pending{false};
+
+void wakeSdlEventLoopOnce() {
+    if (SDL_WasInit(SDL_INIT_EVENTS) == 0) return;
+    static const Uint32 kWakeType = SDL_RegisterEvents(1);
+    if (kWakeType == static_cast<Uint32>(-1)) return;
+    SDL_Event ev{};
+    ev.type = kWakeType;
+    SDL_PushEvent(&ev);
+}
 
 void ensureCurlGlobalInit() {
     static std::once_flag once;
@@ -62,6 +81,83 @@ std::string sha256Hex(const std::string& input) {
     return {};
 }
 
+bool computeScaledSize(int src_w, int src_h, int max_w, int max_h, int& out_w, int& out_h) {
+    out_w = src_w;
+    out_h = src_h;
+    if (src_w <= 0 || src_h <= 0 || (max_w <= 0 && max_h <= 0)) {
+        return false;
+    }
+    const double sx = (max_w > 0 && src_w > max_w)
+                          ? (static_cast<double>(max_w) / static_cast<double>(src_w))
+                          : 1.0;
+    const double sy = (max_h > 0 && src_h > max_h)
+                          ? (static_cast<double>(max_h) / static_cast<double>(src_h))
+                          : 1.0;
+    const double scale = std::min(sx, sy);
+    if (scale >= 0.999) {
+        return false;
+    }
+    out_w = std::max(1, static_cast<int>(std::lround(static_cast<double>(src_w) * scale)));
+    out_h = std::max(1, static_cast<int>(std::lround(static_cast<double>(src_h) * scale)));
+    if (max_w > 0 && out_w > max_w) out_w = max_w;
+    if (max_h > 0 && out_h > max_h) out_h = max_h;
+    return out_w < src_w || out_h < src_h;
+}
+
+std::vector<uint8_t> downsampleRgbaArea(const uint8_t* src,
+                                        int src_w,
+                                        int src_h,
+                                        int dst_w,
+                                        int dst_h) {
+    std::vector<uint8_t> dst(static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h) * 4u);
+    for (int dy = 0; dy < dst_h; ++dy) {
+        const int y0 = static_cast<int>((static_cast<int64_t>(dy) * src_h) / dst_h);
+        const int y1 = std::max(
+            y0 + 1,
+            std::min(src_h, static_cast<int>(((static_cast<int64_t>(dy) + 1) * src_h + dst_h - 1) / dst_h)));
+        uint8_t* dst_row = dst.data() + static_cast<size_t>(dy) * static_cast<size_t>(dst_w) * 4u;
+        for (int dx = 0; dx < dst_w; ++dx) {
+            const int x0 = static_cast<int>((static_cast<int64_t>(dx) * src_w) / dst_w);
+            const int x1 = std::max(
+                x0 + 1,
+                std::min(src_w, static_cast<int>(((static_cast<int64_t>(dx) + 1) * src_w + dst_w - 1) / dst_w)));
+            uint32_t r = 0, g = 0, b = 0, a = 0;
+            uint32_t count = 0;
+            for (int sy = y0; sy < y1; ++sy) {
+                const uint8_t* p =
+                    src + (static_cast<size_t>(sy) * static_cast<size_t>(src_w) + static_cast<size_t>(x0)) * 4u;
+                for (int sx = x0; sx < x1; ++sx, p += 4) {
+                    r += p[0];
+                    g += p[1];
+                    b += p[2];
+                    a += p[3];
+                    ++count;
+                }
+            }
+            const uint32_t half = count / 2u;
+            uint8_t* out_px = dst_row + static_cast<size_t>(dx) * 4u;
+            out_px[0] = static_cast<uint8_t>((r + half) / count);
+            out_px[1] = static_cast<uint8_t>((g + half) / count);
+            out_px[2] = static_cast<uint8_t>((b + half) / count);
+            out_px[3] = static_cast<uint8_t>((a + half) / count);
+        }
+    }
+    return dst;
+}
+
+int quantizeDimHint(int v) {
+    if (v <= 0) return 0;
+    if (v <= 64) return 64;
+    return ((v + 63) / 64) * 64;
+}
+
+std::string makeMemCacheKey(const std::string& raw_key, int max_w, int max_h) {
+    const int qw = quantizeDimHint(max_w);
+    const int qh = quantizeDimHint(max_h);
+    if (qw <= 0 && qh <= 0) return raw_key;
+    return raw_key + "@" + std::to_string(qw) + "x" + std::to_string(qh);
+}
+
 struct CurlWriteBuf {
     std::vector<uint8_t>* out = nullptr;
     size_t max_bytes = 32ull * 1024ull * 1024ull;
@@ -75,15 +171,6 @@ size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     const auto* u8 = reinterpret_cast<const uint8_t*>(ptr);
     wb->out->insert(wb->out->end(), u8, u8 + total);
     return total;
-}
-
-int curlProgressCallback(void* clientp,
-                         curl_off_t /*dltotal*/,
-                         curl_off_t /*dlnow*/,
-                         curl_off_t /*ultotal*/,
-                         curl_off_t /*ulnow*/) {
-    auto* cancel = static_cast<CancelToken*>(clientp);
-    return (cancel && cancel->isCancelled()) ? 1 : 0;
 }
 
 bool readFileBytes(const fs::path& p, std::vector<uint8_t>& out) {
@@ -333,7 +420,75 @@ struct ImageCache::Impl {
         std::function<void()> fn;
     };
 
+    struct CoalescedWaiter {
+        std::shared_ptr<CancelToken> cancel;
+        int max_w = 0;
+        int max_h = 0;
+        std::function<void(DecodedImage)> on_done;
+    };
+
+    struct InFlightFetch {
+        std::shared_ptr<CancelToken> shared_cancel = CancelToken::create();
+        std::vector<CoalescedWaiter> waiters;
+    };
+
+    struct ProgressCtx {
+        Impl* impl = nullptr;
+        InFlightFetch* entry = nullptr;
+    };
+
+    static void curlShareLockCb(CURL* /*handle*/,
+                                curl_lock_data data,
+                                curl_lock_access /*access*/,
+                                void* userptr) {
+        auto* self = static_cast<Impl*>(userptr);
+        const size_t idx = static_cast<size_t>(data);
+        if (self && idx < self->share_mutexes.size()) {
+            self->share_mutexes[idx].lock();
+        }
+    }
+
+    static void curlShareUnlockCb(CURL* /*handle*/,
+                                  curl_lock_data data,
+                                  void* userptr) {
+        auto* self = static_cast<Impl*>(userptr);
+        const size_t idx = static_cast<size_t>(data);
+        if (self && idx < self->share_mutexes.size()) {
+            self->share_mutexes[idx].unlock();
+        }
+    }
+
+    static int curlCoalescedProgressCb(void* clientp,
+                                       curl_off_t /*dltotal*/,
+                                       curl_off_t /*dlnow*/,
+                                       curl_off_t /*ultotal*/,
+                                       curl_off_t /*ulnow*/) {
+        auto* ctx = static_cast<ProgressCtx*>(clientp);
+        if (!ctx || !ctx->impl || !ctx->entry) return 0;
+        if (ctx->entry->shared_cancel->isCancelled()) return 1;
+        std::lock_guard lk(ctx->impl->inflight_mutex);
+        if (ctx->entry->waiters.empty()) return 0;
+        for (const auto& w : ctx->entry->waiters) {
+            if (!w.cancel || !w.cancel->isCancelled()) {
+                return 0;
+            }
+        }
+        ctx->entry->shared_cancel->cancel();
+        return 1;
+    }
+
     explicit Impl(ImageCacheConfig initial) : cfg(std::move(initial)) {
+        ensureCurlGlobalInit();
+        curl_share = curl_share_init();
+        if (curl_share) {
+            curl_share_setopt(curl_share, CURLSHOPT_USERDATA, this);
+            curl_share_setopt(curl_share, CURLSHOPT_LOCKFUNC, &Impl::curlShareLockCb);
+            curl_share_setopt(curl_share, CURLSHOPT_UNLOCKFUNC, &Impl::curlShareUnlockCb);
+            curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+            curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+            curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+        }
+
         std::error_code ec;
         if (!cfg.cache_dir.empty()) {
             fs::create_directories(cfg.cache_dir, ec);
@@ -343,6 +498,10 @@ struct ImageCache::Impl {
 
     ~Impl() {
         stopWorkers();
+        if (curl_share) {
+            curl_share_cleanup(curl_share);
+            curl_share = nullptr;
+        }
     }
 
     void startWorkers() {
@@ -369,6 +528,15 @@ struct ImageCache::Impl {
                 queue.pop();
             }
         }
+        {
+            std::lock_guard lk(inflight_mutex);
+            for (auto& [_, entry] : inflight_map) {
+                if (entry && entry->shared_cancel) {
+                    to_cancel.push_back(entry->shared_cancel);
+                }
+            }
+            inflight_map.clear();
+        }
         dropped.clear();
         for (auto& tok : to_cancel) {
             tok->cancel();
@@ -386,12 +554,12 @@ struct ImageCache::Impl {
         workers.clear();
     }
 
-    void submit(std::shared_ptr<CancelToken> cancel, std::function<void()> fn) {
+    bool submit(std::shared_ptr<CancelToken> cancel, std::function<void()> fn) {
         {
             std::lock_guard lock(q_mutex);
             if (stopping) {
                 if (cancel) cancel->cancel();
-                return;
+                return false;
             }
             const uint64_t id = next_task_id++;
             if (cancel) {
@@ -400,9 +568,23 @@ struct ImageCache::Impl {
             queue.push(TaskItem{id, std::move(cancel), std::move(fn)});
         }
         q_cv.notify_one();
+        return true;
     }
 
     void workerLoop() {
+        ensureCurlGlobalInit();
+        CURL* local_curl = curl_easy_init();
+        g_worker_curl = local_curl;
+        struct WorkerCurlGuard {
+            CURL* handle = nullptr;
+            ~WorkerCurlGuard() {
+                g_worker_curl = nullptr;
+                if (handle) {
+                    curl_easy_cleanup(handle);
+                }
+            }
+        } curl_guard{local_curl};
+
         while (true) {
             TaskItem item;
             {
@@ -426,6 +608,79 @@ struct ImageCache::Impl {
         }
     }
 
+    size_t ensureDiskUsageInitializedLocked(const fs::path& dir) const {
+        const std::string dir_str = dir.string();
+        if (disk_usage_initialized.load(std::memory_order_acquire) &&
+            tracked_cache_dir == dir_str) {
+            return disk_usage_bytes.load(std::memory_order_relaxed);
+        }
+        std::error_code ec;
+        size_t total = 0;
+        if (!dir_str.empty() && fs::exists(dir, ec)) {
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
+                if (!entry.is_regular_file(ec)) continue;
+                if (entry.path().extension() != ".bin") continue;
+                total += static_cast<size_t>(entry.file_size(ec));
+            }
+        }
+        tracked_cache_dir = dir_str;
+        disk_usage_bytes.store(total, std::memory_order_release);
+        disk_usage_initialized.store(true, std::memory_order_release);
+        return total;
+    }
+
+    void completeCoalescedFetch(const std::string& raw_key,
+                                const std::shared_ptr<InFlightFetch>& entry,
+                                bool raw_ok,
+                                const std::vector<uint8_t>& raw_bytes,
+                                const std::string& fetch_error) {
+        std::unordered_map<std::string, DecodedImage> decoded_buckets;
+        while (true) {
+            std::vector<CoalescedWaiter> batch;
+            {
+                std::lock_guard lk(inflight_mutex);
+                if (entry->waiters.empty()) {
+                    auto it = inflight_map.find(raw_key);
+                    if (it != inflight_map.end() && it->second == entry) {
+                        inflight_map.erase(it);
+                    }
+                    break;
+                }
+                batch = std::move(entry->waiters);
+                entry->waiters.clear();
+            }
+
+            for (auto& w : batch) {
+                if (w.cancel && w.cancel->isCancelled()) continue;
+                DecodedImage res;
+                if (!raw_ok) {
+                    res.error = fetch_error;
+                } else {
+                    const std::string mkey = makeMemCacheKey(raw_key, w.max_w, w.max_h);
+                    if (auto dit = decoded_buckets.find(mkey); dit != decoded_buckets.end()) {
+                        res = dit->second;
+                    } else if (auto mhit = getMemCached(mkey)) {
+                        res = std::move(*mhit);
+                        decoded_buckets.emplace(mkey, res);
+                    } else {
+                        res = ImageCache::decodeBytes(
+                            raw_bytes.data(), raw_bytes.size(), w.max_w, w.max_h);
+                        if (res.ok) {
+                            putMemCached(mkey, res);
+                        }
+                        decoded_buckets.emplace(mkey, res);
+                    }
+                }
+                if (!(w.cancel && w.cancel->isCancelled()) && w.on_done) {
+                    w.on_done(std::move(res));
+                }
+            }
+        }
+    }
+
+    CURLSH* curl_share = nullptr;
+    std::array<std::mutex, CURL_LOCK_DATA_LAST> share_mutexes;
+
     mutable std::mutex cfg_mutex;
     ImageCacheConfig cfg;
 
@@ -433,7 +688,13 @@ struct ImageCache::Impl {
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> domain_headers;
 
     mutable std::mutex disk_mutex;
+    mutable std::atomic<size_t> disk_usage_bytes{0};
+    mutable std::atomic<bool> disk_usage_initialized{false};
+    mutable std::string tracked_cache_dir;
     std::atomic<uint64_t> tmp_seq{1};
+
+    std::mutex inflight_mutex;
+    std::unordered_map<std::string, std::shared_ptr<InFlightFetch>> inflight_map;
 
     static constexpr size_t kMaxMemCacheBytes = 96ull * 1024ull * 1024ull;
     static constexpr size_t kMaxMemEntryBytes = 16ull * 1024ull * 1024ull;
@@ -494,11 +755,20 @@ ImageCache::~ImageCache() {
 }
 
 void ImageCache::configure(const ImageCacheConfig& cfg) {
-    std::lock_guard lock(impl_->cfg_mutex);
-    impl_->cfg = cfg;
-    std::error_code ec;
-    if (!impl_->cfg.cache_dir.empty()) {
-        fs::create_directories(impl_->cfg.cache_dir, ec);
+    bool dir_changed = false;
+    {
+        std::lock_guard lock(impl_->cfg_mutex);
+        dir_changed = (impl_->cfg.cache_dir != cfg.cache_dir);
+        impl_->cfg = cfg;
+        std::error_code ec;
+        if (!impl_->cfg.cache_dir.empty()) {
+            fs::create_directories(impl_->cfg.cache_dir, ec);
+        }
+    }
+    if (dir_changed) {
+        std::lock_guard dlock(impl_->disk_mutex);
+        impl_->disk_usage_initialized.store(false, std::memory_order_release);
+        impl_->tracked_cache_dir.clear();
     }
 }
 
@@ -512,6 +782,13 @@ void ImageCache::shutdown() {
 }
 
 DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
+    return decodeBytes(data, size, 0, 0);
+}
+
+DecodedImage ImageCache::decodeBytes(const uint8_t* data,
+                                     size_t size,
+                                     int max_width,
+                                     int max_height) {
     DecodedImage res;
     if (!data || size == 0) {
         res.error = "empty image buffer";
@@ -523,18 +800,41 @@ DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
     }
 
     if (isWebpMagic(data, size)) {
-        int w = 0, h = 0;
-        uint8_t* rgba = WebPDecodeRGBA(data, size, &w, &h);
-        if (!rgba || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
-            if (rgba) WebPFree(rgba);
-            res.error = "WebPDecodeRGBA failed";
+        WebPDecoderConfig config;
+        if (!WebPInitDecoderConfig(&config)) {
+            res.error = "WebPInitDecoderConfig failed";
             return res;
         }
-        const size_t byte_len = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
-        res.rgba.assign(rgba, rgba + byte_len);
-        WebPFree(rgba);
-        res.width = w;
-        res.height = h;
+        if (WebPGetFeatures(data, size, &config.input) != VP8_STATUS_OK ||
+            config.input.width <= 0 || config.input.height <= 0 ||
+            config.input.width > 16384 || config.input.height > 16384) {
+            res.error = "WebPGetFeatures failed";
+            return res;
+        }
+        int out_w = config.input.width;
+        int out_h = config.input.height;
+        if (computeScaledSize(config.input.width, config.input.height,
+                              max_width, max_height, out_w, out_h)) {
+            config.options.use_scaling = 1;
+            config.options.scaled_width = out_w;
+            config.options.scaled_height = out_h;
+        }
+        const size_t byte_len = static_cast<size_t>(out_w) * static_cast<size_t>(out_h) * 4u;
+        res.rgba.resize(byte_len);
+        config.output.colorspace = MODE_RGBA;
+        config.output.u.RGBA.rgba = res.rgba.data();
+        config.output.u.RGBA.stride = out_w * 4;
+        config.output.u.RGBA.size = byte_len;
+        config.output.is_external_memory = 1;
+        if (WebPDecode(data, size, &config) != VP8_STATUS_OK) {
+            WebPFreeDecBuffer(&config.output);
+            res.rgba.clear();
+            res.error = "WebPDecode failed";
+            return res;
+        }
+        WebPFreeDecBuffer(&config.output);
+        res.width = out_w;
+        res.height = out_h;
         res.ok = true;
         return res;
     }
@@ -551,8 +851,18 @@ DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
             dw = 256.0;
             dh = 256.0;
         }
-        const double max_dim = std::max(dw, dh);
-        const double scale = max_dim > 512.0 ? (512.0 / max_dim) : (max_dim < 64.0 ? (128.0 / max_dim) : 1.0);
+        double scale = 1.0;
+        if (max_width > 0 || max_height > 0) {
+            const double cap_w = (max_width > 0) ? static_cast<double>(max_width) : 512.0;
+            const double cap_h = (max_height > 0) ? static_cast<double>(max_height) : 512.0;
+            scale = std::min(cap_w / dw, cap_h / dh);
+            if (scale > 1.0 && std::max(dw, dh) >= 64.0) {
+                scale = 1.0;
+            }
+        } else {
+            const double max_dim = std::max(dw, dh);
+            scale = max_dim > 512.0 ? (512.0 / max_dim) : (max_dim < 64.0 ? (128.0 / max_dim) : 1.0);
+        }
         const uint32_t w = std::max<uint32_t>(1, static_cast<uint32_t>(dw * scale + 0.5));
         const uint32_t h = std::max<uint32_t>(1, static_cast<uint32_t>(dh * scale + 0.5));
         lunasvg::Bitmap bmp = doc->renderToBitmap(w, h);
@@ -569,6 +879,79 @@ DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
         return res;
     }
 
+#ifdef OMNIDESK_HAS_TURBOJPEG
+    if (size >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) {
+        struct ThreadLocalTj {
+            tjhandle handle = nullptr;
+            ThreadLocalTj() : handle(tjInitDecompress()) {}
+            ~ThreadLocalTj() {
+                if (handle) {
+                    tjDestroy(handle);
+                    handle = nullptr;
+                }
+            }
+        };
+        thread_local ThreadLocalTj tl_tj;
+        if (tl_tj.handle) {
+            int jw = 0, jh = 0, subsamp = 0, colorspace = 0;
+            if (tjDecompressHeader3(tl_tj.handle, data, static_cast<unsigned long>(size),
+                                    &jw, &jh, &subsamp, &colorspace) == 0 &&
+                jw > 0 && jh > 0 && jw <= 16384 && jh <= 16384) {
+                int decode_w = jw;
+                int decode_h = jh;
+                int target_w = jw;
+                int target_h = jh;
+                const bool want_downscale =
+                    computeScaledSize(jw, jh, max_width, max_height, target_w, target_h);
+                if (want_downscale) {
+                    int nfactors = 0;
+                    const tjscalingfactor* factors = tjGetScalingFactors(&nfactors);
+                    if (factors && nfactors > 0) {
+                        int best_w = jw;
+                        int best_h = jh;
+                        for (int i = 0; i < nfactors; ++i) {
+                            const int sw = TJSCALED(jw, factors[i]);
+                            const int sh = TJSCALED(jh, factors[i]);
+                            if (sw >= target_w && sh >= target_h &&
+                                (sw < best_w || sh < best_h)) {
+                                best_w = sw;
+                                best_h = sh;
+                            }
+                        }
+                        decode_w = best_w;
+                        decode_h = best_h;
+                    }
+                }
+
+                std::vector<uint8_t> decoded(
+                    static_cast<size_t>(decode_w) * static_cast<size_t>(decode_h) * 4u);
+                if (tjDecompress2(tl_tj.handle,
+                                  data,
+                                  static_cast<unsigned long>(size),
+                                  decoded.data(),
+                                  decode_w,
+                                  decode_w * 4,
+                                  decode_h,
+                                  TJPF_RGBA,
+                                  TJFLAG_FASTDCT) == 0) {
+                    if (want_downscale && (decode_w > target_w || decode_h > target_h)) {
+                        res.rgba =
+                            downsampleRgbaArea(decoded.data(), decode_w, decode_h, target_w, target_h);
+                        res.width = target_w;
+                        res.height = target_h;
+                    } else {
+                        res.rgba = std::move(decoded);
+                        res.width = decode_w;
+                        res.height = decode_h;
+                    }
+                    res.ok = true;
+                    return res;
+                }
+            }
+        }
+    }
+#endif
+
     int w = 0, h = 0, channels = 0;
     unsigned char* rgba = stbi_load_from_memory(data, static_cast<int>(size), &w, &h, &channels, 4);
     if (!rgba || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
@@ -576,11 +959,20 @@ DecodedImage ImageCache::decodeBytes(const uint8_t* data, size_t size) {
         res.error = "stbi_load_from_memory failed";
         return res;
     }
-    const size_t byte_len = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
-    res.rgba.assign(rgba, rgba + byte_len);
-    stbi_image_free(rgba);
-    res.width = w;
-    res.height = h;
+    int out_w = w;
+    int out_h = h;
+    if (computeScaledSize(w, h, max_width, max_height, out_w, out_h)) {
+        res.rgba = downsampleRgbaArea(rgba, w, h, out_w, out_h);
+        stbi_image_free(rgba);
+        res.width = out_w;
+        res.height = out_h;
+    } else {
+        const size_t byte_len = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+        res.rgba.assign(rgba, rgba + byte_len);
+        stbi_image_free(rgba);
+        res.width = w;
+        res.height = h;
+    }
     res.ok = true;
     return res;
 }
@@ -595,6 +987,12 @@ std::string ImageCache::normalizeImageUrl(const std::string& raw, const std::str
     replaceAllInPlace(u, "&#38;", "&");
     replaceAllInPlace(u, "&#x26;", "&");
     replaceAllInPlace(u, "&#X26;", "&");
+    if (u.find("{w}") != std::string::npos || u.find("{h}") != std::string::npos) {
+        replaceAllInPlace(u, "{w}", "500");
+        replaceAllInPlace(u, "{h}", "500");
+        replaceAllInPlace(u, "{c}", "bb");
+        replaceAllInPlace(u, "{f}", "jpg");
+    }
 
     if (startsWithNoCase(u, "data:") || startsWithNoCase(u, "file://")) {
         return u;
@@ -723,12 +1121,18 @@ bool ImageCache::putCachedRawBytes(const std::string& key, const uint8_t* data, 
     const auto cfg = config();
     if (cfg.cache_dir.empty()) return false;
 
+    bool need_evict = false;
     {
         std::lock_guard lock(impl_->disk_mutex);
         std::error_code ec;
         fs::create_directories(cfg.cache_dir, ec);
         const fs::path dir(cfg.cache_dir);
+        size_t current_usage = impl_->ensureDiskUsageInitializedLocked(dir);
         const fs::path final_path = dir / (key + ".bin");
+        size_t old_size = 0;
+        if (fs::exists(final_path, ec) && fs::is_regular_file(final_path, ec)) {
+            old_size = static_cast<size_t>(fs::file_size(final_path, ec));
+        }
         const fs::path tmp_path =
             dir / (key + ".tmp." + std::to_string(impl_->tmp_seq.fetch_add(1)));
 
@@ -747,8 +1151,13 @@ bool ImageCache::putCachedRawBytes(const std::string& key, const uint8_t* data, 
             fs::remove(tmp_path, ec);
             return false;
         }
+        current_usage = (old_size <= current_usage ? (current_usage - old_size) : 0) + size;
+        impl_->disk_usage_bytes.store(current_usage, std::memory_order_release);
+        need_evict = (current_usage > cfg.max_disk_bytes);
     }
-    evictIfNeeded();
+    if (need_evict) {
+        evictIfNeeded();
+    }
     return true;
 }
 
@@ -756,25 +1165,27 @@ size_t ImageCache::diskUsageBytes() const {
     const auto cfg = config();
     if (cfg.cache_dir.empty()) return 0;
     std::lock_guard lock(impl_->disk_mutex);
-    std::error_code ec;
-    if (!fs::exists(cfg.cache_dir, ec)) return 0;
-
-    size_t total = 0;
-    for (const auto& entry : fs::directory_iterator(cfg.cache_dir, ec)) {
-        if (!entry.is_regular_file(ec)) continue;
-        if (entry.path().extension() != ".bin") continue;
-        total += static_cast<size_t>(entry.file_size(ec));
-    }
-    return total;
+    return impl_->ensureDiskUsageInitializedLocked(fs::path(cfg.cache_dir));
 }
 
 size_t ImageCache::evictIfNeeded() {
     const auto cfg = config();
     if (cfg.cache_dir.empty()) return 0;
 
+    if (impl_->disk_usage_initialized.load(std::memory_order_acquire) &&
+        impl_->disk_usage_bytes.load(std::memory_order_relaxed) <= cfg.max_disk_bytes) {
+        return 0;
+    }
+
     std::lock_guard lock(impl_->disk_mutex);
+    const fs::path dir(cfg.cache_dir);
     std::error_code ec;
-    if (!fs::exists(cfg.cache_dir, ec)) return 0;
+    if (!fs::exists(dir, ec)) {
+        impl_->tracked_cache_dir = cfg.cache_dir;
+        impl_->disk_usage_bytes.store(0, std::memory_order_release);
+        impl_->disk_usage_initialized.store(true, std::memory_order_release);
+        return 0;
+    }
 
     struct DiskEntry {
         fs::path path;
@@ -784,7 +1195,7 @@ size_t ImageCache::evictIfNeeded() {
 
     std::vector<DiskEntry> entries;
     size_t total = 0;
-    for (const auto& entry : fs::directory_iterator(cfg.cache_dir, ec)) {
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
         if (!entry.is_regular_file(ec)) continue;
         if (entry.path().extension() != ".bin") continue;
         DiskEntry item;
@@ -795,20 +1206,31 @@ size_t ImageCache::evictIfNeeded() {
         entries.push_back(std::move(item));
     }
 
-    if (total <= cfg.max_disk_bytes) return 0;
+    impl_->tracked_cache_dir = cfg.cache_dir;
+    if (total <= cfg.max_disk_bytes) {
+        impl_->disk_usage_bytes.store(total, std::memory_order_release);
+        impl_->disk_usage_initialized.store(true, std::memory_order_release);
+        return 0;
+    }
 
     std::sort(entries.begin(), entries.end(), [](const DiskEntry& a, const DiskEntry& b) {
         return a.mtime < b.mtime;
     });
 
+    // Evict slightly below max_disk_bytes (90% low-water mark) so sequential writes do not rescan.
+    const size_t low_water_bytes =
+        (cfg.max_disk_bytes >= 64) ? ((cfg.max_disk_bytes * 9u) / 10u) : cfg.max_disk_bytes;
+
     size_t removed = 0;
     for (const auto& item : entries) {
-        if (total <= cfg.max_disk_bytes) break;
+        if (total <= low_water_bytes) break;
         if (fs::remove(item.path, ec)) {
             total = (item.size <= total) ? (total - item.size) : 0;
             ++removed;
         }
     }
+    impl_->disk_usage_bytes.store(total, std::memory_order_release);
+    impl_->disk_usage_initialized.store(true, std::memory_order_release);
     return removed;
 }
 
@@ -817,6 +1239,16 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
     std::function<void(DecodedImage)> on_done,
     std::unordered_map<std::string, std::string> headers,
     std::shared_ptr<CancelToken> cancel) {
+    return fetchDecoded(std::move(url), std::move(on_done), std::move(headers), std::move(cancel), 0, 0);
+}
+
+std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
+    const std::string& url,
+    std::function<void(DecodedImage)> on_done,
+    std::unordered_map<std::string, std::string> headers,
+    std::shared_ptr<CancelToken> cancel,
+    int max_width,
+    int max_height) {
     if (!cancel) cancel = CancelToken::create();
     const std::string norm_url = normalizeImageUrl(url);
     if (norm_url.empty() || cancel->isCancelled()) {
@@ -828,60 +1260,108 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
         return cancel;
     }
 
-    impl_->submit(cancel, [this, norm_url, headers = std::move(headers),
-                           on_done = std::move(on_done), cancel]() {
-        if (cancel->isCancelled()) return;
-
-        // Fast path: inline data:image/... URI
-        if (startsWithNoCase(norm_url, "data:")) {
+    // Fast path: inline data:image/... URI
+    if (startsWithNoCase(norm_url, "data:")) {
+        impl_->submit(cancel, [norm_url, max_width, max_height,
+                               on_done = std::move(on_done), cancel]() {
+            if (cancel->isCancelled()) return;
             std::vector<uint8_t> bytes = decodeDataUriBytes(norm_url);
             DecodedImage res;
             if (bytes.empty()) {
                 res.error = "empty or invalid data URI";
             } else {
-                res = decodeBytes(bytes.data(), bytes.size());
+                res = decodeBytes(bytes.data(), bytes.size(), max_width, max_height);
             }
             if (!cancel->isCancelled() && on_done) on_done(std::move(res));
+        });
+        return cancel;
+    }
+
+    // Local file:// URI or filesystem absolute path (must NOT match //protocol-relative)
+    const bool is_file_uri = startsWithNoCase(norm_url, "file://");
+    const bool is_abs_path = !norm_url.empty() && norm_url[0] == '/' &&
+                             (norm_url.size() == 1 || norm_url[1] != '/');
+    if (is_file_uri || is_abs_path) {
+        const std::string raw_key = "file:" + norm_url;
+        const std::string mem_key = makeMemCacheKey(raw_key, max_width, max_height);
+        if (auto mem_hit = impl_->getMemCached(mem_key)) {
+            impl_->submit(cancel, [img = std::move(*mem_hit), on_done = std::move(on_done), cancel]() mutable {
+                if (!cancel->isCancelled() && on_done) on_done(std::move(img));
+            });
+            return cancel;
+        }
+
+        std::shared_ptr<Impl::InFlightFetch> inflight;
+        {
+            std::lock_guard lk(impl_->inflight_mutex);
+            auto it = impl_->inflight_map.find(raw_key);
+            if (it != impl_->inflight_map.end() && it->second) {
+                it->second->waiters.push_back(
+                    Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
+                return cancel;
+            }
+            inflight = std::make_shared<Impl::InFlightFetch>();
+            inflight->waiters.push_back(
+                Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
+            impl_->inflight_map[raw_key] = inflight;
+        }
+
+        std::string path_str = norm_url;
+        if (is_file_uri) {
+            std::string raw_file = norm_url.substr(7);
+            if (startsWithNoCase(raw_file, "localhost/")) {
+                raw_file = raw_file.substr(9);
+            }
+            path_str = percentDecodeAscii(raw_file);
+        }
+        if (!impl_->submit(inflight->shared_cancel, [this, raw_key, path_str, inflight]() {
+                std::vector<uint8_t> bytes;
+                const bool ok = !inflight->shared_cancel->isCancelled() && readFileBytes(path_str, bytes);
+                const std::string err = ok ? "" : ("failed to open local image: " + path_str);
+                impl_->completeCoalescedFetch(raw_key, inflight, ok, bytes, err);
+            })) {
+            std::lock_guard lk(impl_->inflight_mutex);
+            impl_->inflight_map.erase(raw_key);
+        }
+        return cancel;
+    }
+
+    auto eff_headers = headersForUrl(norm_url, headers);
+    const std::string raw_key = cacheKeyFor(norm_url, eff_headers);
+    const std::string mem_key = makeMemCacheKey(raw_key, max_width, max_height);
+    if (auto mem_hit = impl_->getMemCached(mem_key)) {
+        impl_->submit(cancel, [img = std::move(*mem_hit), on_done = std::move(on_done), cancel]() mutable {
+            if (!cancel->isCancelled() && on_done) on_done(std::move(img));
+        });
+        return cancel;
+    }
+
+    // In-flight coalescing: merge concurrent identical URL + header requests into a single transfer.
+    std::shared_ptr<Impl::InFlightFetch> inflight;
+    {
+        std::lock_guard lk(impl_->inflight_mutex);
+        auto it = impl_->inflight_map.find(raw_key);
+        if (it != impl_->inflight_map.end() && it->second) {
+            it->second->waiters.push_back(
+                Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
+            return cancel;
+        }
+        inflight = std::make_shared<Impl::InFlightFetch>();
+        inflight->waiters.push_back(
+            Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
+        impl_->inflight_map[raw_key] = inflight;
+    }
+
+    if (!impl_->submit(inflight->shared_cancel,
+                       [this, norm_url, raw_key, eff_headers = std::move(eff_headers), inflight]() mutable {
+        if (inflight->shared_cancel->isCancelled()) {
+            impl_->completeCoalescedFetch(raw_key, inflight, false, {}, "cancelled");
             return;
         }
 
-        // Fast path: local file:// URI or filesystem absolute path (must NOT match //protocol-relative)
-        const bool is_file_uri = startsWithNoCase(norm_url, "file://");
-        const bool is_abs_path = !norm_url.empty() && norm_url[0] == '/' &&
-                                 (norm_url.size() == 1 || norm_url[1] != '/');
-        if (is_file_uri || is_abs_path) {
-            if (auto mem_hit = impl_->getMemCached(norm_url)) {
-                if (!cancel->isCancelled() && on_done) on_done(std::move(*mem_hit));
-                return;
-            }
-            std::string path_str = is_file_uri ? norm_url.substr(7) : norm_url;
-            std::vector<uint8_t> bytes;
-            DecodedImage res;
-            if (!readFileBytes(path_str, bytes)) {
-                res.error = "failed to open local image: " + path_str;
-            } else {
-                res = decodeBytes(bytes.data(), bytes.size());
-                if (res.ok) {
-                    impl_->putMemCached(norm_url, res);
-                }
-            }
-            if (!cancel->isCancelled() && on_done) on_done(std::move(res));
+        if (auto cached = getCachedRawBytes(raw_key)) {
+            impl_->completeCoalescedFetch(raw_key, inflight, true, *cached, "");
             return;
-        }
-
-        auto eff_headers = headersForUrl(norm_url, headers);
-        const std::string key = cacheKeyFor(norm_url, eff_headers);
-        if (auto mem_hit = impl_->getMemCached(key)) {
-            if (!cancel->isCancelled() && on_done) on_done(std::move(*mem_hit));
-            return;
-        }
-        if (auto cached = getCachedRawBytes(key)) {
-            DecodedImage res = decodeBytes(cached->data(), cached->size());
-            if (res.ok) {
-                impl_->putMemCached(key, res);
-                if (!cancel->isCancelled() && on_done) on_done(std::move(res));
-                return;
-            }
         }
 
         const auto cfg = config();
@@ -898,7 +1378,7 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
             if (!ref.empty()) eff_headers["Referer"] = std::move(ref);
         }
         if (!hasHeaderCI("accept")) {
-            eff_headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+            eff_headers["Accept"] = "image/webp,image/png,image/jpeg,image/svg+xml,image/*,*/*;q=0.8";
         }
         std::string user_agent =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -909,6 +1389,8 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
             }
         }
 
+        Impl::ProgressCtx progress_ctx{impl_.get(), inflight.get()};
+
         auto doFetch = [&](const std::string& target_url,
                            std::vector<uint8_t>& out,
                            long& http_code,
@@ -916,7 +1398,15 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
             out.clear();
             http_code = 0;
             curl_err.clear();
-            CURL* curl = curl_easy_init();
+
+            bool temp_handle = false;
+            CURL* curl = g_worker_curl;
+            if (curl) {
+                curl_easy_reset(curl);
+            } else {
+                curl = curl_easy_init();
+                temp_handle = true;
+            }
             if (!curl) {
                 curl_err = "curl_easy_init failed";
                 return CURLE_FAILED_INIT;
@@ -930,27 +1420,46 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
             }
 
             CurlWriteBuf wb{&out};
+            if (impl_->curl_share) {
+                curl_easy_setopt(curl, CURLOPT_SHARE, impl_->curl_share);
+            }
+            std::string target_host;
+            extractUrlSchemeAndHost(target_url, nullptr, &target_host);
+            if (isPrivateOrLocalHost(target_host)) {
+                curl_easy_setopt(curl, CURLOPT_NOPROXY, "*");
+            }
             curl_easy_setopt(curl, CURLOPT_URL, target_url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
+            curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
             curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
             curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 8L);
             curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
             curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(cfg.request_timeout_ms));
             curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
+            curl_easy_setopt(curl, CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS, 250L);
             curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wb);
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgressCallback);
-            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancel.get());
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, &Impl::curlCoalescedProgressCb);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress_ctx);
             if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
 
             CURLcode code = curl_easy_perform(curl);
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
             if (code != CURLE_OK) curl_err = curl_easy_strerror(code);
 
+            // Detach stack pointers before reusing handle on next task.
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, nullptr);
+
             if (header_list) curl_slist_free_all(header_list);
-            curl_easy_cleanup(curl);
+            if (temp_handle) curl_easy_cleanup(curl);
             return code;
         };
 
@@ -960,7 +1469,7 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
         CURLcode code = doFetch(norm_url, downloaded, http_code, curl_err);
 
         // Retry http:// -> https:// for non-LAN hosts if connection or 403/404 failed
-        if (!cancel->isCancelled() &&
+        if (!inflight->shared_cancel->isCancelled() &&
             startsWithNoCase(norm_url, "http://") &&
             (code != CURLE_OK || http_code == 403 || http_code == 404 || downloaded.empty())) {
             std::string host;
@@ -980,25 +1489,27 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
             }
         }
 
-        if (cancel->isCancelled()) return;
+        if (inflight->shared_cancel->isCancelled()) {
+            impl_->completeCoalescedFetch(raw_key, inflight, false, {}, "cancelled");
+            return;
+        }
 
-        DecodedImage res;
         if (code != CURLE_OK) {
-            res.error = "http fetch failed: " + curl_err;
-        } else if (http_code < 200 || http_code >= 300 || downloaded.empty()) {
-            res.error = "unexpected HTTP status: " + std::to_string(http_code);
-        } else {
-            res = decodeBytes(downloaded.data(), downloaded.size());
-            if (res.ok) {
-                impl_->putMemCached(key, res);
-                putCachedRawBytes(key, downloaded.data(), downloaded.size());
-            }
+            impl_->completeCoalescedFetch(raw_key, inflight, false, {}, "http fetch failed: " + curl_err);
+            return;
+        }
+        if (http_code < 200 || http_code >= 300 || downloaded.empty()) {
+            impl_->completeCoalescedFetch(
+                raw_key, inflight, false, {}, "unexpected HTTP status: " + std::to_string(http_code));
+            return;
         }
 
-        if (!cancel->isCancelled() && on_done) {
-            on_done(std::move(res));
-        }
-    });
+        putCachedRawBytes(raw_key, downloaded.data(), downloaded.size());
+        impl_->completeCoalescedFetch(raw_key, inflight, true, downloaded, "");
+    })) {
+        std::lock_guard lk(impl_->inflight_mutex);
+        impl_->inflight_map.erase(raw_key);
+    }
 
     return cancel;
 }
@@ -1026,9 +1537,64 @@ void CachedImageView::cancelPending() {
 
 void CachedImageView::setImageUrl(const std::string& url,
                                   std::unordered_map<std::string, std::string> headers) {
-    if (url == current_url_ && getTexture() > 0) return;
+    setImageUrl(url, std::move(headers), 0, 0);
+}
+
+void CachedImageView::setImageUrl(const std::string& url,
+                                  std::unordered_map<std::string, std::string> headers,
+                                  int max_width,
+                                  int max_height) {
+    if (max_width <= 0 && max_height <= 0) {
+        // Automatically infer decode target size from widget Yoga dimensions + HiDPI scale
+        // so card thumbnails do not decode or upload multi-megabyte full-resolution RGBA textures.
+        YGNodeRef yn = getYGNode();
+        float pt_w = 0.0f;
+        float pt_h = 0.0f;
+        if (yn) {
+            const YGValue yw = YGNodeStyleGetWidth(yn);
+            const YGValue ymw = YGNodeStyleGetMaxWidth(yn);
+            const YGValue yh = YGNodeStyleGetHeight(yn);
+            const YGValue ymh = YGNodeStyleGetMaxHeight(yn);
+            if (yw.unit == YGUnitPoint && yw.value > 0.0f) pt_w = yw.value;
+            else if (ymw.unit == YGUnitPoint && ymw.value > 0.0f) pt_w = ymw.value;
+            if (yh.unit == YGUnitPoint && yh.value > 0.0f) pt_h = yh.value;
+            else if (ymh.unit == YGUnitPoint && ymh.value > 0.0f) pt_h = ymh.value;
+        }
+        if (pt_w <= 0.0f && getWidth() > 1.0f) pt_w = getWidth();
+        if (pt_h <= 0.0f && getHeight() > 1.0f) pt_h = getHeight();
+
+        const float dpr = std::clamp(
+            brls::Application::windowScale > 0.5f ? brls::Application::windowScale : 2.0f,
+            2.0f, 3.0f);
+        if (pt_w > 0.0f && pt_h > 0.0f) {
+            if (getScalingType() == brls::ImageScalingType::FILL) {
+                const int bound = quantizeDimHint(
+                    std::max(64, static_cast<int>(std::ceil(std::max(pt_w, pt_h) * dpr))));
+                max_width = bound;
+                max_height = bound;
+            } else {
+                max_width = quantizeDimHint(std::max(64, static_cast<int>(std::ceil(pt_w * dpr))));
+                max_height = quantizeDimHint(std::max(64, static_cast<int>(std::ceil(pt_h * dpr))));
+            }
+        } else if (pt_h > 0.0f) {
+            max_width = 1600;
+            max_height = quantizeDimHint(std::max(128, static_cast<int>(std::ceil(pt_h * dpr * 1.5f))));
+        } else {
+            max_width = 1920;
+            max_height = 1920;
+        }
+    }
+
+    if (url == current_url_ &&
+        max_width <= current_max_w_ &&
+        max_height <= current_max_h_ &&
+        getTexture() > 0) {
+        return;
+    }
     cancelPending();
     current_url_ = url;
+    current_max_w_ = max_width;
+    current_max_h_ = max_height;
     if (url.empty()) {
         clear();
         return;
@@ -1039,17 +1605,28 @@ void CachedImageView::setImageUrl(const std::string& url,
         url,
         [this, alive, url](DecodedImage img) {
             if (!img.ok || img.rgba.empty() || img.width <= 0 || img.height <= 0) return;
+            const bool need_wake = !g_ui_wake_pending.exchange(true, std::memory_order_acq_rel);
             brls::sync([this, alive, url, img = std::move(img)]() {
+                g_ui_wake_pending.store(false, std::memory_order_release);
+                brls::Application::setActiveEvent(true);
                 if (!alive->load() || url != current_url_) return;
-                NVGcontext* vg = brls::Application::getNVGContext();
+                auto* plat = brls::Application::getPlatform();
+                if (!plat || !plat->getVideoContext()) return;
+                NVGcontext* vg = plat->getVideoContext()->getNVGContext();
                 if (!vg) return;
                 int tex = nvgCreateImageRGBA(vg, img.width, img.height, 0, img.rgba.data());
                 if (tex > 0) {
                     innerSetImage(tex);
                 }
             });
+            if (need_wake) {
+                wakeSdlEventLoopOnce();
+            }
         },
-        std::move(headers));
+        std::move(headers),
+        nullptr,
+        max_width,
+        max_height);
 }
 
 }  // namespace omnidesk

@@ -10,6 +10,7 @@
 #include "omnidesk/plugin.hpp"
 #include "omnidesk/plugin_abi.h"
 #include "omnidesk/pm/process.hpp"
+#include "omnidesk/types_json.hpp"
 #include "omnidesk/worker_domain_bridge.hpp"
 
 namespace fs = std::filesystem;
@@ -251,16 +252,16 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
             const std::string sid = s.value("source_id", "");
             if (sid.empty()) continue;
             const std::string dname = s.value("display_name", sid);
-            std::vector<std::string> cats;
+            auto src = std::make_shared<WorkerMediaSource>(
+                *workers_, spec.worker_id, plugin_id, sid, dname);
             if (s.contains("categories") && s["categories"].is_array()) {
+                std::vector<std::string> cats;
                 for (const auto& cat : s["categories"]) {
                     if (cat.is_string()) cats.push_back(cat.get<std::string>());
                 }
+                src->seedCategories(std::move(cats));
             }
-            domains_.registerMediaSource(
-                plugin_id,
-                std::make_shared<WorkerMediaSource>(
-                    *workers_, spec.worker_id, plugin_id, sid, dname, std::move(cats)));
+            domains_.registerMediaSource(plugin_id, std::move(src));
         }
     }
 
@@ -268,11 +269,13 @@ bool PluginManager::loadSubprocessPlugin(const InstalledPluginRecord& rec, std::
         for (const auto& s : desc.data["text_sources"]) {
             const std::string sid = s.value("source_id", "");
             if (sid.empty()) continue;
-            domains_.registerTextSource(
-                plugin_id,
-                std::make_shared<WorkerTextSource>(
-                    *workers_, spec.worker_id, plugin_id, sid,
-                    s.value("display_name", sid), s.value("category", "blog")));
+            auto src = std::make_shared<WorkerTextSource>(
+                *workers_, spec.worker_id, plugin_id, sid,
+                s.value("display_name", sid), s.value("category", "blog"));
+            if (s.contains("channels") && s["channels"].is_array()) {
+                src->seedChannels(fromJsonArray<TextChannel>(s["channels"]));
+            }
+            domains_.registerTextSource(plugin_id, std::move(src));
         }
     }
 

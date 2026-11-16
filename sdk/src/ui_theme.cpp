@@ -9,24 +9,32 @@ void applyDesignSystemTheme() {
 
     for (bool dark : {false, true}) {
         auto& theme = dark ? brls::Theme::getDarkTheme() : brls::Theme::getLightTheme();
-        auto surface = dark ? nvgRGB(35, 33, 34) : nvgRGB(252, 251, 249);
-        auto canvas  = dark ? nvgRGB(24, 23, 24) : nvgRGB(246, 245, 243);
-        auto text    = dark ? nvgRGB(241, 238, 235) : nvgRGB(41, 39, 38);
-        auto muted   = dark ? nvgRGB(181, 174, 172) : nvgRGB(108, 103, 98);
-        auto line    = dark ? nvgRGB(65, 60, 62) : nvgRGB(224, 221, 216);
-        auto accent  = dark ? nvgRGB(255, 147, 180) : nvgRGB(194, 59, 98);
-        auto soft    = dark ? nvgRGB(43, 39, 41) : nvgRGB(241, 239, 236);
-        auto active  = dark ? nvgRGB(66, 38, 48) : nvgRGB(249, 231, 237);
-        auto focus_ring = dark ? nvgRGB(88, 166, 255) : nvgRGB(21, 94, 239);
-        auto focus_halo = dark ? nvgRGBA(12, 13, 18, 242) : nvgRGBA(255, 255, 255, 246);
-        auto focus_glow = dark ? nvgRGBA(88, 166, 255, 76) : nvgRGBA(21, 94, 239, 56);
-        auto focus_fill = dark ? nvgRGBA(88, 166, 255, 26) : nvgRGBA(21, 94, 239, 15);
+        auto canvas  = dark ? nvgRGB(20, 21, 25)    : nvgRGB(245, 244, 240);
+        auto surface = dark ? nvgRGB(28, 30, 36)    : nvgRGB(252, 251, 249);
+        auto soft    = dark ? nvgRGB(37, 40, 48)    : nvgRGB(238, 236, 231);
+        auto text    = dark ? nvgRGB(236, 238, 242) : nvgRGB(34, 33, 32);
+        auto muted   = dark ? nvgRGB(158, 164, 176) : nvgRGB(102, 98, 93);
+        auto line    = dark ? nvgRGBA(255, 255, 255, 23) : nvgRGBA(36, 33, 29, 28);
+        auto btn_bd  = dark ? nvgRGBA(255, 255, 255, 32) : nvgRGBA(36, 33, 29, 36);
+        auto accent  = dark ? nvgRGB(244, 134, 168) : nvgRGB(186, 52, 90);
+        auto active  = dark ? nvgRGB(46, 36, 45)    : nvgRGB(247, 233, 238);
+
+        auto focus_ring = dark ? nvgRGB(96, 165, 250)  : nvgRGB(37, 99, 235);
+        auto focus_halo = dark ? nvgRGBA(15, 17, 21, 210) : nvgRGBA(255, 255, 255, 224);
+        auto focus_glow = dark ? nvgRGBA(96, 165, 250, 52) : nvgRGBA(37, 99, 235, 38);
+        auto focus_fill = dark ? nvgRGBA(96, 165, 250, 18) : nvgRGBA(37, 99, 235, 11);
+
+        auto hover_fill   = dark ? nvgRGBA(255, 255, 255, 11) : nvgRGBA(28, 26, 23, 9);
+        auto hover_border = dark ? nvgRGBA(255, 255, 255, 42) : nvgRGBA(36, 33, 29, 46);
+        auto scroll_thumb = dark ? nvgRGBA(186, 194, 210, 88) : nvgRGBA(92, 88, 82, 82);
+        auto scroll_track = dark ? nvgRGBA(255, 255, 255, 8)  : nvgRGBA(36, 33, 29, 8);
 
         theme.addColor("brls/clear", canvas);
         theme.addColor("brls/background", canvas);
         theme.addColor("brls/text", text);
+        theme.addColor("brls/text_muted", muted);
         theme.addColor("brls/text_disabled", muted);
-        theme.addColor("brls/backdrop", nvgRGBA(24, 23, 24, 145));
+        theme.addColor("brls/backdrop", dark ? nvgRGBA(9, 10, 14, 206) : nvgRGBA(24, 23, 22, 148));
         theme.addColor("brls/accent", accent);
         theme.addColor("color/bilibili", accent);
         theme.addColor("font/grey", muted);
@@ -35,27 +43,38 @@ void applyDesignSystemTheme() {
         theme.addColor("color/grey_2", soft);
         theme.addColor("desktop/surface", surface);
         theme.addColor("desktop/line", line);
+        theme.addColor("desktop/border", line);
         theme.addColor("desktop/soft", soft);
+        theme.addColor("desktop/panel", soft);
         theme.addColor("desktop/active", active);
         theme.addColor("desktop/focus_ring", focus_ring);
         theme.addColor("desktop/focus_halo", focus_halo);
         theme.addColor("desktop/focus_glow", focus_glow);
         theme.addColor("desktop/focus_fill", focus_fill);
+        theme.addColor("desktop/hover_fill", hover_fill);
+        theme.addColor("desktop/hover_border", hover_border);
+        theme.addColor("desktop/scrollbar_thumb", scroll_thumb);
+        theme.addColor("desktop/scrollbar_track", scroll_track);
 
         // Domain & status semantic tokens
-        theme.addColor("status/ok_bg", dark ? nvgRGB(26, 54, 39) : nvgRGB(230, 245, 236));
-        theme.addColor("status/ok_fg", dark ? nvgRGB(115, 214, 159) : nvgRGB(33, 118, 70));
-        theme.addColor("status/warn_bg", dark ? nvgRGB(61, 44, 22) : nvgRGB(253, 243, 224));
-        theme.addColor("status/warn_fg", dark ? nvgRGB(245, 186, 98) : nvgRGB(178, 99, 12));
-        theme.addColor("status/err_bg", dark ? nvgRGB(66, 31, 36) : nvgRGB(253, 234, 237));
-        theme.addColor("status/err_fg", dark ? nvgRGB(248, 134, 150) : nvgRGB(185, 38, 58));
-        theme.addColor("status/info_bg", dark ? nvgRGB(29, 46, 66) : nvgRGB(232, 242, 253));
-        theme.addColor("status/info_fg", dark ? nvgRGB(130, 186, 248) : nvgRGB(36, 98, 172));
+        theme.addColor("status/ok_bg", dark ? nvgRGB(24, 48, 37) : nvgRGB(231, 245, 237));
+        theme.addColor("status/ok_fg", dark ? nvgRGB(110, 214, 156) : nvgRGB(30, 114, 68));
+        theme.addColor("status/warn_bg", dark ? nvgRGB(54, 41, 22) : nvgRGB(252, 242, 223));
+        theme.addColor("status/warn_fg", dark ? nvgRGB(245, 186, 98) : nvgRGB(172, 95, 12));
+        theme.addColor("status/err_bg", dark ? nvgRGB(58, 29, 35) : nvgRGB(252, 234, 237));
+        theme.addColor("status/err_fg", dark ? nvgRGB(248, 134, 150) : nvgRGB(182, 38, 58));
+        theme.addColor("status/info_bg", dark ? nvgRGB(27, 42, 62) : nvgRGB(232, 242, 253));
+        theme.addColor("status/info_fg", dark ? nvgRGB(130, 186, 248) : nvgRGB(34, 96, 170));
+        theme.addColor("status/ok", dark ? nvgRGB(110, 214, 156) : nvgRGB(30, 114, 68));
+        theme.addColor("status/warn", dark ? nvgRGB(245, 186, 98) : nvgRGB(172, 95, 12));
+        theme.addColor("status/err", dark ? nvgRGB(248, 134, 150) : nvgRGB(182, 38, 58));
+        theme.addColor("status/error", dark ? nvgRGB(248, 134, 150) : nvgRGB(182, 38, 58));
+        theme.addColor("status/info", dark ? nvgRGB(130, 186, 248) : nvgRGB(34, 96, 170));
 
-        theme.addColor("domain/media", dark ? nvgRGB(255, 147, 180) : nvgRGB(194, 59, 98));
-        theme.addColor("domain/text", dark ? nvgRGB(130, 186, 248) : nvgRGB(36, 98, 172));
-        theme.addColor("domain/book", dark ? nvgRGB(115, 214, 159) : nvgRGB(33, 118, 70));
-        theme.addColor("domain/core", dark ? nvgRGB(245, 186, 98) : nvgRGB(178, 99, 12));
+        theme.addColor("domain/media", dark ? nvgRGB(244, 134, 168) : nvgRGB(186, 52, 90));
+        theme.addColor("domain/text", dark ? nvgRGB(125, 184, 250) : nvgRGB(34, 96, 170));
+        theme.addColor("domain/book", dark ? nvgRGB(110, 214, 156) : nvgRGB(30, 114, 68));
+        theme.addColor("domain/core", dark ? nvgRGB(242, 184, 98) : nvgRGB(172, 95, 12));
 
         theme.addColor("brls/highlight/background", focus_fill);
         theme.addColor("brls/highlight/color1", focus_ring);
@@ -67,10 +86,11 @@ void applyDesignSystemTheme() {
         theme.addColor("brls/button/default_enabled_text", text);
         theme.addColor("brls/button/default_disabled_background", canvas);
         theme.addColor("brls/button/default_disabled_text", muted);
-        theme.addColor("brls/button/enabled_border_color", line);
+        theme.addColor("brls/button/enabled_border_color", btn_bd);
         theme.addColor("brls/button/disabled_border_color", line);
         theme.addColor("brls/button/highlight_enabled_text", focus_ring);
-        theme.addColor("brls/button/primary_enabled_background", nvgRGB(194, 59, 98));
+        theme.addColor("brls/button/primary_enabled_background",
+                       dark ? nvgRGB(204, 66, 106) : nvgRGB(186, 52, 90));
         theme.addColor("brls/button/primary_enabled_text", nvgRGB(255, 255, 255));
         theme.addColor("brls/button/primary_disabled_background", soft);
         theme.addColor("brls/button/primary_disabled_text", muted);
@@ -79,30 +99,39 @@ void applyDesignSystemTheme() {
     }
 
     auto style = brls::getStyle();
-    style.addMetric("brls/animations/show", 90);
-    style.addMetric("brls/animations/show_slide", 80);
-    style.addMetric("brls/animations/highlight", 60);
+    style.addMetric("brls/animations/show", 105);
+    style.addMetric("brls/animations/show_slide", 95);
+    style.addMetric("brls/animations/highlight", 75);
     style.addMetric("brls/animations/highlight_shake", 85);
-    style.addMetric("brls/notification/width", 340);
+    style.addMetric("brls/notification/width", 356);
     style.addMetric("brls/label/default_font_size", 16);
-    style.addMetric("brls/dialog/fontSize", 17);
-    style.addMetric("brls/dropdown/listItemTextSize", 16.5f);
-    style.addMetric("brls/dropdown/header_title_font_size", 20);
+    style.addMetric("brls/dialog/fontSize", 16.5f);
+    style.addMetric("brls/dropdown/listItemTextSize", 16.0f);
+    style.addMetric("brls/dropdown/header_title_font_size", 19.5f);
     style.addMetric("brls/highlight/stroke_width", 0);
     style.addMetric("brls/highlight/shadow_opacity", 0);
     style.addMetric("brls/highlight/shadow_offset", 0);
     style.addMetric("brls/highlight/corner_radius", 10);
-    style.addMetric("brls/button/corner_radius", 10);
+    style.addMetric("brls/button/corner_radius", 9);
     style.addMetric("brls/button/border_thickness", 1);
     style.addMetric("brls/button/padding_top_bottom", 6);
     style.addMetric("brls/button/padding_sides", 14);
-    style.addMetric("brls/button/text_size", 15);
+    style.addMetric("brls/button/text_size", 14.8f);
     style.addMetric("brls/button/primary_highlight_padding", 2);
     style.addMetric("brls/button/shadow_width", 0);
 }
 
 NVGcolor color(const std::string& token) {
-    return brls::Application::getTheme().getColor(token);
+    auto theme = brls::Application::getTheme();
+    try {
+        return theme.getColor(token);
+    } catch (...) {
+        try {
+            return theme.getColor("brls/text");
+        } catch (...) {
+            return nvgRGB(41, 39, 38);
+        }
+    }
 }
 
 brls::Label* makeLabel(const std::string& text,

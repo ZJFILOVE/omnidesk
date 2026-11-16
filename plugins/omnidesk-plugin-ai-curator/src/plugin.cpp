@@ -21,7 +21,8 @@ bool AiCuratorPlugin::onLoad(omnidesk::PluginContext& ctx) {
                          "push_interactive_set", "pin_item", "dismiss_item",
                          "clear_interactive", "status",
                          "daily_status", "configure_daily_scheduler",
-                         "run_daily_workflows", "cancel_daily_workflows"}},
+                         "run_daily_workflows", "cancel_daily_workflows",
+                         "sync_github"}},
         },
         100);
 
@@ -33,7 +34,7 @@ bool AiCuratorPlugin::onLoad(omnidesk::PluginContext& ctx) {
         {
             {"description", "Daily scheduled pipeline orchestration and interactive ephemeral curation"},
             {"actions", {"daily_status", "configure_daily_scheduler", "run_daily_pipeline",
-                         "run_daily_workflows", "cancel_daily_workflows",
+                         "run_daily_workflows", "cancel_daily_workflows", "sync_github",
                          "rehydrate_archive", "curate_interactive"}},
         },
         80);

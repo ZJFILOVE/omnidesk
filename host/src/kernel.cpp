@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <thread>
 #include <unistd.h>
+#include "omnidesk/host/auth_center_dialog.hpp"
 #include "omnidesk/image_cache.hpp"
 #include "omnidesk/mpv_core.hpp"
 #include "omnidesk/playback_coordinator.hpp"
@@ -267,30 +269,53 @@ bool HostKernel::init(const char* argv0) {
 
     // Hydrate cross-domain SQLite FTS5 index asynchronously on dedicated search lane
     if (search_index_ && search_index_->isOpen() && search_tasks_) {
-        auto scheduleHydrate = [this]() {
-            if (!search_tasks_ || !search_index_) return;
-            search_tasks_->submitInLane("search.hydrate", [this](const std::shared_ptr<CancelToken>& c) {
-                if (c && c->isCancelled()) return;
-                if (search_index_ && search_index_->isOpen()) {
-                    search_index_->hydrateEcosystem(
-                        domains_.get(), capabilities_.get(), data_root_, config_root_);
-                }
-            });
-        };
-        scheduleHydrate();
+        scheduleSearchHydrate(kHydrateAll, "", true, 0);
         search_plugin_sub_ = bus_->subscribe(
             "plugin.state_changed", "host.search_indexer",
-            [scheduleHydrate](const std::string&, const nlohmann::json&) { scheduleHydrate(); });
+            [this](const std::string&, const nlohmann::json& payload) {
+                const std::string pid = payload.is_object() ? payload.value("plugin_id", "") : "";
+                const std::string state = payload.is_object() ? payload.value("state", "") : "";
+                if (!pid.empty() && (state == "unloaded" || state == "disabled" || state == "removed")) {
+                    if (search_index_ && search_index_->isOpen()) {
+                        search_index_->clearSource(pid);
+                    }
+                    scheduleSearchHydrate(kHydrateCommands, "", false, 250);
+                } else if (!pid.empty()) {
+                    scheduleSearchHydrate(kHydrateCommands | kHydrateDomains, pid, false, 320);
+                } else {
+                    scheduleSearchHydrate(kHydrateCommands | kHydrateDomains, "", true, 320);
+                }
+            });
         search_recommend_sub_ = bus_->subscribe(
             "entity.recommend.updated", "host.search_indexer",
-            [scheduleHydrate](const std::string&, const nlohmann::json&) { scheduleHydrate(); });
+            [this](const std::string&, const nlohmann::json& payload) {
+                const std::string sid = payload.is_object() ? payload.value("source_id", "") : "";
+                if (!sid.empty()) {
+                    scheduleSearchHydrate(kHydrateDomains | kHydrateArchives, sid, false, 400);
+                } else {
+                    {
+                        std::lock_guard<std::mutex> lk(search_hydrate_mu_);
+                        pending_hydrate_sources_.insert("plugin-ai-curator");
+                        pending_hydrate_sources_.insert("plugin-music");
+                    }
+                    scheduleSearchHydrate(kHydrateDomains | kHydrateArchives, "", false, 400);
+                }
+            });
         search_vocab_sub_ = bus_->subscribe(
             "entity.vocab.add", "host.search_indexer",
-            [scheduleHydrate](const std::string&, const nlohmann::json&) { scheduleHydrate(); });
+            [this](const std::string&, const nlohmann::json&) {
+                scheduleSearchHydrate(kHydrateVocab, "", false, 350);
+            });
     }
 
-    // Detect SDK ABI drift across all installed plugins and emit diagnostic event
-    const auto abi_statuses = installer_->checkInstalledAbiStatus(false);
+    // Detect SDK ABI drift across all installed plugins once and cache until plugin state changes
+    abi_plugin_sub_ = bus_->subscribe(
+        "plugin.state_changed", "host.abi_cache",
+        [this](const std::string&, const nlohmann::json&) {
+            std::lock_guard<std::mutex> lk(abi_cache_mu_);
+            abi_cache_valid_ = false;
+        });
+    const auto abi_statuses = installedAbiStatuses(true);
     nlohmann::json stale_ids = nlohmann::json::array();
     nlohmann::json stale_entries = nlohmann::json::array();
     for (const auto& entry : abi_statuses) {
@@ -326,6 +351,54 @@ bool HostKernel::init(const char* argv0) {
     return true;
 }
 
+void HostKernel::scheduleSearchHydrate(uint32_t scopes,
+                                       const std::string& source_id,
+                                       bool all_domain_sources,
+                                       int debounce_ms) {
+    if (background_services_stopped_ || !search_tasks_ || !search_index_) return;
+    {
+        std::lock_guard<std::mutex> lk(search_hydrate_mu_);
+        pending_hydrate_scopes_ |= scopes;
+        if (all_domain_sources) {
+            pending_hydrate_all_sources_ = true;
+            pending_hydrate_sources_.clear();
+        } else if (!source_id.empty() && !pending_hydrate_all_sources_) {
+            pending_hydrate_sources_.insert(source_id);
+        }
+    }
+
+    search_tasks_->submitInLane("search.hydrate", [this, debounce_ms](const std::shared_ptr<CancelToken>& c) {
+        if (debounce_ms > 0) {
+            int remaining = debounce_ms;
+            while (remaining > 0) {
+                if (c && c->isCancelled()) return;
+                const int slice = std::min(remaining, 25);
+                std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+                remaining -= slice;
+            }
+        }
+        if (c && c->isCancelled()) return;
+
+        SearchHydrateOptions opts;
+        {
+            std::lock_guard<std::mutex> lk(search_hydrate_mu_);
+            if (pending_hydrate_scopes_ == 0) return;
+            opts.scopes = pending_hydrate_scopes_;
+            if (!pending_hydrate_all_sources_) {
+                opts.source_ids = std::move(pending_hydrate_sources_);
+            }
+            pending_hydrate_scopes_ = 0;
+            pending_hydrate_all_sources_ = false;
+            pending_hydrate_sources_.clear();
+        }
+
+        if (search_index_ && search_index_->isOpen()) {
+            search_index_->hydrateIncremental(
+                domains_.get(), capabilities_.get(), data_root_, config_root_, opts);
+        }
+    });
+}
+
 void HostKernel::startDesktopServices() {
     if (!initialized_) return;
     if (mpris_ && !mpris_->isRunning()) {
@@ -336,6 +409,7 @@ void HostKernel::startDesktopServices() {
 void HostKernel::stopBackgroundServices() {
     if (!initialized_ || background_services_stopped_) return;
     background_services_stopped_ = true;
+    AuthCenterManager::instance().stop();
     if (control_server_) {
         control_server_->stop();
     }
@@ -360,6 +434,7 @@ void HostKernel::shutdown() {
     if (!initialized_) {
         return;
     }
+    AuthCenterManager::instance().stop();
     if (control_server_) {
         control_server_->stop();
         control_server_.reset();
@@ -368,10 +443,17 @@ void HostKernel::shutdown() {
         if (search_plugin_sub_ != 0) bus_->unsubscribe(search_plugin_sub_);
         if (search_recommend_sub_ != 0) bus_->unsubscribe(search_recommend_sub_);
         if (search_vocab_sub_ != 0) bus_->unsubscribe(search_vocab_sub_);
+        if (abi_plugin_sub_ != 0) bus_->unsubscribe(abi_plugin_sub_);
     }
     search_plugin_sub_ = 0;
     search_recommend_sub_ = 0;
     search_vocab_sub_ = 0;
+    abi_plugin_sub_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(abi_cache_mu_);
+        abi_cache_valid_ = false;
+        cached_abi_statuses_.clear();
+    }
     if (mpris_) {
         mpris_->stop();
     }
@@ -388,6 +470,12 @@ void HostKernel::shutdown() {
     }
     if (search_tasks_) {
         search_tasks_->shutdown(remainingMs());
+    }
+    {
+        std::lock_guard<std::mutex> lk(search_hydrate_mu_);
+        pending_hydrate_scopes_ = 0;
+        pending_hydrate_all_sources_ = false;
+        pending_hydrate_sources_.clear();
     }
     if (plugins_) {
         plugins_->unloadAll();
@@ -422,6 +510,34 @@ void HostKernel::shutdown() {
     config_.reset();
     initialized_ = false;
     background_services_stopped_ = false;
+}
+
+std::vector<pm::AbiStatusEntry> HostKernel::installedAbiStatuses(bool force_refresh) {
+    if (!installer_) {
+        return {};
+    }
+    {
+        std::lock_guard<std::mutex> lk(abi_cache_mu_);
+        if (!force_refresh && abi_cache_valid_) {
+            return cached_abi_statuses_;
+        }
+    }
+    auto fresh = installer_->checkInstalledAbiStatus(false);
+    {
+        std::lock_guard<std::mutex> lk(abi_cache_mu_);
+        cached_abi_statuses_ = fresh;
+        abi_cache_valid_ = true;
+    }
+    return fresh;
+}
+
+bool HostKernel::hasStaleAbiPlugins(bool force_refresh) {
+    for (const auto& entry : installedAbiStatuses(force_refresh)) {
+        if (entry.needs_rebuild) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string HostKernel::controlSocketPath() const {

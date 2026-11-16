@@ -21,6 +21,9 @@
    - 调用 `publish_daily_bundle` / `run_daily_pipeline` 时必须提供 `publication_evidence`：`status = "PUBLISHED"`、`publication_verified = true`、匹配的 `operation_id` / `project` / `business_date`，以及可定位已提交产物的 `receipt`；
    - 仅有 `qa_verified = true` 时服务端返回 `needs_verified_bundle`；
    - 音乐项目必须在写前端前用 `media.playlist.v1 sync_daily_authorized(dry_run: true)` 校验真实双仓 `PUBLISHED` 事务与 5 首曲目。
+6. **GitHub 双向同步闭环（Pull Before Check · Push After Commit）**：
+   - 选题前先拉取 `origin/main`（`git fetch origin main` + `git merge --ff-only`），若远端已完成当日发布则直接增量回灌，严禁重复选题；
+   - 本地按 `.recommendation/PUBLISHING.md` 完成阶段 commit 与回执落盘后，若配置了 `origin` 远端，必须执行 `git push origin main`（`music` 需同时推送 `music-daily` 与 `obsidian-vault`）并校验 `HEAD == origin/main` 且无未提交目标文件。
 
 ---
 

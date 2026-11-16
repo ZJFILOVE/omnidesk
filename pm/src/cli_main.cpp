@@ -664,13 +664,15 @@ nlohmann::json buildMcpToolsList() {
         },
         {
             {"name", "omnidesk_book_search"},
-            {"description", "Search books across installed OmniDesk book.search.v1 plugins (Z-Library and Anna's Archive) with automatic provider selection and fallback, or inspect book source status / book details."},
+            {"description", "Search books across installed OmniDesk book.search.v1 plugins (Z-Library and Anna's Archive) with automatic provider selection and fallback, inspect book status/details, or fetch/backfill local book cover images."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
-                    {"action", {{"type", "string"}, {"enum", {"search", "detail", "status"}}, {"description", "Operation: 'search' (default), 'detail', or 'status'"}}},
+                    {"action", {{"type", "string"}, {"enum", {"search", "detail", "status", "fetch_cover", "sync_covers"}}, {"description", "Operation: 'search' (default), 'detail', 'status', 'fetch_cover', or 'sync_covers'"}}},
                     {"query", {{"type", "string"}, {"description", "Search query (title, author, ISBN, keywords) for action='search'"}}},
-                    {"id", {{"type", "string"}, {"description", "Book ID ('raw_id:hash' or 32-hex MD5) for action='detail'"}}},
+                    {"id", {{"type", "string"}, {"description", "Book ID ('raw_id:hash' or 32-hex MD5) for action='detail' or 'fetch_cover'"}}},
+                    {"cover_url", {{"type", "string"}, {"description", "Optional explicit cover image URL for action='fetch_cover'"}}},
+                    {"force", {{"type", "boolean"}, {"description", "Force re-fetching existing cached covers for 'fetch_cover' or 'sync_covers'"}}},
                     {"provider", {{"type", "string"}, {"enum", {"auto", "all", "zlib", "annas-archive"}}, {"description", "Provider routing: 'auto' (default, fallback enabled), 'all', 'zlib', or 'annas-archive'"}}},
                     {"format", {{"type", "string"}, {"description", "Optional format filter such as 'epub' or 'pdf'"}}},
                     {"language", {{"type", "string"}, {"description", "Optional language filter such as 'en' or 'zh'"}}},
@@ -1774,6 +1776,81 @@ int main(int argc, char** argv) {
                                 sendToolJson({{"ok", false}, {"error", "Book detail lookup failed across providers"}, {"attempts", std::move(attempts)}}, true);
                             }
                         }
+                    } else if (action == "fetch_cover") {
+                        const std::string cover_url = trimAscii(merged.value("cover_url", ""));
+                        if (clean_id.empty() && cover_url.empty()) {
+                            sendToolJson({{"ok", false}, {"error", "omnidesk_book_search action='fetch_cover' requires 'id', 'md5', or 'cover_url'"}}, true);
+                        } else {
+                            nlohmann::json attempts = nlohmann::json::array();
+                            nlohmann::json winner;
+                            bool found = false;
+                            for (const auto& p : providers) {
+                                if (req_prov == "auto" && !id_hint.empty() && p.provider_key != id_hint) {
+                                    if ((id_hint == "annas-archive" && p.provider_key == "zlib" && clean_id.find(':') == std::string::npos) ||
+                                        (id_hint == "zlib" && p.provider_key == "annas-archive" && !isHex32Ascii(clean_id))) {
+                                        continue;
+                                    }
+                                }
+                                nlohmann::json payload = {
+                                    {"action", "fetch_cover"},
+                                    {"provider", p.provider_key},
+                                    {"force", merged.value("force", false)},
+                                };
+                                if (!clean_id.empty()) {
+                                    payload["id"] = clean_id;
+                                    if (p.provider_key == "annas-archive" || isHex32Ascii(clean_id)) {
+                                        payload["md5"] = clean_id;
+                                    }
+                                }
+                                if (!cover_url.empty()) payload["cover_url"] = cover_url;
+                                auto r = invokeCapability("book.search.v1", payload, p.plugin_id, 30000);
+                                if (r.value("ok", false)) {
+                                    winner = std::move(r);
+                                    winner["provider"] = p.provider_key;
+                                    found = true;
+                                    break;
+                                }
+                                attempts.push_back({{"plugin_id", p.plugin_id}, {"provider", p.provider_key}, {"ok", false}, {"error", r.value("error", "")}});
+                            }
+                            if (found) {
+                                sendToolJson(winner, false);
+                            } else {
+                                sendToolJson({{"ok", false}, {"error", "Book cover fetch failed across providers"}, {"attempts", std::move(attempts)}}, true);
+                            }
+                        }
+                    } else if (action == "sync_covers" || action == "backfill_covers") {
+                        nlohmann::json results = nlohmann::json::array();
+                        int total_updated = 0;
+                        bool any_ok = false;
+                        for (const auto& p : providers) {
+                            nlohmann::json payload = {
+                                {"action", "sync_covers"},
+                                {"provider", p.provider_key},
+                                {"force", merged.value("force", false)},
+                            };
+                            auto r = invokeCapability("book.search.v1", payload, p.plugin_id, 60000);
+                            const bool r_ok = r.value("ok", false);
+                            const auto r_data = r.value("data", nlohmann::json::object());
+                            if (r_ok) {
+                                any_ok = true;
+                                if (r_data.is_object()) {
+                                    total_updated += r_data.value("updated", 0);
+                                }
+                            }
+                            results.push_back({
+                                {"plugin_id", p.plugin_id},
+                                {"provider", p.provider_key},
+                                {"ok", r_ok},
+                                {"data", r_data},
+                                {"error", r.value("error", "")},
+                            });
+                        }
+                        sendToolJson({
+                            {"ok", any_ok},
+                            {"action", "sync_covers"},
+                            {"total_updated", total_updated},
+                            {"providers", std::move(results)},
+                        }, !any_ok);
                     } else {
                         const std::string query = trimAscii(merged.value("query", merged.value("q", "")));
                         if (query.empty()) {
@@ -1932,7 +2009,8 @@ int main(int argc, char** argv) {
                                                 {"book_id", d.value("shelf_book_id", clean_id)},
                                                 {"title", d.value("title", "")},
                                                 {"file_path", fp},
-                                                {"format", d.value("format", "")},
+                                                {"cover_path", d.value("cover_path", "")},
+                                                {"format", d.value("format", d.value("extension", ""))},
                                                 {"source_id", p.plugin_id},
                                                 {"page", 1},
                                             };

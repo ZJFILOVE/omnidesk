@@ -48,6 +48,7 @@ public:
     void shutdown();
 
     static DecodedImage decodeBytes(const uint8_t* data, size_t size);
+    static DecodedImage decodeBytes(const uint8_t* data, size_t size, int max_width, int max_height);
     static std::string normalizeImageUrl(const std::string& raw, const std::string& base_url = "");
     static std::string cacheKeyFor(const std::string& url,
                                    const std::unordered_map<std::string, std::string>& headers = {});
@@ -70,6 +71,14 @@ public:
         std::unordered_map<std::string, std::string> headers = {},
         std::shared_ptr<CancelToken> cancel = nullptr);
 
+    std::shared_ptr<CancelToken> fetchDecoded(
+        const std::string& url,
+        std::function<void(DecodedImage)> on_done,
+        std::unordered_map<std::string, std::string> headers,
+        std::shared_ptr<CancelToken> cancel,
+        int max_width,
+        int max_height);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -84,11 +93,17 @@ public:
 
     void setImageUrl(const std::string& url,
                      std::unordered_map<std::string, std::string> headers = {});
+    void setImageUrl(const std::string& url,
+                     std::unordered_map<std::string, std::string> headers,
+                     int max_width,
+                     int max_height);
     void cancelPending();
 
 private:
     ImageCache* cache_ = nullptr;
     std::string current_url_;
+    int current_max_w_ = 0;
+    int current_max_h_ = 0;
     std::shared_ptr<CancelToken> pending_cancel_;
     std::shared_ptr<std::atomic<bool>> alive_;
 };

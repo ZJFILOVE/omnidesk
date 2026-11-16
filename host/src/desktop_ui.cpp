@@ -4,9 +4,20 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <mutex>
+#include <unordered_set>
+#include <SDL2/SDL.h>
+#include <borealis/core/time.hpp>
 #include <borealis/views/dialog.hpp>
 #include <borealis/views/edit_text_dialog.hpp>
+#include <borealis/views/rectangle.hpp>
 #include <nanovg.h>
+#include <yoga/Yoga.h>
+#include <yoga/event/event.h>
+#include "omnidesk/host/ai_composer.hpp"
+#include "omnidesk/host/kernel.hpp"
+#include "omnidesk/host/nav_shortcuts.hpp"
+#include "omnidesk/mpv_core.hpp"
 #include "omnidesk/ui_theme.hpp"
 
 namespace omnidesk::host {
@@ -30,6 +41,12 @@ enum class RepeatOp {
     FullPageUp,
 };
 
+enum class CursorKind {
+    Arrow = 0,
+    Hand,
+    IBeam,
+};
+
 struct State {
     DesktopCallbacks callbacks;
     bool hint_mode = false;
@@ -42,12 +59,31 @@ struct State {
 
     bool watched_keys_registered = false;
     bool lifecycle_hooks_registered = false;
+    bool sdl_wheel_watch_registered = false;
+    bool yoga_event_subscribed = false;
     bool internal_passthrough = false;
+    float pending_fallback_wheel_y = 0.0f;
+
+    // Event-driven view normalization & cached ScrollingFrame / rail state
+    std::mutex alloc_mutex;
+    std::unordered_set<const YGNode*> allocated_ygnodes;
+    std::vector<brls::View*> dirty_subtrees;
+    bool dirty_root = true;
+    bool in_normalize_pass = false;
+    size_t last_activity_depth = 0;
+    brls::View* last_observed_root = nullptr;
+    int sync_scroll_widths_frames = 2;
+
+    bool scroll_cache_dirty = true;
+    brls::View* scroll_cache_root = nullptr;
+    brls::View* cached_nav_rail = nullptr;
+    std::vector<brls::ScrollingFrame*> cached_scroll_frames;
 
     // 2D column-preserving navigation & focus continuity across UI rebuilds
     float preferred_x = -1.0f;
     bool preserving_x = false;
     brls::View* last_root = nullptr;
+    brls::View* last_focused_view = nullptr;
     brls::Rect last_focus_rect{0.0f, 0.0f, 0.0f, 0.0f};
     bool has_last_focus_rect = false;
     brls::View* last_pane_box = nullptr;
@@ -62,6 +98,17 @@ struct State {
     // Responsive 26 Hz desktop key-repeat state
     RepeatOp repeat_op = RepeatOp::None;
     std::chrono::steady_clock::time_point next_repeat_time{};
+
+    // Desktop pointer hover & system cursor state
+    bool hover_dirty = true;
+    bool mouse_in_window = false;
+    brls::Point mouse_pt{-1000.0f, -1000.0f};
+    brls::View* hovered_view = nullptr;
+    brls::Rect hovered_clip{0.0f, 0.0f, 0.0f, 0.0f};
+    CursorKind active_cursor = CursorKind::Arrow;
+    SDL_Cursor* cursor_arrow = nullptr;
+    SDL_Cursor* cursor_hand = nullptr;
+    SDL_Cursor* cursor_ibeam = nullptr;
 };
 
 State& state() {
@@ -74,8 +121,23 @@ brls::View* currentRootView() {
     return stack.empty() ? nullptr : stack.back()->getContentView();
 }
 
-bool isEditingText() {
+bool isModalEditDialog() {
     return dynamic_cast<brls::EditTextDialog*>(currentRootView()) != nullptr;
+}
+
+bool isEditingText() {
+    return isModalEditDialog() || InlineEditorRegistry::isActivelyEditing();
+}
+
+bool isEmbeddedBrowserViewport(brls::View* v) {
+    if (!v) return false;
+    return v->getView("omnidesk_embedded_browser_capture") == v ||
+           v->getView("omnidesk_embedded_browser_viewport") == v;
+}
+
+bool isEmbeddedBrowserCaptured() {
+    brls::View* cur = brls::Application::getCurrentFocus();
+    return cur != nullptr && cur->getView("omnidesk_embedded_browser_capture") == cur;
 }
 
 void cancelHints() {
@@ -109,6 +171,16 @@ bool isViewInActiveTree(brls::View* v, brls::View* root) {
         cur = cur->getParent();
     }
     return false;
+}
+
+bool isPointInEmbeddedBrowserViewport(const brls::Point& pt) {
+    brls::View* root = currentRootView();
+    if (!root) return false;
+    brls::View* vp = root->getView("omnidesk_embedded_browser_capture");
+    if (!vp) {
+        vp = root->getView("omnidesk_embedded_browser_viewport");
+    }
+    return vp && isViewInActiveTree(vp, root) && vp->getFrame().pointInside(pt);
 }
 
 bool isUsableFocusTarget(brls::View* v, brls::View* root) {
@@ -222,15 +294,134 @@ void attachChildAwareTapIfNeeded(brls::Box* box) {
         }));
 }
 
-// Normalizes ScrollingFrames (prevents NATURAL focus traps/stealing) and ensures focusable Boxes
-// respond to mouse taps and clean highlight rendering across Host, SDK, and Plugins.
-void normalizeViewTree(brls::View* node) {
-    if (!node || node->getVisibility() != brls::Visibility::VISIBLE) {
+void normalizeDialogIfNeeded(brls::Dialog* dlg) {
+    if (!dlg) {
         return;
     }
+    auto* applet = dynamic_cast<brls::Box*>(dlg->getView("brls/dialog/applet"));
+    auto* container = dynamic_cast<brls::Box*>(dlg->getView("brls/dialog/container"));
+    if (!applet || !container) {
+        return;
+    }
+
+    const float viewport_w =
+        brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+    const float max_w = std::max(420.0f, viewport_w - 48.0f);
+
+    if (!container->getChildren().empty() && container->getChildren().front()) {
+        brls::View* content = container->getChildren().front();
+        const YGValue yg_w = YGNodeStyleGetWidth(content->getYGNode());
+        float desired_w = 0.0f;
+        if (yg_w.unit == YGUnitPoint && yg_w.value > 100.0f) {
+            desired_w = yg_w.value;
+        }
+        const float target_w =
+            (desired_w > 0.0f) ? std::min(desired_w, max_w) : std::min(720.0f, max_w);
+        if (desired_w > max_w && std::fabs(yg_w.value - target_w) > 0.5f) {
+            content->setWidth(target_w);
+        }
+        const YGValue app_w = YGNodeStyleGetWidth(applet->getYGNode());
+        if (app_w.unit != YGUnitPoint || std::fabs(app_w.value - target_w) > 0.5f) {
+            applet->setWidth(target_w);
+        }
+    }
+
+    if (std::fabs(applet->getCornerRadius() - 14.0f) > 0.1f) {
+        applet->setCornerRadius(14.0f);
+        applet->setBorderThickness(1.0f);
+        applet->setClipsToBounds(true);
+    }
+    applet->setBorderColor(ui::color("desktop/line"));
+    applet->setBackgroundColor(ui::color("brls/background"));
+
+    if (auto* btn1 = dlg->getView("brls/dialog/button1")) {
+        if (auto* btn_row = btn1->getParent()) {
+            const YGValue row_h = YGNodeStyleGetHeight(btn_row->getYGNode());
+            if (row_h.unit == YGUnitPoint && std::fabs(row_h.value - 52.0f) > 0.5f) {
+                btn_row->setHeight(52.0f);
+            }
+        }
+    }
+}
+
+brls::View* scrollContentView(brls::ScrollingFrame* sf) {
+    if (!sf) {
+        return nullptr;
+    }
+    const auto& ch = sf->getChildren();
+    for (auto it = ch.rbegin(); it != ch.rend(); ++it) {
+        if (*it && dynamic_cast<brls::Rectangle*>(*it) == nullptr) {
+            return *it;
+        }
+    }
+    return ch.size() >= 2 ? ch.back() : nullptr;
+}
+
+// Normalizes a single view node (Dialog, ScrollingFrame, or focusable Box) without recursing.
+void normalizeSingleView(brls::View* node) {
+    if (!node || node->isPtrLocked()) {
+        return;
+    }
+    if (auto* dlg = dynamic_cast<brls::Dialog*>(node)) {
+        normalizeDialogIfNeeded(dlg);
+    }
     if (auto* sf = dynamic_cast<brls::ScrollingFrame*>(node)) {
+        auto& st = state();
+        st.scroll_cache_dirty = true;
+        st.sync_scroll_widths_frames = std::max(st.sync_scroll_widths_frames, 2);
+        const bool first_visit = sf->isFocusable();
         sf->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
         sf->setFocusable(false);
+        if (first_visit) {
+            sf->setClipsToBounds(true);
+            sf->setShrink(1.0f);
+            sf->setMinHeight(0.0f);
+            sf->setMinWidth(0.0f);
+            if (auto* parent_box = dynamic_cast<brls::Box*>(sf->getParent())) {
+                if (parent_box->getAxis() == brls::Axis::ROW) {
+                    const YGValue h = YGNodeStyleGetHeight(sf->getYGNode());
+                    if (h.unit == YGUnitAuto || h.unit == YGUnitUndefined) {
+                        sf->setHeightPercentage(100.0f);
+                    }
+                } else {
+                    const YGValue w = YGNodeStyleGetWidth(sf->getYGNode());
+                    if (w.unit == YGUnitAuto || w.unit == YGUnitUndefined) {
+                        sf->setWidthPercentage(100.0f);
+                    }
+                }
+            }
+            brls::View* root = currentRootView();
+            brls::View* views_host = root ? root->getView("omnidesk/views_host") : nullptr;
+            for (brls::View* anc = sf->getParent(); anc != nullptr; anc = anc->getParent()) {
+                if (auto* anc_box = dynamic_cast<brls::Box*>(anc)) {
+                    if (YGNodeStyleGetFlexGrow(anc_box->getYGNode()) > 0.0f) {
+                        anc_box->setShrink(1.0f);
+                        anc_box->setMinHeight(0.0f);
+                        anc_box->setMinWidth(0.0f);
+                        if (auto* gp = dynamic_cast<brls::Box*>(anc_box->getParent())) {
+                            if (gp->getAxis() == brls::Axis::ROW) {
+                                const YGValue ah = YGNodeStyleGetHeight(anc_box->getYGNode());
+                                if (ah.unit == YGUnitAuto || ah.unit == YGUnitUndefined) {
+                                    anc_box->setHeightPercentage(100.0f);
+                                }
+                            }
+                        }
+                    }
+                    if (views_host && anc_box == views_host) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (brls::View* content = scrollContentView(sf)) {
+            const float sf_w = sf->getWidth();
+            const float cur_w = content->getWidth();
+            if (!std::isnan(sf_w) && sf_w > 2.0f &&
+                (std::isnan(cur_w) || std::fabs(cur_w - sf_w) > 1.0f)) {
+                content->setWidth(sf_w);
+                content->invalidate();
+            }
+        }
     }
     if (auto* box = dynamic_cast<brls::Box*>(node)) {
         if (box->isFocusable()) {
@@ -238,6 +429,17 @@ void normalizeViewTree(brls::View* node) {
             box->setHideHighlightBorder(true);
             attachChildAwareTapIfNeeded(box);
         }
+    }
+}
+
+// Normalizes ScrollingFrames (prevents NATURAL focus traps/stealing and Yoga flex overflow),
+// Dialog frames, and ensures focusable Boxes respond to mouse taps across Host, SDK, and Plugins.
+void normalizeViewTree(brls::View* node) {
+    if (!node || node->isPtrLocked() || node->getVisibility() != brls::Visibility::VISIBLE) {
+        return;
+    }
+    normalizeSingleView(node);
+    if (auto* box = dynamic_cast<brls::Box*>(node)) {
         for (brls::View* child : box->getChildren()) {
             normalizeViewTree(child);
         }
@@ -310,10 +512,10 @@ void applyComfortScroll(brls::ScrollingFrame* sf,
                         brls::View* target,
                         float pre_offset_y,
                         bool immediate) {
-    if (!sf || !target || sf->getChildren().empty()) {
+    if (!sf || !target) {
         return;
     }
-    brls::View* content = sf->getChildren().front();
+    brls::View* content = scrollContentView(sf);
     if (!content) {
         return;
     }
@@ -369,7 +571,7 @@ void giveFocusClean(brls::View* target, bool immediate_scroll, bool preserve_x =
     st.immediate_scroll = prev_imm;
 }
 
-void recoverFocusIfNeeded() {
+void recoverFocusIfNeeded(bool tree_changed = false) {
     if (isEditingText()) {
         return;
     }
@@ -380,16 +582,43 @@ void recoverFocusIfNeeded() {
 
     auto& st = state();
     brls::View* cur = brls::Application::getCurrentFocus();
+
+    // Fast O(1) steady-state check: when focus is unchanged and valid on a clean tree,
+    // skip full-tree pane resolution and RTTI traversal.
+    if (!tree_changed &&
+        cur != nullptr &&
+        cur == st.last_focused_view &&
+        root == st.last_root &&
+        !cur->isPtrLocked() &&
+        cur->getVisibility() == brls::Visibility::VISIBLE &&
+        !cur->isHidden()) {
+        const brls::Rect f = cur->getFrame();
+        if (f.getWidth() >= 4.0f && f.getHeight() >= 4.0f) {
+            st.last_focus_rect = f;
+            st.has_last_focus_rect = true;
+            if (st.preferred_x < 0.0f) {
+                st.preferred_x = f.getMidX();
+            }
+            return;
+        }
+    }
+
     if (isUsableFocusTarget(cur, root)) {
+        const bool focus_switched = (cur != st.last_focused_view || root != st.last_root);
         st.last_root = root;
+        st.last_focused_view = cur;
         st.last_focus_rect = cur->getFrame();
         st.has_last_focus_rect = true;
-        st.last_pane_box = findEnclosingPane(cur, root);
+        if (focus_switched || !st.last_pane_box || !isViewInActiveTree(st.last_pane_box, root)) {
+            st.last_pane_box = findEnclosingPane(cur, root);
+        }
         if (st.preferred_x < 0.0f) {
             st.preferred_x = st.last_focus_rect.getMidX();
         }
         return;
     }
+
+    st.last_focused_view = nullptr;
 
     // Focus was lost (nullptr, hidden workspace, or destroyed by clearViews()/refresh()).
     std::vector<brls::View*> candidates;
@@ -416,6 +645,7 @@ void recoverFocusIfNeeded() {
             st.suppress_focus_scroll = true;
             giveFocusClean(best, true, true);
             st.suppress_focus_scroll = false;
+            st.last_focused_view = brls::Application::getCurrentFocus();
             return;
         }
     }
@@ -448,6 +678,7 @@ void recoverFocusIfNeeded() {
         st.suppress_focus_scroll = true;
         giveFocusClean(initial, true, false);
         st.suppress_focus_scroll = false;
+        st.last_focused_view = brls::Application::getCurrentFocus();
     }
 }
 
@@ -614,8 +845,24 @@ bool navigateDirection(brls::FocusDirection dir, bool repeating) {
         next = cur->getParent()->getNextFocus(dir, cur);
     }
 
-    if (next) {
+    // Borealis ScrollingFrame::getNextFocus returns `this` when at boundary with remaining scroll;
+    // calling getDefaultFocus() on it wraps all the way back to item #0 at the top!
+    if (dynamic_cast<brls::ScrollingFrame*>(next) != nullptr) {
+        next = nullptr;
+    } else if (next) {
         next = next->getDefaultFocus();
+    }
+
+    // Reject structural navigation candidates that move backwards against `dir`.
+    if (next && next != cur) {
+        const brls::Rect cf = cur->getFrame();
+        const brls::Rect nf = next->getFrame();
+        if ((dir == brls::FocusDirection::DOWN && nf.getMidY() < cf.getMidY() - 2.0f) ||
+            (dir == brls::FocusDirection::UP && nf.getMidY() > cf.getMidY() + 2.0f) ||
+            (dir == brls::FocusDirection::RIGHT && nf.getMidX() < cf.getMidX() - 2.0f) ||
+            (dir == brls::FocusDirection::LEFT && nf.getMidX() > cf.getMidX() + 2.0f)) {
+            next = nullptr;
+        }
     }
 
     // Preserve horizontal column across multi-column rows, chip grids, and button bars.
@@ -640,6 +887,25 @@ bool navigateDirection(brls::FocusDirection dir, bool repeating) {
             st.preferred_x = next->getFrame().getMidX();
         }
         return true;
+    }
+
+    // If at the bottom/top focusable item inside a ScrollingFrame that still has un-scrolled overflow,
+    // advance scroll smoothly instead of getting stuck before the footer.
+    if (vertical) {
+        if (auto* sf = findAncestorScroll(cur)) {
+            if (brls::View* content = scrollContentView(sf)) {
+                const float max_scroll = std::max(0.0f, content->getHeight() - sf->getHeight());
+                const float cur_y = sf->getContentOffsetY();
+                if (dir == brls::FocusDirection::DOWN && cur_y < max_scroll - 2.0f) {
+                    sf->setContentOffsetY(std::min(max_scroll, cur_y + 160.0f), !repeating);
+                    return true;
+                }
+                if (dir == brls::FocusDirection::UP && cur_y > 2.0f) {
+                    sf->setContentOffsetY(std::max(0.0f, cur_y - 160.0f), !repeating);
+                    return true;
+                }
+            }
+        }
     }
 
     if (!repeating) {
@@ -732,6 +998,27 @@ bool cyclePaneOrModalFocus(bool reverse) {
     return true;
 }
 
+brls::ScrollingFrame* findHoveredScrollTarget(brls::Point pt) {
+    brls::View* root = currentRootView();
+    if (!root) return nullptr;
+    brls::ScrollingFrame* found = nullptr;
+    auto walk = [&](auto& self, brls::View* node) -> void {
+        if (!node || node->getVisibility() != brls::Visibility::VISIBLE) return;
+        if (auto* sf = dynamic_cast<brls::ScrollingFrame*>(node)) {
+            if (sf->getFrame().pointInside(pt)) {
+                found = sf;
+            }
+        }
+        if (auto* box = dynamic_cast<brls::Box*>(node)) {
+            for (brls::View* ch : box->getChildren()) {
+                self(self, ch);
+            }
+        }
+    };
+    walk(walk, root);
+    return found;
+}
+
 brls::ScrollingFrame* findBestScrollTarget() {
     brls::View* cur = brls::Application::getCurrentFocus();
     if (auto* sf = findAncestorScroll(cur)) {
@@ -763,8 +1050,8 @@ brls::ScrollingFrame* findBestScrollTarget() {
 }
 
 void syncFocusIntoScrolledViewport(brls::ScrollingFrame* sf, float new_offset_y, int edge_bias) {
-    if (!sf || sf->getChildren().empty()) return;
-    brls::View* content = sf->getChildren().front();
+    if (!sf) return;
+    brls::View* content = scrollContentView(sf);
     if (!content) return;
 
     const float view_h = sf->getHeight();
@@ -812,10 +1099,10 @@ void syncFocusIntoScrolledViewport(brls::ScrollingFrame* sf, float new_offset_y,
 bool scrollCurrentBy(float delta_y, bool immediate = false) {
     ensureGamepadMode();
     auto* sf = findBestScrollTarget();
-    if (!sf || sf->getChildren().empty()) {
+    if (!sf) {
         return false;
     }
-    brls::View* content = sf->getChildren().front();
+    brls::View* content = scrollContentView(sf);
     const float max_scroll = content ? std::max(0.0f, content->getHeight() - sf->getHeight()) : 99999.0f;
     const float target_y = std::clamp(sf->getContentOffsetY() + delta_y, 0.0f, max_scroll);
     syncFocusIntoScrolledViewport(sf, target_y, 0);
@@ -826,10 +1113,10 @@ bool scrollCurrentBy(float delta_y, bool immediate = false) {
 bool scrollToEdge(bool bottom) {
     ensureGamepadMode();
     auto* sf = findBestScrollTarget();
-    if (!sf || sf->getChildren().empty()) {
+    if (!sf) {
         return false;
     }
-    brls::View* content = sf->getChildren().front();
+    brls::View* content = scrollContentView(sf);
     const float max_scroll = content ? std::max(0.0f, content->getHeight() - sf->getHeight()) : 0.0f;
     const float target_y = bottom ? max_scroll : 0.0f;
     syncFocusIntoScrolledViewport(sf, target_y, bottom ? 1 : -1);
@@ -898,7 +1185,8 @@ RepeatOp detectHeldRepeatOp() {
     if (!plat || !plat->getInputManager()) {
         return RepeatOp::None;
     }
-    if (isEditingText() || state().hint_mode || brls::Application::isInputBlocks()) {
+    if (isEditingText() || isEmbeddedBrowserCaptured() || state().hint_mode ||
+        brls::Application::isInputBlocks()) {
         return RepeatOp::None;
     }
     auto* im = plat->getInputManager();
@@ -1006,13 +1294,338 @@ NVGcolor scaleAlpha(NVGcolor c, float factor) {
     return c;
 }
 
+bool queryMouseContentPoint(brls::Point& out_pt) {
+    SDL_Window* win = SDL_GetMouseFocus();
+    if (!win) {
+        return false;
+    }
+    int mx = 0, my = 0;
+    SDL_GetMouseState(&mx, &my);
+    int ww = 1280, wh = 720;
+    SDL_GetWindowSize(win, &ww, &wh);
+    const float cw = brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+    const float ch = brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+    out_pt = {
+        ww > 0 ? static_cast<float>(mx) * (cw / static_cast<float>(ww)) : static_cast<float>(mx),
+        wh > 0 ? static_cast<float>(my) * (ch / static_cast<float>(wh)) : static_cast<float>(my),
+    };
+    return true;
+}
+
+void findDeepestInteractiveHover(brls::View* v,
+                                 brls::Rect clip,
+                                 const brls::Point& pt,
+                                 brls::View*& best_view,
+                                 brls::Rect& best_clip) {
+    if (!v || v->isPtrLocked() || v->getVisibility() != brls::Visibility::VISIBLE ||
+        v->isHidden() || v->getAlpha() < 0.08f) {
+        return;
+    }
+    brls::Rect visible = intersectRect(v->getFrame(), clip);
+    if (visible.pointInside(pt) && visible.getWidth() >= 4.0f && visible.getHeight() >= 4.0f) {
+        const bool is_editor = dynamic_cast<AiTextEditorView*>(v) != nullptr;
+        const bool is_focusable =
+            v->isFocusable() && dynamic_cast<brls::ScrollingFrame*>(v) == nullptr;
+        if (is_editor || is_focusable) {
+            best_view = v;
+            best_clip = clip;
+        }
+    }
+    if (auto* box = dynamic_cast<brls::Box*>(v)) {
+        brls::Rect child_clip = clip;
+        if (dynamic_cast<brls::ScrollingFrame*>(v) != nullptr || v->getClipsToBounds()) {
+            child_clip = visible;
+            if (!child_clip.pointInside(pt)) {
+                return;
+            }
+        }
+        for (brls::View* child : box->getChildren()) {
+            findDeepestInteractiveHover(child, child_clip, pt, best_view, best_clip);
+        }
+    }
+}
+
+void applySystemCursor(CursorKind kind) {
+    auto& st = state();
+    if (kind == st.active_cursor) {
+        return;
+    }
+    if (!st.cursor_arrow) st.cursor_arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
+    if (!st.cursor_hand)  st.cursor_hand  = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND);
+    if (!st.cursor_ibeam) st.cursor_ibeam = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_IBEAM);
+
+    SDL_Cursor* target = st.cursor_arrow;
+    if (kind == CursorKind::Hand && st.cursor_hand) {
+        target = st.cursor_hand;
+    } else if (kind == CursorKind::IBeam && st.cursor_ibeam) {
+        target = st.cursor_ibeam;
+    }
+    if (target) {
+        SDL_SetCursor(target);
+        st.active_cursor = kind;
+    }
+}
+
+void updatePointerHoverState() {
+    auto& st = state();
+    brls::Point pt{};
+    if (!queryMouseContentPoint(pt)) {
+        if (st.mouse_in_window || st.hovered_view != nullptr) {
+            st.mouse_in_window = false;
+            st.hovered_view = nullptr;
+            applySystemCursor(CursorKind::Arrow);
+        }
+        return;
+    }
+
+    if (isEmbeddedBrowserCaptured() && isPointInEmbeddedBrowserViewport(pt)) {
+        st.mouse_in_window = true;
+        st.mouse_pt = pt;
+        st.hovered_view = nullptr;
+        applySystemCursor(CursorKind::Arrow);
+        return;
+    }
+
+    brls::View* root = currentRootView();
+    const bool pointer_moved =
+        !st.mouse_in_window ||
+        std::fabs(pt.x - st.mouse_pt.x) > 0.25f ||
+        std::fabs(pt.y - st.mouse_pt.y) > 0.25f;
+    const bool animations_running = !brls::Ticking::runningTickings.empty();
+    const bool hovered_stale =
+        st.hovered_view != nullptr && !isViewInActiveTree(st.hovered_view, root);
+
+    st.mouse_in_window = true;
+    st.mouse_pt = pt;
+
+    // Skip full-tree RTTI hover scan when pointer is stationary and view tree / scroll state is clean.
+    if (!pointer_moved && !st.hover_dirty && !animations_running && !hovered_stale) {
+        return;
+    }
+    st.hover_dirty = false;
+    st.hovered_view = nullptr;
+
+    if (root) {
+        const float cw = brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+        const float ch = brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+        findDeepestInteractiveHover(root, {0.0f, 0.0f, cw, ch}, pt, st.hovered_view, st.hovered_clip);
+    }
+
+    CursorKind desired = CursorKind::Arrow;
+    if (dynamic_cast<AiTextEditorView*>(st.hovered_view) != nullptr) {
+        desired = CursorKind::IBeam;
+    } else if (st.hovered_view != nullptr && !isEmbeddedBrowserViewport(st.hovered_view)) {
+        desired = CursorKind::Hand;
+    }
+    applySystemCursor(desired);
+}
+
+void renderHoverHighlight(NVGcontext* vg) {
+    if (!vg || isModalEditDialog()) {
+        return;
+    }
+    const auto& st = state();
+    brls::View* root = currentRootView();
+    if (!st.mouse_in_window || !st.hovered_view || !isViewInActiveTree(st.hovered_view, root)) {
+        return;
+    }
+    if (dynamic_cast<AiTextEditorView*>(st.hovered_view) != nullptr ||
+        isEmbeddedBrowserViewport(st.hovered_view)) {
+        return;
+    }
+    if (st.hovered_view == brls::Application::getCurrentFocus() && !isEditingText()) {
+        return;
+    }
+
+    const brls::Rect frame = st.hovered_view->getFrame();
+    const float x = frame.getMinX();
+    const float y = frame.getMinY();
+    const float w = frame.getWidth();
+    const float h = frame.getHeight();
+    const float cw = brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+    const float ch = brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+    if (w < 6.0f || h < 6.0f || (w > cw * 0.86f && h > ch * 0.70f)) {
+        return;
+    }
+    if (st.hovered_clip.getWidth() < 2.0f || st.hovered_clip.getHeight() < 2.0f) {
+        return;
+    }
+
+    float r = st.hovered_view->getCornerRadius();
+    if (r <= 0.5f) {
+        r = 8.0f;
+    }
+    r = std::min(r, std::min(w, h) * 0.5f);
+
+    nvgSave(vg);
+    nvgScissor(vg,
+               st.hovered_clip.getMinX(),
+               st.hovered_clip.getMinY(),
+               st.hovered_clip.getWidth(),
+               st.hovered_clip.getHeight());
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x, y, w, h, r);
+    nvgFillColor(vg, ui::color("desktop/hover_fill"));
+    nvgFill(vg);
+    nvgStrokeWidth(vg, 1.0f);
+    nvgStrokeColor(vg, ui::color("desktop/hover_border"));
+    nvgStroke(vg);
+    nvgRestore(vg);
+}
+
+void collectScrollFramePointers(brls::View* v,
+                                brls::View* nav_rail,
+                                std::vector<brls::ScrollingFrame*>& out) {
+    if (!v || v->isPtrLocked() || v->getVisibility() != brls::Visibility::VISIBLE || v->isHidden()) {
+        return;
+    }
+    if (auto* sf = dynamic_cast<brls::ScrollingFrame*>(v)) {
+        if (sf != nav_rail) {
+            out.push_back(sf);
+        }
+    }
+    if (auto* box = dynamic_cast<brls::Box*>(v)) {
+        for (brls::View* child : box->getChildren()) {
+            collectScrollFramePointers(child, nav_rail, out);
+        }
+    }
+}
+
+void ensureScrollCacheFresh(brls::View* root) {
+    auto& st = state();
+    if (!root) {
+        st.scroll_cache_root = nullptr;
+        st.cached_nav_rail = nullptr;
+        st.cached_scroll_frames.clear();
+        st.scroll_cache_dirty = false;
+        return;
+    }
+    if (!st.scroll_cache_dirty && st.scroll_cache_root == root) {
+        return;
+    }
+    st.scroll_cache_root = root;
+    st.cached_nav_rail = root->getView("omnidesk/pane_rail");
+    st.cached_scroll_frames.clear();
+    collectScrollFramePointers(root, st.cached_nav_rail, st.cached_scroll_frames);
+    st.scroll_cache_dirty = false;
+}
+
+bool computeVisibleScrollClip(brls::ScrollingFrame* sf,
+                              brls::View* root,
+                              const brls::Rect& viewport,
+                              brls::Rect& out_vis) {
+    if (!sf || !root || sf->isPtrLocked()) {
+        return false;
+    }
+    brls::Rect clip = viewport;
+    bool reached_root = false;
+    for (brls::View* p = sf; p != nullptr; p = p->getParent()) {
+        if (p->isPtrLocked() || p->getVisibility() != brls::Visibility::VISIBLE ||
+            p->isHidden() || p->getAlpha() < 0.08f) {
+            return false;
+        }
+        if (p == sf || p->getClipsToBounds() || dynamic_cast<brls::ScrollingFrame*>(p) != nullptr) {
+            clip = intersectRect(clip, p->getFrame());
+        }
+        if (p == root) {
+            reached_root = true;
+            break;
+        }
+    }
+    if (!reached_root || clip.getWidth() < 180.0f || clip.getHeight() < 80.0f) {
+        return false;
+    }
+    out_vis = clip;
+    return true;
+}
+
+void syncCachedScrollWidths(brls::View* root) {
+    ensureScrollCacheFresh(root);
+    auto& st = state();
+    for (brls::ScrollingFrame* sf : st.cached_scroll_frames) {
+        if (!sf || !isViewInActiveTree(sf, root)) continue;
+        if (brls::View* content = scrollContentView(sf)) {
+            const float sf_w = sf->getWidth();
+            const float cur_w = content->getWidth();
+            if (!std::isnan(sf_w) && sf_w > 2.0f &&
+                (std::isnan(cur_w) || std::fabs(cur_w - sf_w) > 1.0f)) {
+                content->setWidth(sf_w);
+                content->invalidate();
+            }
+        }
+    }
+}
+
+void renderScrollbars(NVGcontext* vg) {
+    if (!vg || isEmbeddedBrowserCaptured()) {
+        return;
+    }
+    brls::View* root = currentRootView();
+    if (!root) {
+        return;
+    }
+    ensureScrollCacheFresh(root);
+    const auto& st = state();
+    if (st.cached_scroll_frames.empty()) {
+        return;
+    }
+
+    const float cw = brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+    const float ch = brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+    const brls::Rect viewport{0.0f, 0.0f, cw, ch};
+    const NVGcolor thumb_base = ui::color("desktop/scrollbar_thumb");
+    const NVGcolor track_col  = ui::color("desktop/scrollbar_track");
+
+    for (brls::ScrollingFrame* sf : st.cached_scroll_frames) {
+        brls::Rect vis{};
+        if (!computeVisibleScrollClip(sf, root, viewport, vis)) {
+            continue;
+        }
+        brls::View* content = scrollContentView(sf);
+        if (!content) {
+            continue;
+        }
+        const float view_h = sf->getHeight();
+        const float content_h = content->getHeight();
+        if (content_h <= view_h + 14.0f || view_h <= 32.0f) {
+            continue;
+        }
+        const float max_scroll = content_h - view_h;
+        const float track_pad = 6.0f;
+        const float track_h = std::max(24.0f, view_h - track_pad * 2.0f);
+        const float thumb_h = std::clamp(track_h * (view_h / content_h), 26.0f, track_h * 0.92f);
+        const float progress = std::clamp(sf->getContentOffsetY() / std::max(1.0f, max_scroll), 0.0f, 1.0f);
+        const float track_y = sf->getFrame().getMinY() + track_pad;
+        const float thumb_y = track_y + (track_h - thumb_h) * progress;
+
+        brls::Rect vis_rect = vis;
+        const bool pointer_inside = st.mouse_in_window && vis_rect.pointInside(st.mouse_pt);
+        const float thumb_w = pointer_inside ? 5.0f : 3.5f;
+        const float thumb_x = sf->getFrame().getMaxX() - thumb_w - 3.5f;
+
+        nvgSave(vg);
+        nvgScissor(vg, vis.getMinX(), vis.getMinY(), vis.getWidth(), vis.getHeight());
+        if (pointer_inside) {
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, thumb_x, track_y, thumb_w, track_h, thumb_w * 0.5f);
+            nvgFillColor(vg, track_col);
+            nvgFill(vg);
+        }
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, thumb_x, thumb_y, thumb_w, thumb_h, thumb_w * 0.5f);
+        nvgFillColor(vg, scaleAlpha(thumb_base, pointer_inside ? 1.25f : 0.62f));
+        nvgFill(vg);
+        nvgRestore(vg);
+    }
+}
+
 void renderFocusRing(NVGcontext* vg) {
-    if (!vg || isEditingText()) {
+    if (!vg || isEditingText() || isEmbeddedBrowserCaptured()) {
         return;
     }
     brls::View* root = currentRootView();
     brls::View* cur = brls::Application::getCurrentFocus();
-    if (!isUsableFocusTarget(cur, root)) {
+    if (!isUsableFocusTarget(cur, root) || isEmbeddedBrowserViewport(cur)) {
         return;
     }
 
@@ -1025,12 +1638,18 @@ void renderFocusRing(NVGcontext* vg) {
         return;
     }
 
+    ensureScrollCacheFresh(root);
+    brls::View* nav_rail = state().cached_nav_rail;
     const float viewport_w =
         brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
     const float viewport_h =
         brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
     brls::Rect clip{0.0f, 0.0f, viewport_w, viewport_h};
+    bool in_nav_rail = false;
     for (brls::View* p = cur->getParent(); p; p = p->getParent()) {
+        if (nav_rail && p == nav_rail) {
+            in_nav_rail = true;
+        }
         if (dynamic_cast<brls::ScrollingFrame*>(p) != nullptr || p->getClipsToBounds()) {
             clip = intersectRect(clip, p->getFrame());
         }
@@ -1040,16 +1659,16 @@ void renderFocusRing(NVGcontext* vg) {
         return;
     }
 
-    const brls::Rect expanded{x - 6.0f, y - 6.0f, w + 12.0f, h + 12.0f};
+    const brls::Rect expanded{x - 5.0f, y - 5.0f, w + 10.0f, h + 10.0f};
     const brls::Rect visible_test = intersectRect(expanded, clip);
     if (visible_test.getWidth() < 1.0f || visible_test.getHeight() < 1.0f) {
         return;
     }
 
-    const float mode_alpha =
-        (brls::Application::getInputType() == brls::InputType::GAMEPAD) ? 1.0f : 0.86f;
+    const bool kbd_mode = (brls::Application::getInputType() == brls::InputType::GAMEPAD);
+    const float mode_alpha = kbd_mode ? 0.94f : 0.38f;
     const NVGcolor ring_col = scaleAlpha(ui::color("desktop/focus_ring"), mode_alpha);
-    const NVGcolor halo_col = scaleAlpha(ui::color("desktop/focus_halo"), mode_alpha);
+    const NVGcolor halo_col = scaleAlpha(ui::color("desktop/focus_halo"), kbd_mode ? 0.72f : 0.28f);
     const NVGcolor glow_col = scaleAlpha(ui::color("desktop/focus_glow"), mode_alpha);
     const NVGcolor fill_col = scaleAlpha(ui::color("desktop/focus_fill"), mode_alpha);
 
@@ -1072,33 +1691,35 @@ void renderFocusRing(NVGcontext* vg) {
         nvgFill(vg);
     }
 
-    // 2. Soft outer ambient glow
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 3.0f, y - 3.0f, w + 6.0f, h + 6.0f, r + 3.0f);
-    nvgStrokeWidth(vg, 3.6f);
-    nvgStrokeColor(vg, glow_col);
-    nvgStroke(vg);
+    // 2. Soft outer ambient glow (keyboard navigation mode only)
+    if (kbd_mode) {
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x - 2.0f, y - 2.0f, w + 4.0f, h + 4.0f, r + 2.0f);
+        nvgStrokeWidth(vg, 2.4f);
+        nvgStrokeColor(vg, glow_col);
+        nvgStroke(vg);
+    }
 
-    // 3. High-contrast separation halo (white on Paper Light, obsidian on Graphite Dark)
+    // 3. Thin separation halo
     nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 1.5f, y - 1.5f, w + 3.0f, h + 3.0f, r + 1.5f);
-    nvgStrokeWidth(vg, 4.4f);
+    nvgRoundedRect(vg, x - 1.0f, y - 1.0f, w + 2.0f, h + 2.0f, r + 1.0f);
+    nvgStrokeWidth(vg, 2.5f);
     nvgStrokeColor(vg, halo_col);
     nvgStroke(vg);
 
-    // 4. Crisp semantic focus ring (#155EEF Cobalt / #58A6FF Sky Blue)
+    // 4. Crisp semantic focus ring
     nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 1.5f, y - 1.5f, w + 3.0f, h + 3.0f, r + 1.5f);
-    nvgStrokeWidth(vg, 2.4f);
+    nvgRoundedRect(vg, x - 1.0f, y - 1.0f, w + 2.0f, h + 2.0f, r + 1.0f);
+    nvgStrokeWidth(vg, kbd_mode ? 1.75f : 1.35f);
     nvgStrokeColor(vg, ring_col);
     nvgStroke(vg);
 
-    // 5. Left vertical anchor bar on cards, rail entries, and paragraphs for instant eye tracking
-    if (!is_button && w >= 120.0f && h >= 32.0f) {
-        const float bar_h = std::max(14.0f, h - 14.0f);
+    // 5. Left vertical anchor bar on content cards/paragraphs in keyboard mode (skipped in nav rail)
+    if (kbd_mode && !is_button && !in_nav_rail && w >= 140.0f && h >= 36.0f) {
+        const float bar_h = std::max(14.0f, h - 16.0f);
         const float bar_y = y + (h - bar_h) * 0.5f;
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, x + 2.0f, bar_y, 3.6f, bar_h, 1.8f);
+        nvgRoundedRect(vg, x + 2.0f, bar_y, 3.0f, bar_h, 1.5f);
         nvgFillColor(vg, ring_col);
         nvgFill(vg);
     }
@@ -1108,15 +1729,71 @@ void renderFocusRing(NVGcontext* vg) {
 
 } // namespace
 
+void DesktopInputController::markDirty(brls::View* subtree) {
+    auto& st = state();
+    st.hover_dirty = true;
+    st.scroll_cache_dirty = true;
+    st.sync_scroll_widths_frames = std::max(st.sync_scroll_widths_frames, 2);
+    if (!subtree) {
+        st.dirty_root = true;
+        st.dirty_subtrees.clear();
+        return;
+    }
+    if (st.dirty_root) {
+        return;
+    }
+    if (std::find(st.dirty_subtrees.begin(), st.dirty_subtrees.end(), subtree) ==
+        st.dirty_subtrees.end()) {
+        if (st.dirty_subtrees.size() >= 16) {
+            st.dirty_root = true;
+            st.dirty_subtrees.clear();
+        } else {
+            st.dirty_subtrees.push_back(subtree);
+        }
+    }
+}
+
 void DesktopInputController::install(DesktopCallbacks callbacks) {
     state().callbacks = std::move(callbacks);
 
-    brls::Application::setAutomaticDeactivation(false);
-    brls::Application::setDeactivatedFPS(60);
+    // Adaptive Idle Frame Pacing: step down to 8 FPS via SDL_WaitEventTimeout when idle,
+    // waking immediately (0ms) on keyboard/mouse input, animations, AI streaming, or MPV video.
+    brls::Application::setAutomaticDeactivation(true);
+    brls::Application::setDeactivatedTime(300);
+    brls::Application::setDeactivatedFPS(8);
     brls::Application::keyboardOverlayRenderer = renderOverlay;
+
+    if (!state().yoga_event_subscribed) {
+        state().yoga_event_subscribed = true;
+        facebook::yoga::Event::subscribe([](const YGNode& node,
+                                            facebook::yoga::Event::Type eventType,
+                                            facebook::yoga::Event::Data) {
+            auto& st = state();
+            if (eventType == facebook::yoga::Event::NodeAllocation) {
+                std::lock_guard<std::mutex> lk(st.alloc_mutex);
+                if (!st.in_normalize_pass) {
+                    if (st.allocated_ygnodes.size() < 4096) {
+                        st.allocated_ygnodes.insert(&node);
+                    } else {
+                        st.dirty_root = true;
+                    }
+                    st.hover_dirty = true;
+                }
+            } else if (eventType == facebook::yoga::Event::NodeDeallocation) {
+                std::lock_guard<std::mutex> lk(st.alloc_mutex);
+                st.allocated_ygnodes.erase(&node);
+                st.scroll_cache_dirty = true;
+                st.hover_dirty = true;
+            }
+        });
+    }
 
     if (!state().lifecycle_hooks_registered) {
         state().lifecycle_hooks_registered = true;
+
+        brls::Application::getWindowSizeChangedEvent()->subscribe([]() {
+            DesktopInputController::markDirty(nullptr);
+        });
 
         // Capture ScrollingFrame offset right BEFORE View::onFocusGained() runs.
         brls::Application::getGlobalFocusChangeEvent()->subscribe([](brls::View* newFocus) {
@@ -1156,13 +1833,159 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             applyComfortScroll(sf, brls::Application::getCurrentFocus(), pre_y, st.immediate_scroll);
         });
 
-        // Per-frame view normalization, focus continuity recovery, and 26 Hz desktop repeat.
+        if (!state().sdl_wheel_watch_registered) {
+            state().sdl_wheel_watch_registered = true;
+            SDL_AddEventWatch([](void*, SDL_Event* ev) -> int {
+                if (!ev || ev->type != SDL_MOUSEWHEEL) {
+                    return 0;
+                }
+                float wy = ev->wheel.preciseY;
+                if (wy == 0.0f && ev->wheel.y != 0) {
+                    wy = static_cast<float>(ev->wheel.y);
+                }
+                if (wy == 0.0f) {
+                    return 0;
+                }
+                state().hover_dirty = true;
+                int mx = 0, my = 0;
+                SDL_GetMouseState(&mx, &my);
+                SDL_Window* win = SDL_GetWindowFromID(ev->wheel.windowID);
+                int ww = 1280, wh = 720;
+                if (win) {
+                    SDL_GetWindowSize(win, &ww, &wh);
+                }
+                const float cw = brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+                const float ch = brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+                const brls::Point pt{
+                    ww > 0 ? static_cast<float>(mx) * (cw / static_cast<float>(ww)) : static_cast<float>(mx),
+                    wh > 0 ? static_cast<float>(my) * (ch / static_cast<float>(wh)) : static_cast<float>(my),
+                };
+                if (auto* ed = InlineEditorRegistry::activeEditor();
+                    ed && ed->isVisibleInActiveTree() && ed->getFrame().pointInside(pt)) {
+                    return 0;
+                }
+                if (isPointInEmbeddedBrowserViewport(pt)) {
+                    return 0;
+                }
+                brls::ScrollingFrame* hovered_sf = findHoveredScrollTarget(pt);
+                // Borealis drops fractional touchpad deltas where |preciseY * 30| < 1.0, and ignores
+                // wheel events when the cursor hovers over header/filter/stage chrome outside a ScrollingFrame.
+                if (!hovered_sf || std::fabs(wy * 30.0f) < 1.0f) {
+                    state().pending_fallback_wheel_y += (-wy * 46.0f);
+                }
+                return 0;
+            }, nullptr);
+        }
+
+        // Event-driven view normalization, O(1) steady-state focus/hover checks, 26 Hz repeat,
+        // and adaptive idle frame pacing.
         brls::Application::getRunLoopEvent()->subscribe([]() {
-            if (brls::View* root = currentRootView()) {
-                normalizeViewTree(root);
+            auto& st = state();
+            brls::View* root = currentRootView();
+            const size_t stack_depth = brls::Application::getActivitiesStack().size();
+            if (root != st.last_observed_root || stack_depth != st.last_activity_depth) {
+                st.last_observed_root = root;
+                st.last_activity_depth = stack_depth;
+                st.dirty_root = true;
+                st.scroll_cache_dirty = true;
+                st.hover_dirty = true;
+                st.sync_scroll_widths_frames = 2;
             }
-            recoverFocusIfNeeded();
+
+            std::unordered_set<const YGNode*> newly_allocated;
+            {
+                std::lock_guard<std::mutex> lk(st.alloc_mutex);
+                newly_allocated.swap(st.allocated_ygnodes);
+            }
+            const bool had_dirty_root = st.dirty_root;
+            std::vector<brls::View*> subtrees;
+            subtrees.swap(st.dirty_subtrees);
+            st.dirty_root = false;
+
+            const bool any_tree_change =
+                had_dirty_root || !subtrees.empty() || !newly_allocated.empty();
+
+            if (root && any_tree_change) {
+                st.in_normalize_pass = true;
+                if (had_dirty_root) {
+                    normalizeViewTree(root);
+                    st.scroll_cache_dirty = true;
+                    st.sync_scroll_widths_frames = std::max(st.sync_scroll_widths_frames, 2);
+                } else {
+                    for (brls::View* sub : subtrees) {
+                        if (sub && isViewInActiveTree(sub, root)) {
+                            normalizeViewTree(sub);
+                            st.scroll_cache_dirty = true;
+                            st.sync_scroll_widths_frames = std::max(st.sync_scroll_widths_frames, 2);
+                        }
+                    }
+                    if (!newly_allocated.empty()) {
+                        st.scroll_cache_dirty = true;
+                        st.sync_scroll_widths_frames = std::max(st.sync_scroll_widths_frames, 3);
+                    }
+                    for (const YGNode* yn : newly_allocated) {
+                        if (!yn) continue;
+                        auto* v = static_cast<brls::View*>(YGNodeGetContext(const_cast<YGNode*>(yn)));
+                        if (v && isViewInActiveTree(v, root)) {
+                            normalizeSingleView(v);
+                        }
+                    }
+                }
+                st.in_normalize_pass = false;
+            }
+
+            if (root && st.sync_scroll_widths_frames > 0) {
+                --st.sync_scroll_widths_frames;
+                syncCachedScrollWidths(root);
+            }
+
+            if (std::fabs(st.pending_fallback_wheel_y) >= 1.0f) {
+                int mx = 0, my = 0;
+                SDL_GetMouseState(&mx, &my);
+                SDL_Window* win = SDL_GL_GetCurrentWindow();
+                int ww = 1280, wh = 720;
+                if (win) {
+                    SDL_GetWindowSize(win, &ww, &wh);
+                }
+                const float cw = brls::Application::contentWidth > 0 ? brls::Application::contentWidth : 1280.0f;
+                const float ch = brls::Application::contentHeight > 0 ? brls::Application::contentHeight : 720.0f;
+                const brls::Point pt{
+                    ww > 0 ? static_cast<float>(mx) * (cw / static_cast<float>(ww)) : static_cast<float>(mx),
+                    wh > 0 ? static_cast<float>(my) * (ch / static_cast<float>(wh)) : static_cast<float>(my),
+                };
+                brls::ScrollingFrame* sf = findHoveredScrollTarget(pt);
+                if (!sf) {
+                    sf = findBestScrollTarget();
+                }
+                if (sf) {
+                    if (brls::View* content = scrollContentView(sf)) {
+                        const float max_scroll = std::max(0.0f, content->getHeight() - sf->getHeight());
+                        const float next_y = std::clamp(
+                            sf->getContentOffsetY() + st.pending_fallback_wheel_y, 0.0f, max_scroll);
+                        sf->setContentOffsetY(next_y, false);
+                    }
+                }
+                st.pending_fallback_wheel_y = 0.0f;
+                st.hover_dirty = true;
+                brls::Application::setActiveEvent(true);
+            }
+
+            recoverFocusIfNeeded(any_tree_change);
+            updatePointerHoverState();
             tickDesktopRepeat();
+
+            // Keep full 60 FPS whenever animations/scroll inertia, key-repeat, AI streaming,
+            // or MPV video playback are active; otherwise allow automatic idle step-down.
+            const bool keep_full_fps =
+                any_tree_change ||
+                st.sync_scroll_widths_frames > 0 ||
+                !brls::Ticking::runningTickings.empty() ||
+                st.repeat_op != RepeatOp::None ||
+                omnidesk::MPVCore::instance().isVideoPlaying() ||
+                (st.callbacks.is_busy && st.callbacks.is_busy());
+            if (keep_full_fps) {
+                brls::Application::setActiveEvent(true);
+            }
         });
     }
 
@@ -1172,8 +1995,14 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
         if (st.internal_passthrough) {
             return false;
         }
-        if (isEditingText()) {
+        if (isModalEditDialog()) {
             return false;
+        }
+        if (InlineEditorRegistry::isActivelyEditing()) {
+            return true;
+        }
+        if (isEmbeddedBrowserCaptured()) {
+            return true;
         }
 
         if (st.hint_mode) {
@@ -1229,9 +2058,13 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
                                                     bool repeating,
                                                     bool fallback) -> bool {
         auto& st = state();
-        if (isEditingText()) {
+        if (isModalEditDialog()) {
             cancelHints();
             return fallback;
+        }
+        const bool inline_editing = InlineEditorRegistry::isActivelyEditing();
+        if (inline_editing) {
+            cancelHints();
         }
         if (st.hint_mode && st.hint_root != currentRootView()) {
             cancelHints();
@@ -1242,10 +2075,13 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
         const int mods = combo.mod;
         const bool ctrl = (mods & brls::BRLS_KBD_MODIFIER_CTRL) != 0;
         const bool shift = (mods & brls::BRLS_KBD_MODIFIER_SHIFT) != 0;
+        const bool alt = (mods & brls::BRLS_KBD_MODIFIER_ALT) != 0;
+        const bool meta = (mods & brls::BRLS_KBD_MODIFIER_META) != 0;
+        const bool plain = !ctrl && !shift && !alt && !meta;
 
         if (!fallback) {
             // Global shortcuts handled before focused view actions:
-            if (!repeating && key == brls::BRLS_KBD_KEY_F8) {
+            if (!repeating && !ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_F8) {
                 if (!in_modal_activity && st.callbacks.on_toggle_dock) {
                     ensureGamepadMode();
                     st.callbacks.on_toggle_dock();
@@ -1253,41 +2089,81 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
                 return true;
             }
 
-            if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_F11) {
+            if (!repeating && !ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_F11) {
                 if (st.callbacks.on_toggle_fullscreen) {
                     st.callbacks.on_toggle_fullscreen();
                 }
                 return true;
             }
 
-            if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_F9) {
+            if (!inline_editing && !repeating && !ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_F9) {
                 if (!in_modal_activity && st.callbacks.on_skip_ad && st.callbacks.on_skip_ad()) {
                     return true;
                 }
             }
 
-            if (!repeating && ctrl && key == brls::BRLS_KBD_KEY_TAB) {
+            if (!repeating && ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_TAB) {
                 if (!in_modal_activity && st.callbacks.on_cycle_workspace) {
+                    if (inline_editing) InlineEditorRegistry::blurActiveEditor();
                     ensureGamepadMode();
                     st.callbacks.on_cycle_workspace(shift ? -1 : 1);
                     return true;
                 }
             }
 
-            if (!repeating && ctrl && !shift && key == brls::BRLS_KBD_KEY_K) {
+            if (!repeating && ctrl && !shift && !alt && !meta && key == brls::BRLS_KBD_KEY_K) {
                 if (!in_modal_activity && st.callbacks.on_command_palette) {
+                    if (inline_editing) InlineEditorRegistry::blurActiveEditor();
                     ensureGamepadMode();
                     st.callbacks.on_command_palette();
                     return true;
                 }
             }
 
-            if (!repeating && ctrl && key >= brls::BRLS_KBD_KEY_1 && key <= brls::BRLS_KBD_KEY_9) {
+            if (!repeating && ctrl && !shift && !alt && !meta && key == brls::BRLS_KBD_KEY_COMMA) {
+                if (!in_modal_activity && st.callbacks.on_open_settings) {
+                    if (inline_editing) InlineEditorRegistry::blurActiveEditor();
+                    ensureGamepadMode();
+                    st.callbacks.on_open_settings();
+                    return true;
+                }
+            }
+
+            if (!repeating && ctrl && !shift && !alt && !meta &&
+                key >= brls::BRLS_KBD_KEY_1 && key <= brls::BRLS_KBD_KEY_9) {
                 if (!in_modal_activity && st.callbacks.on_select_workspace) {
+                    if (inline_editing) InlineEditorRegistry::blurActiveEditor();
                     ensureGamepadMode();
                     st.callbacks.on_select_workspace(key - brls::BRLS_KBD_KEY_1);
                     return true;
                 }
+            }
+
+            if (!in_modal_activity && isEmbeddedBrowserCaptured()) {
+                cancelHints();
+                return true;
+            }
+
+            // Semantic Alt+<Letter/Digit> direct jump to any plugin workspace extension
+            if (!repeating && alt && !ctrl && !shift && !meta && !in_modal_activity &&
+                st.callbacks.on_select_plugin_shortcut) {
+                char target_ch = '\0';
+                if (key >= brls::BRLS_KBD_KEY_A && key <= brls::BRLS_KBD_KEY_Z) {
+                    target_ch = static_cast<char>('A' + (key - brls::BRLS_KBD_KEY_A));
+                } else if (key >= brls::BRLS_KBD_KEY_0 && key <= brls::BRLS_KBD_KEY_9) {
+                    target_ch = static_cast<char>('0' + (key - brls::BRLS_KBD_KEY_0));
+                }
+                if (target_ch != '\0') {
+                    if (inline_editing) InlineEditorRegistry::blurActiveEditor();
+                    ensureGamepadMode();
+                    if (st.callbacks.on_select_plugin_shortcut(target_ch)) {
+                        return true;
+                    }
+                }
+            }
+
+            if (inline_editing) {
+                return true;
             }
 
             // Vim hint overlay mode (works in both main workbenches and modal dialogs)
@@ -1304,7 +2180,8 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
                     }
                     return true;
                 }
-                if (!repeating && !ctrl && key >= brls::BRLS_KBD_KEY_A && key <= brls::BRLS_KBD_KEY_Z) {
+                if (!repeating && !ctrl && !alt && !meta &&
+                    key >= brls::BRLS_KBD_KEY_A && key <= brls::BRLS_KBD_KEY_Z) {
                     const char ch = static_cast<char>('A' + (key - brls::BRLS_KBD_KEY_A));
                     st.hint_prefix += ch;
                     std::vector<HintTarget> matches;
@@ -1345,7 +2222,7 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             }
 
             // Tab / Shift+Tab cycles major panes in workbenches and controls in modals.
-            if (!ctrl && key == brls::BRLS_KBD_KEY_TAB) {
+            if (!ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_TAB) {
                 if (!repeating) {
                     cyclePaneOrModalFocus(shift);
                 }
@@ -1353,14 +2230,14 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             }
 
             // Letter hints 'f' work everywhere, including Ctrl+K palette & popovers.
-            if (!repeating && !ctrl && !shift && key == brls::BRLS_KBD_KEY_F) {
+            if (!repeating && plain && key == brls::BRLS_KBD_KEY_F) {
                 ensureGamepadMode();
                 buildHints();
                 st.hint_mode = !st.hints.empty();
                 return true;
             }
 
-            if (!in_modal_activity && !repeating && !ctrl) {
+            if (!in_modal_activity && !repeating && !ctrl && !alt && !meta) {
                 if (key == brls::BRLS_KBD_KEY_SLASH && !shift) {
                     if (st.callbacks.on_search) {
                         ensureGamepadMode();
@@ -1383,12 +2260,20 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             return false;
         }
 
+        if (inline_editing) {
+            return true;
+        }
+
+        if (!in_modal_activity && isEmbeddedBrowserCaptured()) {
+            return true;
+        }
+
         if (brls::Application::isInputBlocks()) {
             return false;
         }
 
         // Escape: close modal dialog if open, otherwise cancel active stream/fetch on root.
-        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_ESCAPE) {
+        if (!repeating && plain && key == brls::BRLS_KBD_KEY_ESCAPE) {
             if (in_modal_activity) {
                 if (auto* dlg = dynamic_cast<brls::Dialog*>(currentRootView())) {
                     dlg->close();
@@ -1403,31 +2288,31 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
         }
 
         // Space activates the focused button/card when not consumed by a media view.
-        if (!repeating && !ctrl && !shift && key == brls::BRLS_KBD_KEY_SPACE) {
+        if (!repeating && plain && key == brls::BRLS_KBD_KEY_SPACE) {
             return triggerFocusedClick();
         }
 
         // Ctrl+D / Ctrl+U / PageDown / PageUp / Home / End / gg / G scrolling (works in modals too)
-        if (ctrl && key == brls::BRLS_KBD_KEY_D) {
+        if (ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_D) {
             return repeating ? true : scrollCurrentBy(280.0f, false);
         }
-        if (ctrl && key == brls::BRLS_KBD_KEY_U) {
+        if (ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_U) {
             return repeating ? true : scrollCurrentBy(-280.0f, false);
         }
-        if (!ctrl && key == brls::BRLS_KBD_KEY_PAGE_DOWN) {
+        if (plain && key == brls::BRLS_KBD_KEY_PAGE_DOWN) {
             return repeating ? true : scrollCurrentBy(460.0f, false);
         }
-        if (!ctrl && key == brls::BRLS_KBD_KEY_PAGE_UP) {
+        if (plain && key == brls::BRLS_KBD_KEY_PAGE_UP) {
             return repeating ? true : scrollCurrentBy(-460.0f, false);
         }
-        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_HOME) {
+        if (!repeating && plain && key == brls::BRLS_KBD_KEY_HOME) {
             return scrollToEdge(false);
         }
-        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_END) {
+        if (!repeating && plain && key == brls::BRLS_KBD_KEY_END) {
             return scrollToEdge(true);
         }
 
-        if (!repeating && !ctrl && key == brls::BRLS_KBD_KEY_G) {
+        if (!repeating && !ctrl && !alt && !meta && key == brls::BRLS_KBD_KEY_G) {
             if (shift) {
                 st.pending_g = false;
                 return scrollToEdge(true);
@@ -1445,7 +2330,7 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
         st.pending_g = false;
 
         // hjkl directional focus movement (initial press here; hold driven at 26 Hz by tickDesktopRepeat)
-        if (!ctrl && !shift) {
+        if (plain) {
             if (key == brls::BRLS_KBD_KEY_H) {
                 return repeating ? true : navigateDirection(brls::FocusDirection::LEFT, false);
             }
@@ -1484,6 +2369,7 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             {brls::BRLS_KBD_KEY_D, brls::BRLS_KBD_MODIFIER_CTRL},
             {brls::BRLS_KBD_KEY_U, brls::BRLS_KBD_MODIFIER_CTRL},
             {brls::BRLS_KBD_KEY_K, brls::BRLS_KBD_MODIFIER_CTRL},
+            {brls::BRLS_KBD_KEY_COMMA, brls::BRLS_KBD_MODIFIER_CTRL},
             {brls::BRLS_KBD_KEY_SLASH, 0},
             {brls::BRLS_KBD_KEY_SLASH, brls::BRLS_KBD_MODIFIER_SHIFT},
             {brls::BRLS_KBD_KEY_G, brls::BRLS_KBD_MODIFIER_SHIFT},
@@ -1492,15 +2378,16 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
             brls::Application::addToWatchedKeys(c);
         }
         for (int k = brls::BRLS_KBD_KEY_A; k <= brls::BRLS_KBD_KEY_Z; ++k) {
-            brls::Application::addToWatchedKeys(
-                {static_cast<brls::BrlsKeyboardScancode>(k), 0});
+            const auto sc = static_cast<brls::BrlsKeyboardScancode>(k);
+            brls::Application::addToWatchedKeys({sc, 0});
+            brls::Application::addToWatchedKeys({sc, brls::BRLS_KBD_MODIFIER_ALT});
         }
         for (int k = brls::BRLS_KBD_KEY_0; k <= brls::BRLS_KBD_KEY_9; ++k) {
-            brls::Application::addToWatchedKeys(
-                {static_cast<brls::BrlsKeyboardScancode>(k), 0});
+            const auto sc = static_cast<brls::BrlsKeyboardScancode>(k);
+            brls::Application::addToWatchedKeys({sc, 0});
+            brls::Application::addToWatchedKeys({sc, brls::BRLS_KBD_MODIFIER_ALT});
             if (k >= brls::BRLS_KBD_KEY_1) {
-                brls::Application::addToWatchedKeys(
-                    {static_cast<brls::BrlsKeyboardScancode>(k), brls::BRLS_KBD_MODIFIER_CTRL});
+                brls::Application::addToWatchedKeys({sc, brls::BRLS_KBD_MODIFIER_CTRL});
             }
         }
     }
@@ -1510,6 +2397,8 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
 }
 
 void DesktopInputController::renderOverlay(NVGcontext* vg) {
+    renderScrollbars(vg);
+    renderHoverHighlight(vg);
     renderFocusRing(vg);
 
     const auto& st = state();
@@ -1562,48 +2451,104 @@ void DesktopInputController::renderOverlay(NVGcontext* vg) {
 }
 
 void DesktopInputController::showShortcutsHelp() {
-    auto* box = new brls::Box(brls::Axis::COLUMN);
-    box->setPadding(22);
-    box->setWidth(560);
+    auto* outer = new brls::Box(brls::Axis::COLUMN);
+    outer->setPadding(22, 24, 16, 24);
+    outer->setWidth(640);
 
-    auto* title = ui::makeLabel("OmniDesk 桌面快捷键", 22.0f, "brls/text");
-    title->setMarginBottom(12);
-    box->addView(title);
+    auto* title = ui::makeLabel("OmniDesk 桌面快捷键速查", 21.0f, "brls/text");
+    title->setMarginBottom(4);
+    outer->addView(title);
+    auto* sub = ui::makeLabel("Ctrl+1..5 切换核心主台 · Alt+字母 一键直达全部扩展工作区", 13.5f, "font/grey");
+    sub->setMarginBottom(12);
+    outer->addView(sub);
+
+    auto* scroll = new brls::ScrollingFrame();
+    scroll->setWidthPercentage(100);
+    scroll->setHeight(430);
+    auto* box = new brls::Box(brls::Axis::COLUMN);
+    box->setWidthPercentage(100);
 
     struct Row {
         const char* keys;
         const char* desc;
     };
     const Row rows[] = {
+        {"Ctrl + 1..5", "切换五大主工作台（1 插件市场 · 2 影视音乐 · 3 文字期刊 · 4 书本 PDF · 5 AI 对话）"},
+        {"AI 内联输入框", "Enter 发送 · Shift+Enter 换行 · Ctrl+V 无限字数粘贴 · Esc 退出编辑"},
+        {"Alt + 字母", "语义助记直达任意插件扩展（无数量上限，顺序固定，见下方实时列表）"},
+        {"Ctrl + ,", "打开宿主与系统设置面板"},
+        {"Ctrl + Tab / Shift+Tab", "按侧栏分组顺序正向 / 反向循环切换工作区"},
+        {"Ctrl + K", "打开跨三域全局检索与命令面板 (SQLite FTS5)"},
         {"方向键 / h j k l", "跨网格列保持与跨面板焦点导航（长按 26Hz 高速连发）"},
         {"Tab / Shift+Tab", "在左侧栏 / 顶栏 / 主列表 / 阅读详情 / 伴读栏之间循环切换"},
-        {"Enter / Space", "激活当前高亮蓝色焦点框所在的卡片、按钮或段落"},
+        {"Enter / Space", "激活当前焦点框所在的卡片、按钮、段落或分组折叠头"},
         {"f", "激活全局字母直达角标（主界面与弹窗均支持）"},
         {"Ctrl+D / Ctrl+U / PgUp / PgDn", "半页 / 整页平滑滚动并同步保持视口焦点"},
         {"gg / G / Home / End", "滚动并定位至当前滚动区顶部 / 底部"},
-        {"Ctrl + 1..9", "切换工作台（插件市场 / 影视音乐 / 文字期刊 / 书本PDF / 扩展）"},
-        {"Ctrl + Tab / Ctrl+Shift+Tab", "顺序或反向切换左侧工作区标签"},
-        {"Ctrl + K", "打开跨三域全局检索与命令面板 (SQLite FTS5)"},
         {"F8 / F11 / F9", "切换 AI 伴读栏 / 切换全屏 / 跳过广告片段"},
-        {"/ · t · ?", "当前工作台检索 · 切换亮暗主题 · 打开快捷键速查表"},
-        {"Esc", "关闭当前弹窗，或中断活跃 AI 流式推理 / 异步拉取"},
+        {"/ · t · ? · Esc", "当前工作台检索 · 切换亮暗主题 · 快捷键速查 · 关闭/中断任务"},
     };
 
     for (const auto& r : rows) {
         auto* row = new brls::Box(brls::Axis::ROW);
         row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
         row->setAlignItems(brls::AlignItems::CENTER);
-        row->setMarginBottom(8);
+        row->setMarginBottom(7);
 
         row->addView(ui::makePill(r.keys, "desktop/soft", "desktop/focus_ring"));
-        auto* desc = ui::makeLabel(r.desc, 14.5f, "font/grey");
+        auto* desc = ui::makeLabel(r.desc, 14.0f, "font/grey");
         desc->setGrow(1.0f);
         desc->setMarginLeft(12);
         row->addView(desc);
         box->addView(row);
     }
 
-    auto* dialog = new brls::Dialog(box);
+    if (HostKernel::instance().isInitialized()) {
+        const auto assigned = assignPluginNavTabs(HostKernel::instance().domains().workspaceTabs());
+        if (!assigned.empty()) {
+            box->addView(ui::makeDivider(10.0f));
+            auto* ext_hdr = ui::makeLabel("已装载扩展工作区直达键 (Alt + 语义键)", 15.0f, "brls/text");
+            ext_hdr->setMarginBottom(8);
+            box->addView(ext_hdr);
+
+            for (size_t i = 0; i < assigned.size(); i += 2) {
+                auto* pair_row = new brls::Box(brls::Axis::ROW);
+                pair_row->setWidthPercentage(100);
+                pair_row->setMarginBottom(6);
+                for (size_t j = 0; j < 2 && (i + j) < assigned.size(); ++j) {
+                    const auto& item = assigned[i + j];
+                    auto* cell = new brls::Box(brls::Axis::ROW);
+                    cell->setGrow(1.0f);
+                    cell->setWidthPercentage(48);
+                    cell->setPadding(5, 10, 5, 10);
+                    cell->setCornerRadius(8.0f);
+                    cell->setBackgroundColor(ui::color("desktop/soft"));
+                    cell->setAlignItems(brls::AlignItems::CENTER);
+                    cell->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+                    if (j == 0) cell->setMarginRight(8);
+
+                    auto* name_lbl = ui::makeLabel(item.spec.title, 13.5f, "brls/text");
+                    name_lbl->setSingleLine(true);
+                    name_lbl->setShrink(1.0f);
+                    cell->addView(name_lbl);
+
+                    if (!item.shortcut_label.empty()) {
+                        auto* kbd = ui::makePill(item.shortcut_label, "desktop/surface", item.domain_token);
+                        kbd->setMarginLeft(8);
+                        kbd->setShrink(0.0f);
+                        cell->addView(kbd);
+                    }
+                    pair_row->addView(cell);
+                }
+                box->addView(pair_row);
+            }
+        }
+    }
+
+    scroll->setContentView(box);
+    outer->addView(scroll);
+
+    auto* dialog = new brls::Dialog(outer);
     dialog->addButton("关闭", [] {});
     dialog->open();
 }

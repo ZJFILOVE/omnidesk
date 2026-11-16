@@ -18,11 +18,46 @@ WorkerMediaSource::WorkerMediaSource(WorkerSupervisor& workers,
       plugin_id_(std::move(plugin_id)),
       source_id_(std::move(source_id)),
       display_name_(std::move(display_name)),
-      cached_categories_(std::move(categories)) {}
+      cached_categories_(std::move(categories)),
+      categories_cached_(!cached_categories_.empty()),
+      cached_registration_gen_(
+          categories_cached_ ? workers_.registrationGeneration(worker_id_) : 0) {}
+
+void WorkerMediaSource::seedCategories(std::vector<std::string> categories) {
+    std::lock_guard<std::mutex> lk(metadata_mutex_);
+    ++metadata_epoch_;
+    cached_categories_ = std::move(categories);
+    categories_cached_ = true;
+    cached_registration_gen_ = workers_.registrationGeneration(worker_id_);
+}
+
+void WorkerMediaSource::invalidateMetadataCache() {
+    std::lock_guard<std::mutex> lk(metadata_mutex_);
+    ++metadata_epoch_;
+    cached_categories_.clear();
+    categories_cached_ = false;
+    cached_registration_gen_ = 0;
+}
 
 std::vector<std::string> WorkerMediaSource::categories() const {
-    if (!cached_categories_.empty()) {
-        return cached_categories_;
+    const uint64_t cur_gen = workers_.registrationGeneration(worker_id_);
+    uint64_t fetch_epoch = 0;
+    {
+        std::lock_guard<std::mutex> lk(metadata_mutex_);
+        if (categories_cached_) {
+            if (cached_registration_gen_ == 0) {
+                if (cur_gen != 0) cached_registration_gen_ = cur_gen;
+                return cached_categories_;
+            }
+            if (cur_gen == cached_registration_gen_) {
+                return cached_categories_;
+            }
+            cached_categories_.clear();
+            categories_cached_ = false;
+            cached_registration_gen_ = 0;
+            ++metadata_epoch_;
+        }
+        fetch_epoch = metadata_epoch_;
     }
     CapabilityResult res = workers_.request(
         worker_id_,
@@ -33,14 +68,31 @@ std::vector<std::string> WorkerMediaSource::categories() const {
         return {};
     }
     std::vector<std::string> out;
+    out.reserve(res.data["categories"].size());
     for (const auto& c : res.data["categories"]) {
         if (c.is_string()) out.push_back(c.get<std::string>());
+    }
+    const uint64_t post_gen = workers_.registrationGeneration(worker_id_);
+    if (post_gen != 0 && (cur_gen == 0 || post_gen == cur_gen)) {
+        std::lock_guard<std::mutex> lk(metadata_mutex_);
+        if (metadata_epoch_ == fetch_epoch) {
+            cached_categories_ = out;
+            categories_cached_ = true;
+            cached_registration_gen_ = post_gen;
+        }
     }
     return out;
 }
 
 std::vector<MediaItem> WorkerMediaSource::fetchItems(const std::string& category,
                                                      const std::string& query) {
+    return fetchItemsPage(category, query, 1, false);
+}
+
+std::vector<MediaItem> WorkerMediaSource::fetchItemsPage(const std::string& category,
+                                                         const std::string& query,
+                                                         int page,
+                                                         bool force_refresh) {
     CapabilityResult res = workers_.request(
         worker_id_,
         {
@@ -48,6 +100,8 @@ std::vector<MediaItem> WorkerMediaSource::fetchItems(const std::string& category
             {"source_id", source_id_},
             {"category", category},
             {"query", query},
+            {"page", page},
+            {"force_refresh", force_refresh},
         },
         nullptr,
         30000);
@@ -94,15 +148,55 @@ WorkerTextSource::WorkerTextSource(WorkerSupervisor& workers,
                                    std::string plugin_id,
                                    std::string source_id,
                                    std::string display_name,
-                                   std::string category)
+                                   std::string category,
+                                   std::vector<TextChannel> channels)
     : workers_(workers),
       worker_id_(std::move(worker_id)),
       plugin_id_(std::move(plugin_id)),
       source_id_(std::move(source_id)),
       display_name_(std::move(display_name)),
-      category_(std::move(category)) {}
+      category_(std::move(category)),
+      cached_channels_(std::move(channels)),
+      channels_cached_(!cached_channels_.empty()),
+      cached_registration_gen_(
+          channels_cached_ ? workers_.registrationGeneration(worker_id_) : 0) {}
+
+void WorkerTextSource::seedChannels(std::vector<TextChannel> channels) {
+    std::lock_guard<std::mutex> lk(metadata_mutex_);
+    ++metadata_epoch_;
+    cached_channels_ = std::move(channels);
+    channels_cached_ = true;
+    cached_registration_gen_ = workers_.registrationGeneration(worker_id_);
+}
+
+void WorkerTextSource::invalidateMetadataCache() {
+    std::lock_guard<std::mutex> lk(metadata_mutex_);
+    ++metadata_epoch_;
+    cached_channels_.clear();
+    channels_cached_ = false;
+    cached_registration_gen_ = 0;
+}
 
 std::vector<TextChannel> WorkerTextSource::channels() const {
+    const uint64_t cur_gen = workers_.registrationGeneration(worker_id_);
+    uint64_t fetch_epoch = 0;
+    {
+        std::lock_guard<std::mutex> lk(metadata_mutex_);
+        if (channels_cached_) {
+            if (cached_registration_gen_ == 0) {
+                if (cur_gen != 0) cached_registration_gen_ = cur_gen;
+                return cached_channels_;
+            }
+            if (cur_gen == cached_registration_gen_) {
+                return cached_channels_;
+            }
+            cached_channels_.clear();
+            channels_cached_ = false;
+            cached_registration_gen_ = 0;
+            ++metadata_epoch_;
+        }
+        fetch_epoch = metadata_epoch_;
+    }
     CapabilityResult res = workers_.request(
         worker_id_,
         {
@@ -111,18 +205,35 @@ std::vector<TextChannel> WorkerTextSource::channels() const {
         },
         nullptr,
         15000);
-    if (!res.ok || !res.data.contains("channels")) {
+    if (!res.ok || !res.data.contains("channels") || !res.data["channels"].is_array()) {
         return {};
     }
-    return fromJsonArray<TextChannel>(res.data["channels"]);
+    auto out = fromJsonArray<TextChannel>(res.data["channels"]);
+    const uint64_t post_gen = workers_.registrationGeneration(worker_id_);
+    if (post_gen != 0 && (cur_gen == 0 || post_gen == cur_gen)) {
+        std::lock_guard<std::mutex> lk(metadata_mutex_);
+        if (metadata_epoch_ == fetch_epoch) {
+            cached_channels_ = out;
+            channels_cached_ = true;
+            cached_registration_gen_ = post_gen;
+        }
+    }
+    return out;
 }
 
 std::vector<TextFeedItem> WorkerTextSource::fetchFeed(const std::string& query) {
-    return fetchFeedInChannel("", query);
+    return fetchFeedPage("", query, 1, false);
 }
 
 std::vector<TextFeedItem> WorkerTextSource::fetchFeedInChannel(const std::string& channel_id,
                                                                const std::string& query) {
+    return fetchFeedPage(channel_id, query, 1, false);
+}
+
+std::vector<TextFeedItem> WorkerTextSource::fetchFeedPage(const std::string& channel_id,
+                                                          const std::string& query,
+                                                          int page,
+                                                          bool force_refresh) {
     CapabilityResult res = workers_.request(
         worker_id_,
         {
@@ -130,6 +241,8 @@ std::vector<TextFeedItem> WorkerTextSource::fetchFeedInChannel(const std::string
             {"source_id", source_id_},
             {"channel_id", channel_id},
             {"query", query},
+            {"page", page},
+            {"force_refresh", force_refresh},
         },
         nullptr,
         30000);

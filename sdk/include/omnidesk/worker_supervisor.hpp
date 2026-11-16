@@ -148,12 +148,17 @@ public:
     std::optional<WorkerStatus> status(const std::string& worker_id) const;
     std::vector<WorkerStatus> listWorkers() const;
 
+    /// Returns a monotonic non-zero token per registerWorker() call (0 if unregistered).
+    /// Remains stable across idle stops and crash restarts, changing only when re-registered/unloaded.
+    uint64_t registrationGeneration(const std::string& worker_id) const;
+
 private:
     struct PendingOutbound;
     struct InboundExecutor;
 
     struct WorkerRuntime {
         WorkerSpec spec;
+        uint64_t registration_id = 0;
         std::mutex state_mutex;
         std::timed_mutex io_mutex;
         std::timed_mutex write_mutex;
@@ -247,6 +252,7 @@ private:
     std::unique_ptr<InboundExecutor> inbound_executor_;
     std::condition_variable watchdog_cv_;
     std::thread watchdog_thread_;
+    uint64_t next_registration_id_ = 1;
     bool shutting_down_ = false;
 };
 

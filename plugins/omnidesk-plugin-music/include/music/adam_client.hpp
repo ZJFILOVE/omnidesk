@@ -6,6 +6,8 @@
 #include <mutex>
 #include <omnidesk/async.hpp>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace music_plugin {
@@ -66,7 +68,13 @@ public:
 
     // Metadata & native lyrics
     bool fetchMetadata(const std::string& asset_id, const std::string& storefront, MusicTrack& out, std::string& error);
+    bool fetchBatchMetadata(const std::vector<std::pair<std::string, std::string>>& id_and_sf,
+                            std::unordered_map<std::string, MusicTrack>& out,
+                            std::string& error);
     bool fetchNativeLyrics(const std::string& asset_id, const std::string& storefront, std::string& lrc_out, std::string& error);
+
+    std::string effectiveStorefront(const std::string& override_sf = "") const;
+    bool allowLocalAdamDrmFallback() const;
 
     // Library (local SQLite playlists & tracks)
     bool fetchLibraryStatus(nlohmann::json& out, std::string& error);
@@ -141,8 +149,9 @@ private:
                                bool require_mut,
                                const std::shared_ptr<omnidesk::CancelToken>& cancel);
     std::string resolveMediaUserTokenWithFallback() const;
+    std::string discoverLocalAdamMusicToken() const;
+    std::string discoverLocalAdamStorefront() const;
     std::string fetchDeveloperJwtFromApple();
-    std::string effectiveStorefront(const std::string& override_sf = "") const;
 
     LyricsCacheStore* cache_ = nullptr;
     mutable std::mutex cfg_mutex_;

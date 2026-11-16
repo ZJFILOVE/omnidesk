@@ -66,9 +66,9 @@
       "key": "auto_pull_remote",
       "label": "启动/同步时自动拉取远端更新",
       "type": "bool",
-      "default": false,
+      "default": true,
       "required": false,
-      "description": "默认 false 以保证快速非阻塞启动；开启或显式同步时对干净工作树执行 git fetch + merge --ff-only"
+      "description": "默认开启：先快速加载本地缓存，随后后台对干净工作树执行 git fetch + merge --ff-only 同步 GitHub 最新每日更新"
     }
   ]
 }

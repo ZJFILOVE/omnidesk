@@ -1,9 +1,17 @@
 #include <borealis.hpp>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <fcntl.h>
 #include <filesystem>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
 #include "omnidesk/host/kernel.hpp"
 #include "omnidesk/host/shell_activity.hpp"
 #include "omnidesk/dso_view_lease.hpp"
@@ -13,6 +21,85 @@ namespace fs = std::filesystem;
 
 namespace {
 
+struct MappedFontRegion {
+    void* addr = nullptr;
+    size_t size = 0;
+
+    MappedFontRegion() = default;
+    MappedFontRegion(void* a, size_t s) : addr(a), size(s) {}
+    MappedFontRegion(const MappedFontRegion&) = delete;
+    MappedFontRegion& operator=(const MappedFontRegion&) = delete;
+    MappedFontRegion(MappedFontRegion&& other) noexcept : addr(other.addr), size(other.size) {
+        other.addr = nullptr;
+        other.size = 0;
+    }
+    MappedFontRegion& operator=(MappedFontRegion&& other) noexcept {
+        if (this != &other) {
+            if (addr && size > 0) {
+                ::munmap(addr, size);
+            }
+            addr = other.addr;
+            size = other.size;
+            other.addr = nullptr;
+            other.size = 0;
+        }
+        return *this;
+    }
+    ~MappedFontRegion() {
+        if (addr && size > 0) {
+            ::munmap(addr, size);
+        }
+    }
+};
+
+struct MappedFontStore {
+    std::mutex mu;
+    std::vector<MappedFontRegion> regions;
+};
+
+// Constructed before brls::Application::init() so mappings outlive atexit(Application::exit)
+MappedFontStore g_mapped_fonts;
+
+bool loadFontZeroCopyOrFallback(const std::string& slot_name, const std::string& ttf_path) {
+    if (ttf_path.empty()) return false;
+    const int fd = ::open(ttf_path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        struct stat st {};
+        if (::fstat(fd, &st) == 0 && st.st_size > 0) {
+            const size_t sz = static_cast<size_t>(st.st_size);
+            void* mapped = ::mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+            ::close(fd);
+            if (mapped != MAP_FAILED) {
+                if (brls::Application::loadFontFromMemory(slot_name, mapped, sz, false)) {
+                    std::lock_guard<std::mutex> lk(g_mapped_fonts.mu);
+                    g_mapped_fonts.regions.emplace_back(mapped, sz);
+                    return true;
+                }
+                ::munmap(mapped, sz);
+            }
+        } else {
+            ::close(fd);
+        }
+    }
+    return brls::Application::loadFontFromFile(slot_name, ttf_path);
+}
+
+void attachFallbackFont(NVGcontext* vg,
+                        int base_font,
+                        const std::string& slot_name,
+                        const std::string& ttf_path) {
+    if (!vg || base_font < 0 || ttf_path.empty()) return;
+    std::error_code ec;
+    if (!fs::exists(ttf_path, ec)) return;
+    int fid = brls::Application::getFont(slot_name);
+    if (fid < 0 && loadFontZeroCopyOrFallback(slot_name, ttf_path)) {
+        fid = brls::Application::getFont(slot_name);
+    }
+    if (fid >= 0 && fid != base_font) {
+        nvgAddFallbackFontId(vg, base_font, fid);
+    }
+}
+
 void configureRuntimePaths(const char* argv0) {
     // Ensure BRLS_ASSET("...") resolves against compiled/staged resources/ directory
     std::error_code ec;
@@ -21,7 +108,9 @@ void configureRuntimePaths(const char* argv0) {
         if (ec && argv0) {
             exe = fs::weakly_canonical(argv0, ec);
         }
-        if (!exe.empty()) {
+        if (ec || exe.empty()) {
+            // keep current path
+        } else {
             fs::path exe_dir = exe.parent_path();
             if (fs::exists(exe_dir / "resources" / "font" / "switch_font.ttf", ec)) {
                 fs::current_path(exe_dir, ec);
@@ -88,6 +177,20 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!headless_check && smoke_ms == 0) {
+        const char* multi_env = std::getenv("OMNIDESK_ALLOW_MULTI_INSTANCE");
+        const bool allow_multi = multi_env && std::string(multi_env) == "1";
+        if (!allow_multi) {
+            const auto ping = omnidesk::pm::sendControlRequest({{"op", "ping"}}, 600);
+            if (ping.transport_ok && ping.ok) {
+                const int remote_pid = ping.data.is_object() ? ping.data.value("pid", 0) : 0;
+                std::cout << "OmniDesk 已在运行中 (PID " << remote_pid
+                          << ")，已复用现有工作台实例。\n";
+                return 0;
+            }
+        }
+    }
+
     auto& kernel = omnidesk::host::HostKernel::instance();
     if (!kernel.init(argc > 0 ? argv[0] : nullptr)) {
         std::cerr << "Failed initializing OmniDesk HostKernel\n";
@@ -124,13 +227,36 @@ int main(int argc, char** argv) {
     }
     omnidesk::ui::applyDesignSystemTheme();
 
+    auto ui_loop_alive = std::make_shared<std::atomic<bool>>(true);
+
     brls::Application::createWindow("OmniDesk");
+    if (NVGcontext* vg = brls::Application::getNVGContext()) {
+        const int base_font = brls::Application::getFont(brls::FONT_REGULAR);
+        if (base_font >= 0) {
+            // Essential CJK + Emoji fallbacks mounted zero-copy via mmap before first frame
+            attachFallbackFont(vg, base_font, brls::FONT_EMOJI, kernel.assetPath("font/emoji.ttf"));
+            attachFallbackFont(vg, base_font, "omnidesk_cjk", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
+
+            // Secondary symbol / math / IPA fallbacks deferred until after first paint
+            brls::delay(100, [ui_loop_alive, base_font]() {
+                if (!ui_loop_alive->load(std::memory_order_acquire)) return;
+                NVGcontext* delayed_vg = brls::Application::getNVGContext();
+                if (!delayed_vg) return;
+                attachFallbackFont(delayed_vg, base_font, "omnidesk_symbols2", "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf");
+                attachFallbackFont(delayed_vg, base_font, "omnidesk_math", "/usr/share/fonts/noto/NotoSansMath-Regular.ttf");
+                attachFallbackFont(delayed_vg, base_font, "omnidesk_latin_ipa", "/usr/share/fonts/noto/NotoSans-Regular.ttf");
+                attachFallbackFont(delayed_vg, base_font, "omnidesk_symbols1", "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf");
+            });
+        }
+    }
     brls::Application::setGlobalQuit(false);
-    brls::Application::setAutomaticDeactivation(false);
-    brls::Application::setDeactivatedFPS(60);
+    brls::Application::setAutomaticDeactivation(true);
+    brls::Application::setDeactivatedTime(300);
+    brls::Application::setDeactivatedFPS(8);
     omnidesk::DsoViewLeaseRegistry::instance().markUiThread();
     kernel.startDesktopServices();
-    brls::Application::getExitEvent()->subscribe([]() {
+    brls::Application::getExitEvent()->subscribe([ui_loop_alive]() {
+        ui_loop_alive->store(false, std::memory_order_release);
         omnidesk::host::HostKernel::instance().stopBackgroundServices();
     });
 
@@ -145,6 +271,7 @@ int main(int argc, char** argv) {
 
     while (brls::Application::mainLoop()) {
     }
+    ui_loop_alive->store(false, std::memory_order_release);
 
     kernel.shutdown();
     return 0;

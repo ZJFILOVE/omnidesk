@@ -582,6 +582,12 @@ public:
     std::string sourceId() const override { return "iso-text"; }
     std::string displayName() const override { return "Isolated Text"; }
     std::string category() const override { return "journal"; }
+    std::vector<omnidesk::TextChannel> channels() const override {
+        return {
+            {"hot", "Hot Papers", "10", false},
+            {"recent", "Recent Submissions", "", false},
+        };
+    }
     std::vector<omnidesk::TextFeedItem> fetchFeed(const std::string& query) override {
         if (std::getenv("OMNIDESK_TEST_SLOW_DOMAIN")) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -729,13 +735,23 @@ OMNIDESK_DECLARE_PLUGIN(
 
         auto m_srcs = domains.mediaSources();
         TEST_CHECK(m_srcs.size() == 1 && m_srcs[0]->sourceId() == "iso-media");
+        const uint64_t reqs_before_meta = iso_workers.status("plugin:plugin-isolated-test")->requests_served;
+        TEST_CHECK(m_srcs[0]->categories() == (std::vector<std::string>{"all", "sci-fi"}));
+        TEST_CHECK(m_srcs[0]->categories() == (std::vector<std::string>{"all", "sci-fi"}));
+        TEST_CHECK(iso_workers.status("plugin:plugin-isolated-test")->requests_served == reqs_before_meta);
         auto m_items = m_srcs[0]->fetchItems("sci-fi", "dune");
         TEST_CHECK(m_items.size() == 1 && m_items[0].title == "sci-fi:dune");
         TEST_CHECK(m_srcs[0]->fetchLyrics("m1").size() == 1);
         TEST_CHECK(m_srcs[0]->fetchChapters("m1").size() == 1);
 
         auto t_srcs = domains.textSources();
-        TEST_CHECK(t_srcs.size() == 1 && t_srcs[0]->fetchFeed("abi").size() == 1);
+        TEST_CHECK(t_srcs.size() == 1);
+        const uint64_t reqs_before_chans = iso_workers.status("plugin:plugin-isolated-test")->requests_served;
+        auto iso_chans = t_srcs[0]->channels();
+        TEST_CHECK(iso_chans.size() == 2 && iso_chans[0].id == "hot" && iso_chans[1].id == "recent");
+        TEST_CHECK(t_srcs[0]->channels().size() == 2);
+        TEST_CHECK(iso_workers.status("plugin:plugin-isolated-test")->requests_served == reqs_before_chans);
+        TEST_CHECK(t_srcs[0]->fetchFeed("abi").size() == 1);
         TEST_CHECK(t_srcs[0]->fetchArticle("a42").title == "Article:a42");
 
         auto b_srcs = domains.bookSources();

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <borealis.hpp>
 #include <memory>
+#include <omnidesk/image_cache.hpp>
 #include <omnidesk/mpv_core.hpp>
 #include <string>
 #include <vector>
@@ -46,6 +47,7 @@ private:
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     uint64_t engine_sub_ = 0;
     uint64_t mpv_sub_ = 0;
+    uint64_t feed_req_seq_ = 0;
 
     SubTab active_tab_ = SubTab::ForYou;
     std::string search_query_;
@@ -95,6 +97,7 @@ private:
     uint64_t engine_sub_ = 0;
     uint64_t mpv_sub_ = 0;
 
+    omnidesk::CachedImageView* cover_view_ = nullptr;
     brls::Label* track_label_ = nullptr;
     brls::Label* lyric_orig_label_ = nullptr;
     brls::Label* lyric_trans_label_ = nullptr;

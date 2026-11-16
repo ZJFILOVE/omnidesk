@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "omnidesk/export.h"
@@ -53,6 +54,22 @@ struct OMNIDESK_API SearchIndexStats {
     std::string db_path;
 };
 
+enum SearchHydrateScope : uint32_t {
+    kHydrateCommands = 1u << 0,
+    kHydrateDomains  = 1u << 1,
+    kHydrateVocab    = 1u << 2,
+    kHydrateArchives = 1u << 3,
+    kHydrateAll      = kHydrateCommands | kHydrateDomains | kHydrateVocab | kHydrateArchives,
+};
+
+struct OMNIDESK_API SearchHydrateOptions {
+    uint32_t scopes = kHydrateAll;
+    /// Optional filter when `kHydrateDomains` is set: if non-empty, only queries sources matching these IDs.
+    std::unordered_set<std::string> source_ids;
+    /// When true, bypasses file mtime cache to force re-reading local archive files.
+    bool force = false;
+};
+
 /**
  * Lightweight SQLite FTS5 (trigram + short-token fallback) cross-domain search
  * service backing `search.index.v1` and the Ctrl+K OmniCommandPalette.
@@ -78,12 +95,24 @@ public:
     std::vector<SearchHit> search(const SearchQueryOptions& opts) const;
     SearchIndexStats stats() const;
 
+    /// Number of actual SQLite row mutations performed in the most recent upsert/hydrate call.
+    size_t lastWriteCount() const;
+    /// Total `sqlite3_prepare_v2` compilations executed on the currently open database handle.
+    size_t preparedCompileCount() const;
+
     /// Hydrates FTS5 index from DomainRegistry, CapabilityRegistry, data_root archives,
     /// config_root vocab fallback, and built-in/plugin commands.
     size_t hydrateEcosystem(DomainRegistry* domains,
                             CapabilityRegistry* caps,
                             const std::string& data_root,
                             const std::string& config_root);
+
+    /// Incremental / scoped hydration supporting source_id filters and file mtime skip.
+    size_t hydrateIncremental(DomainRegistry* domains,
+                              CapabilityRegistry* caps,
+                              const std::string& data_root,
+                              const std::string& config_root,
+                              const SearchHydrateOptions& opts);
 
     /// Registers `search.index.v1` on CapabilityRegistry.
     void registerCapability(CapabilityRegistry& caps,

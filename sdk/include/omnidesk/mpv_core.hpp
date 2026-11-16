@@ -133,6 +133,7 @@ public:
     /// Initializes libmpv and OpenGL FBO/render context if an OpenGL context is current.
     bool ensureInitialized();
     bool isInitialized() const;
+    bool isVideoPlaying() const;
     void shutdown();
 
     /// Loads media using isolated per-file loadfile options (no cross-stream header leakage).

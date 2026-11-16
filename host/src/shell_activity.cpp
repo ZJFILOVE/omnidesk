@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <unordered_set>
+#include "omnidesk/host/ai_composer.hpp"
+#include "omnidesk/host/ai_workbench.hpp"
+#include "omnidesk/host/auth_center_dialog.hpp"
 #include "omnidesk/host/book_workbench.hpp"
 #include "omnidesk/host/companion_dock.hpp"
 #include "omnidesk/host/curation_calendar_dialog.hpp"
@@ -11,6 +14,7 @@
 #include "omnidesk/host/kernel.hpp"
 #include "omnidesk/host/media_workbench.hpp"
 #include "omnidesk/host/mini_player_bar.hpp"
+#include "omnidesk/host/nav_shortcuts.hpp"
 #include "omnidesk/host/omni_command_palette.hpp"
 #include "omnidesk/host/plugin_store_view.hpp"
 #include "omnidesk/host/svg_view.hpp"
@@ -33,6 +37,29 @@ bool focusIsInside(brls::View* ancestor) {
     return false;
 }
 
+brls::Box* makeKeycapBadge(const std::string& text,
+                           const NVGcolor& bg,
+                           const NVGcolor& border,
+                           const NVGcolor& fg,
+                           brls::Label** out_lbl = nullptr) {
+    auto* kbd = new brls::Box(brls::Axis::ROW);
+    kbd->setHeight(20.0f);
+    kbd->setPadding(0, 6, 0, 6);
+    kbd->setCornerRadius(5.0f);
+    kbd->setShrink(0.0f);
+    kbd->setAlignItems(brls::AlignItems::CENTER);
+    kbd->setJustifyContent(brls::JustifyContent::CENTER);
+    kbd->setBackgroundColor(bg);
+    kbd->setBorderThickness(1.0f);
+    kbd->setBorderColor(border);
+    auto* lbl = ui::makeLabel(text, 11.2f, "font/grey", 1.0f);
+    lbl->setSingleLine(true);
+    lbl->setTextColor(fg);
+    kbd->addView(lbl);
+    if (out_lbl) *out_lbl = lbl;
+    return kbd;
+}
+
 } // namespace
 
 WorkspaceShellActivity::WorkspaceShellActivity(WorkspaceId initial_workspace)
@@ -40,6 +67,11 @@ WorkspaceShellActivity::WorkspaceShellActivity(WorkspaceId initial_workspace)
 
 WorkspaceShellActivity::~WorkspaceShellActivity() {
     alive_->store(false, std::memory_order_release);
+    if (auth_ui_sub_token_ != 0) {
+        AuthCenterManager::instance().unsubscribeChanges(auth_ui_sub_token_);
+        auth_ui_sub_token_ = 0;
+    }
+    AuthCenterManager::instance().stop();
     if (sched_ui_sub_token_ != 0) {
         CurationSchedulerManager::instance().unsubscribeStatus(sched_ui_sub_token_);
         sched_ui_sub_token_ = 0;
@@ -67,6 +99,9 @@ brls::View* WorkspaceShellActivity::createContentView() {
     root_box_->setWidthPercentage(100);
     root_box_->setHeightPercentage(100);
     populateRootBox();
+    brls::sync([]() {
+        MPVCore::instance().ensureInitialized();
+    });
     return root_box_;
 }
 
@@ -76,10 +111,10 @@ void WorkspaceShellActivity::populateRootBox() {
     // Left Navigation Rail
     rail_box_ = new brls::Box(brls::Axis::COLUMN);
     rail_box_->setId("omnidesk/pane_rail");
-    rail_box_->setWidth(260);
+    rail_box_->setWidth(258);
     rail_box_->setShrink(0.0f);
     rail_box_->setHeightPercentage(100);
-    rail_box_->setPadding(18, 14, 16, 14);
+    rail_box_->setPadding(14, 10, 12, 10);
     rail_box_->setBackgroundColor(ui::color("desktop/surface"));
     rail_box_->setBorderThickness(1);
     rail_box_->setBorderColor(ui::color("desktop/line"));
@@ -87,20 +122,68 @@ void WorkspaceShellActivity::populateRootBox() {
     // Brand Header (pinned at top)
     auto* brand = new brls::Box(brls::Axis::ROW);
     brand->setShrink(0.0f);
+    brand->setPadding(0, 4, 0, 4);
     brand->setAlignItems(brls::AlignItems::CENTER);
-    brand->setMarginBottom(12);
-    auto* logo = new SvgIconView(HostKernel::instance().assetPath("svg/omnidesk_logo.svg"));
-    logo->setDimensions(30, 30);
-    logo->setMarginRight(10);
-    brand->addView(logo);
+    brand->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    brand->setMarginBottom(8);
 
-    auto* brand_text = new brls::Box(brls::Axis::COLUMN);
-    brand_text->addView(ui::makeLabel("OmniDesk", 20.0f, "brls/text"));
-    brand_text->addView(ui::makeLabel("Plugin Workbench", 13.0f, "font/grey"));
-    brand->addView(brand_text);
+    auto* brand_left = new brls::Box(brls::Axis::ROW);
+    brand_left->setAlignItems(brls::AlignItems::CENTER);
+    auto* logo = new SvgIconView(HostKernel::instance().assetPath("svg/omnidesk_logo.svg"));
+    logo->setDimensions(26, 26);
+    logo->setMarginRight(9);
+    brand_left->addView(logo);
+    brand_left->addView(ui::makeLabel("OmniDesk", 18.0f, "brls/text"));
+    brand->addView(brand_left);
+
+    auto* ver_lbl = ui::makeLabel("Workbench", 11.5f, "font/grey");
+    brand->addView(ver_lbl);
     rail_box_->addView(brand);
 
-    auto* top_div = ui::makeDivider(6.0f);
+    // Quick Search & Command Trigger Bar (Ctrl+K)
+    auto* search_bar = new brls::Box(brls::Axis::ROW);
+    search_bar->setShrink(0.0f);
+    search_bar->setWidthPercentage(100);
+    search_bar->setHeight(33.0f);
+    search_bar->setPadding(0, 8, 0, 10);
+    search_bar->setMarginBottom(4);
+    search_bar->setCornerRadius(8.0f);
+    search_bar->setHighlightCornerRadius(8.0f);
+    search_bar->setBackgroundColor(ui::color("desktop/soft"));
+    search_bar->setBorderThickness(1.0f);
+    search_bar->setBorderColor(ui::color("desktop/line"));
+    search_bar->setFocusable(true);
+    search_bar->setAlignItems(brls::AlignItems::CENTER);
+    search_bar->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+
+    auto* sb_left = new brls::Box(brls::Axis::ROW);
+    sb_left->setAlignItems(brls::AlignItems::CENTER);
+    sb_left->setShrink(1.0f);
+    auto* sb_icon = new SvgIconView();
+    sb_icon->setSvgString(buildNavIconSvg("search", nvgColorToHex(ui::color("font/grey"))));
+    sb_icon->setDimensions(14, 14);
+    sb_icon->setShrink(0.0f);
+    sb_icon->setMarginRight(8);
+    sb_left->addView(sb_icon);
+    auto* sb_lbl = ui::makeLabel("全局检索与命令...", 12.8f, "font/grey");
+    sb_lbl->setSingleLine(true);
+    sb_lbl->setShrink(1.0f);
+    sb_left->addView(sb_lbl);
+    search_bar->addView(sb_left);
+
+    search_bar->addView(makeKeycapBadge(
+        "Ctrl+K", ui::color("desktop/surface"), ui::color("desktop/line"), ui::color("font/grey")));
+    search_bar->registerClickAction([this, alive = alive_](brls::View*) {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire)) {
+                openCommandPalette();
+            }
+        });
+        return true;
+    });
+    rail_box_->addView(search_bar);
+
+    auto* top_div = ui::makeDivider(5.0f);
     top_div->setShrink(0.0f);
     rail_box_->addView(top_div);
 
@@ -109,8 +192,8 @@ void WorkspaceShellActivity::populateRootBox() {
     nav_scroll->setGrow(1.0f);
     nav_scroll->setShrink(1.0f);
     nav_scroll->setWidthPercentage(100);
-    nav_scroll->setMarginTop(4);
-    nav_scroll->setMarginBottom(6);
+    nav_scroll->setMarginTop(2);
+    nav_scroll->setMarginBottom(4);
 
     auto* nav_scroll_content = new brls::Box(brls::Axis::COLUMN);
     nav_scroll_content->setWidthPercentage(100);
@@ -123,21 +206,79 @@ void WorkspaceShellActivity::populateRootBox() {
     custom_nav_box_ = new brls::Box(brls::Axis::COLUMN);
     custom_nav_box_->setShrink(0.0f);
     custom_nav_box_->setWidthPercentage(100);
-    custom_nav_box_->setMarginTop(8);
+    custom_nav_box_->setMarginTop(4);
     nav_scroll_content->addView(custom_nav_box_);
 
     nav_scroll->setContentView(nav_scroll_content);
     rail_box_->addView(nav_scroll);
 
-    // Bottom Status & Utilities (pinned at bottom, never shrinks over nav items)
+    // Bottom Compact Status & Utilities (pinned at bottom, ultra-clean footprint)
     auto* bottom_group = new brls::Box(brls::Axis::COLUMN);
     bottom_group->setShrink(0.0f);
     bottom_group->setWidthPercentage(100);
-    auto* btm_div = ui::makeDivider(8.0f);
+    auto* btm_div = ui::makeDivider(5.0f);
     btm_div->setShrink(0.0f);
     bottom_group->addView(btm_div);
 
-    auto* cal_btn = ui::makeButton("📅 推荐日历", [this, alive = alive_]() {
+    auto make_status_row = [](brls::Label** out_lbl, const char* init_txt, std::function<void()> on_tap) {
+        auto* row = new brls::Box(brls::Axis::ROW);
+        row->setShrink(0.0f);
+        row->setWidthPercentage(100);
+        row->setHeight(26.0f);
+        row->setPadding(0, 9, 0, 9);
+        row->setMarginBottom(4);
+        row->setCornerRadius(6.5f);
+        row->setHighlightCornerRadius(6.5f);
+        row->setBackgroundColor(ui::color("desktop/soft"));
+        row->setBorderThickness(1.0f);
+        row->setBorderColor(ui::color("desktop/line"));
+        row->setAlignItems(brls::AlignItems::CENTER);
+        row->setFocusable(true);
+        auto* lbl = ui::makeLabel(init_txt, 12.0f, "font/grey");
+        lbl->setSingleLine(true);
+        lbl->setShrink(1.0f);
+        row->addView(lbl);
+        if (out_lbl) *out_lbl = lbl;
+        row->registerClickAction([fn = std::move(on_tap)](brls::View*) {
+            if (fn) fn();
+            return true;
+        });
+        return row;
+    };
+
+    bottom_group->addView(make_status_row(&ai_route_pill_, "AI 路由: 待接入插件", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire)) {
+                selectWorkspace(WorkspaceId::AiChat);
+            }
+        });
+    }));
+
+    bottom_group->addView(make_status_row(&auth_status_pill_, "账号授权: 检测中…", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire)) {
+                openAuthCenter();
+            }
+        });
+    }));
+
+    bottom_group->addView(make_status_row(&curation_status_pill_, "定时推荐: 检测中…", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            CurationSchedulerDialog::open([this, alive]() {
+                if (alive->load(std::memory_order_acquire)) {
+                    CurationCalendarDialog::open();
+                }
+            });
+        });
+    }));
+
+    auto* util_row1 = new brls::Box(brls::Axis::ROW);
+    util_row1->setShrink(0.0f);
+    util_row1->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    util_row1->setMarginBottom(4);
+
+    auto* cal_btn = ui::makeButton("推荐日历", [this, alive = alive_]() {
         brls::sync([this, alive]() {
             if (!alive->load(std::memory_order_acquire)) return;
             CurationCalendarDialog::open({
@@ -151,88 +292,55 @@ void WorkspaceShellActivity::populateRootBox() {
                 },
             });
         });
-    }, false, 36.0f);
-    cal_btn->setShrink(0.0f);
-    cal_btn->setMarginBottom(8);
-    bottom_group->addView(cal_btn);
+    }, false, 30.0f);
+    cal_btn->setGrow(1.0f);
+    cal_btn->setMarginRight(5);
+    util_row1->addView(cal_btn);
 
-    auto* sched_card = ui::makeCard("desktop/soft", 10.0f, 8.0f);
-    sched_card->setShrink(0.0f);
-    sched_card->setMarginBottom(8);
-    sched_card->setFocusable(true);
-    curation_status_pill_ = ui::makeLabel("定时推荐: 检测中…", 13.0f, "font/grey");
-    sched_card->addView(curation_status_pill_);
-    sched_card->registerClickAction([this, alive = alive_](brls::View*) {
-        brls::sync([this, alive]() {
-            if (!alive->load(std::memory_order_acquire)) return;
-            CurationSchedulerDialog::open([this, alive]() {
-                if (alive->load(std::memory_order_acquire)) {
-                    CurationCalendarDialog::open();
-                }
-            });
-        });
-        return true;
-    });
-    bottom_group->addView(sched_card);
-
-    auto* cmd_btn = ui::makeButton("Ctrl+K 全局检索", [this, alive = alive_]() {
-        brls::sync([this, alive]() {
-            if (alive->load(std::memory_order_acquire)) {
-                openCommandPalette();
-            }
-        });
-    }, false, 36.0f);
-    cmd_btn->setShrink(0.0f);
-    cmd_btn->setMarginBottom(8);
-    bottom_group->addView(cmd_btn);
-
-    auto* ai_card = ui::makeCard("desktop/soft", 10.0f, 8.0f);
-    ai_card->setShrink(0.0f);
-    ai_card->setMarginBottom(8);
-    ai_card->setFocusable(true);
-    ai_route_pill_ = ui::makeLabel("AI 路由: 待接入插件", 13.5f, "font/grey");
-    ai_card->addView(ai_route_pill_);
-    ai_card->registerClickAction([this, alive = alive_](brls::View*) {
-        brls::sync([this, alive]() {
-            if (alive->load(std::memory_order_acquire)) {
-                toggleCompanionDock();
-            }
-        });
-        return true;
-    });
-    bottom_group->addView(ai_card);
-
-    auto* util_row = new brls::Box(brls::Axis::ROW);
-    util_row->setShrink(0.0f);
-    util_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-    util_row->setMarginBottom(8);
-    auto* dock_btn = ui::makeButton("F8 协作", [this, alive = alive_]() {
+    auto* dock_btn = ui::makeButton("F8 伴读", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) {
             toggleCompanionDock();
         }
-    }, false, 36.0f);
+    }, false, 30.0f);
     dock_btn->setGrow(1.0f);
-    dock_btn->setMarginRight(6);
-    util_row->addView(dock_btn);
+    util_row1->addView(dock_btn);
+    bottom_group->addView(util_row1);
 
-    auto* theme_btn = ui::makeButton("主题 (t)", [this, alive = alive_]() {
+    auto* util_row2 = new brls::Box(brls::Axis::ROW);
+    util_row2->setShrink(0.0f);
+    util_row2->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+
+    auto* theme_btn = ui::makeButton("主题 · t", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) {
             toggleTheme();
         }
-    }, false, 36.0f);
+    }, false, 30.0f);
     theme_btn->setGrow(1.0f);
-    util_row->addView(theme_btn);
-    bottom_group->addView(util_row);
+    theme_btn->setMarginRight(5);
+    util_row2->addView(theme_btn);
 
-    auto* settings_btn = ui::makeButton("宿主设置 & 快捷键 (?)", [this, alive = alive_]() {
+    auto* settings_btn = ui::makeButton("设置", [this, alive = alive_]() {
         brls::sync([this, alive]() {
             if (alive->load(std::memory_order_acquire)) {
                 selectWorkspace(WorkspaceId::Settings);
             }
         });
-    }, false, 36.0f);
-    settings_btn->setShrink(0.0f);
-    bottom_group->addView(settings_btn);
+    }, false, 30.0f);
+    settings_btn->setGrow(1.0f);
+    settings_btn->setMarginRight(5);
+    util_row2->addView(settings_btn);
+
+    auto* help_btn = ui::makeButton("?", [alive = alive_]() {
+        brls::sync([alive]() {
+            if (alive->load(std::memory_order_acquire)) {
+                DesktopInputController::showShortcutsHelp();
+            }
+        });
+    }, false, 30.0f);
+    help_btn->setShrink(0.0f);
+    util_row2->addView(help_btn);
+    bottom_group->addView(util_row2);
+
     rail_box_->addView(bottom_group);
 
     root_box_->addView(rail_box_);
@@ -240,49 +348,26 @@ void WorkspaceShellActivity::populateRootBox() {
     // Main Split (Workspace Stage + Responsive F8 Companion Dock)
     main_split_ = new brls::Box(brls::Axis::ROW);
     main_split_->setGrow(1.0f);
+    main_split_->setShrink(1.0f);
+    main_split_->setMinWidth(0);
+    main_split_->setMinHeight(0);
     main_split_->setHeightPercentage(100);
 
     stage_container_ = new brls::Box(brls::Axis::COLUMN);
     stage_container_->setGrow(1.0f);
+    stage_container_->setShrink(1.0f);
+    stage_container_->setMinWidth(0);
+    stage_container_->setMinHeight(0);
     stage_container_->setHeightPercentage(100);
 
     views_host_ = new brls::Box(brls::Axis::COLUMN);
     views_host_->setId("omnidesk/views_host");
     views_host_->setGrow(1.0f);
+    views_host_->setShrink(1.0f);
+    views_host_->setMinWidth(0);
+    views_host_->setMinHeight(0);
     views_host_->setWidthPercentage(100);
-
-    store_view_ = new PluginStoreView();
-    media_view_ = new MediaWorkbench(
-        [this](const std::string& summary) {
-            if (dock_view_) dock_view_->setDomainContext(ContentDomain::Media, summary);
-        },
-        [this]() { selectWorkspace(WorkspaceId::Store); });
-    media_view_->setFullscreenToggleCallback([this, alive = alive_]() {
-        brls::sync([this, alive]() {
-            if (alive->load(std::memory_order_acquire)) {
-                toggleImmersiveFullscreen();
-            }
-        });
-    });
-    text_view_ = new TextWorkbench(
-        [this](const std::string& summary) {
-            if (dock_view_) dock_view_->setDomainContext(ContentDomain::Text, summary);
-        },
-        [this]() { selectWorkspace(WorkspaceId::Store); });
-    book_view_ = new BookWorkbench(
-        [this](const std::string& summary) {
-            if (dock_view_) dock_view_->setDomainContext(ContentDomain::Book, summary);
-        },
-        [this]() { selectWorkspace(WorkspaceId::Store); });
-    settings_view_ = new HostSettingsView(
-        [this]() { toggleTheme(); },
-        [this]() { selectWorkspace(WorkspaceId::Store); });
-
-    views_host_->addView(store_view_);
-    views_host_->addView(media_view_);
-    views_host_->addView(text_view_);
-    views_host_->addView(book_view_);
-    views_host_->addView(settings_view_);
+    views_host_->setClipsToBounds(true);
 
     job_bar_box_ = new brls::Box(brls::Axis::ROW);
     job_bar_box_->setWidthPercentage(100);
@@ -317,7 +402,7 @@ void WorkspaceShellActivity::populateRootBox() {
     }, false, 32.0f);
     go_store_btn->setMarginRight(6.0f);
     banner_actions->addView(go_store_btn);
-    banner_actions->addView(ui::makeButton("✕", [this, alive = alive_]() {
+    banner_actions->addView(ui::makeButton("×", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) {
             dismissWarningBanner();
         }
@@ -347,23 +432,234 @@ void WorkspaceShellActivity::populateRootBox() {
 
     main_split_->addView(stage_container_);
 
-    dock_view_ = new AiCompanionDock([this]() { selectWorkspace(WorkspaceId::Store); });
-    dock_view_->setId("omnidesk/pane_dock");
-    main_split_->addView(dock_view_);
-
     root_box_->addView(main_split_);
     refreshJobBar();
+}
+
+void WorkspaceShellActivity::setCompanionDomainContext(ContentDomain domain, const std::string& summary) {
+    pending_dock_domain_ = domain;
+    pending_dock_summary_ = summary;
+    if (dock_view_) {
+        dock_view_->setDomainContext(domain, summary);
+    }
+}
+
+void WorkspaceShellActivity::setExternalAiContext(ContentDomain domain, const std::string& summary) {
+    pending_ai_ext_domain_ = domain;
+    pending_ai_ext_summary_ = summary;
+    has_pending_ai_ext_ = true;
+    if (ai_view_) {
+        ai_view_->setExternalContext(domain, summary);
+    }
+}
+
+brls::View* WorkspaceShellActivity::ensureWorkspaceCreated(WorkspaceId id) {
+    if (!views_host_) return nullptr;
+    switch (id) {
+        case WorkspaceId::Store: {
+            if (!store_view_) {
+                store_view_ = new PluginStoreView(
+                    [this, alive = alive_](const std::string& tab_id) {
+                        brls::sync([this, alive, tab_id]() {
+                            if (!alive->load(std::memory_order_acquire) || tab_id.empty()) return;
+                            return_workspace_ = WorkspaceId::Store;
+                            return_custom_tab_id_.clear();
+                            has_return_workspace_ = true;
+                            selectWorkspace(WorkspaceId::CustomPluginTab, tab_id);
+                        });
+                    },
+                    [this, alive = alive_](ContentDomain domain) {
+                        brls::sync([this, alive, domain]() {
+                            if (!alive->load(std::memory_order_acquire)) return;
+                            switch (domain) {
+                                case ContentDomain::Media:
+                                    selectWorkspace(WorkspaceId::Media);
+                                    break;
+                                case ContentDomain::Text:
+                                    selectWorkspace(WorkspaceId::Text);
+                                    break;
+                                case ContentDomain::Book:
+                                    selectWorkspace(WorkspaceId::Book);
+                                    break;
+                                case ContentDomain::Core:
+                                    selectWorkspace(WorkspaceId::AiChat);
+                                    break;
+                            }
+                        });
+                    },
+                    [this, alive = alive_](const std::string& plugin_id) {
+                        brls::sync([this, alive, plugin_id]() {
+                            if (alive->load(std::memory_order_acquire)) {
+                                openAuthCenter(plugin_id);
+                            }
+                        });
+                    });
+                store_dirty_ = false;
+                views_host_->addView(store_view_);
+                DesktopInputController::markDirty(store_view_);
+            }
+            return store_view_;
+        }
+        case WorkspaceId::Media: {
+            if (!media_view_) {
+                media_view_ = new MediaWorkbench(
+                    [this](const std::string& summary) {
+                        setCompanionDomainContext(ContentDomain::Media, summary);
+                        setExternalAiContext(ContentDomain::Media, summary);
+                    },
+                    [this]() { selectWorkspace(WorkspaceId::Store); });
+                media_view_->setFullscreenToggleCallback([this, alive = alive_]() {
+                    brls::sync([this, alive]() {
+                        if (alive->load(std::memory_order_acquire)) {
+                            toggleImmersiveFullscreen();
+                        }
+                    });
+                });
+                media_dirty_ = false;
+                views_host_->addView(media_view_);
+                if (!pending_all_date_filter_.empty()) {
+                    media_view_->applyDateFilter(pending_all_date_filter_, "all");
+                }
+                DesktopInputController::markDirty(media_view_);
+            }
+            return media_view_;
+        }
+        case WorkspaceId::Text: {
+            if (!text_view_) {
+                text_view_ = new TextWorkbench(
+                    [this](const std::string& summary) {
+                        setCompanionDomainContext(ContentDomain::Text, summary);
+                        setExternalAiContext(ContentDomain::Text, summary);
+                    },
+                    [this]() { selectWorkspace(WorkspaceId::Store); });
+                text_dirty_ = false;
+                views_host_->addView(text_view_);
+                if (!pending_all_date_filter_.empty()) {
+                    text_view_->applyDateFilter(pending_all_date_filter_, "all");
+                }
+                DesktopInputController::markDirty(text_view_);
+            }
+            return text_view_;
+        }
+        case WorkspaceId::Book: {
+            if (!book_view_) {
+                book_view_ = new BookWorkbench(
+                    [this](const std::string& summary) {
+                        setCompanionDomainContext(ContentDomain::Book, summary);
+                        setExternalAiContext(ContentDomain::Book, summary);
+                    },
+                    [this]() { selectWorkspace(WorkspaceId::Store); });
+                book_dirty_ = false;
+                views_host_->addView(book_view_);
+                if (!pending_all_date_filter_.empty()) {
+                    book_view_->applyDateFilter(pending_all_date_filter_);
+                }
+                DesktopInputController::markDirty(book_view_);
+            }
+            return book_view_;
+        }
+        case WorkspaceId::AiChat: {
+            if (!ai_view_) {
+                ai_view_ = new AiWorkbench(
+                    [this]() { selectWorkspace(WorkspaceId::Store); },
+                    [this](const std::string& session_id) {
+                        const WorkspaceId target_ws =
+                            has_last_companion_workspace_ ? last_companion_workspace_ : WorkspaceId::Media;
+                        const std::string target_cid =
+                            has_last_companion_workspace_ ? last_companion_custom_tab_id_ : std::string{};
+                        selectWorkspace(target_ws, target_cid);
+                        if (auto* dock = ensureCompanionDockCreated()) {
+                            if (!dock->isDockedOpen()) {
+                                dock->toggleVisible();
+                            }
+                            dock->switchTab(AiCompanionDock::DockTab::Chat);
+                            if (!session_id.empty()) {
+                                dock->selectSessionById(session_id);
+                            }
+                            updateResponsiveDock();
+                            if (media_view_) media_view_->onViewportLayoutChanged();
+                            if (book_view_) book_view_->onViewportLayoutChanged();
+                            dock->focusComposer(true);
+                            DesktopInputController::markDirty(main_split_);
+                        }
+                    });
+                ai_dirty_ = false;
+                views_host_->addView(ai_view_);
+                if (has_pending_ai_ext_) {
+                    ai_view_->setExternalContext(pending_ai_ext_domain_, pending_ai_ext_summary_);
+                }
+                DesktopInputController::markDirty(ai_view_);
+            }
+            return ai_view_;
+        }
+        case WorkspaceId::Settings: {
+            if (!settings_view_) {
+                settings_view_ = new HostSettingsView(
+                    [this]() { toggleTheme(); },
+                    [this]() { selectWorkspace(WorkspaceId::Store); },
+                    [this]() { openAuthCenter(); });
+                settings_dirty_ = false;
+                views_host_->addView(settings_view_);
+                DesktopInputController::markDirty(settings_view_);
+            }
+            return settings_view_;
+        }
+        case WorkspaceId::CustomPluginTab:
+            return active_custom_view_;
+    }
+    return nullptr;
+}
+
+AiCompanionDock* WorkspaceShellActivity::ensureCompanionDockCreated() {
+    if (dock_view_ || !main_split_) {
+        return dock_view_;
+    }
+    dock_view_ = new AiCompanionDock(
+        [this]() { selectWorkspace(WorkspaceId::Store); },
+        [this]() { selectWorkspace(WorkspaceId::AiChat); },
+        [this](const std::string& session_id) {
+            if (dock_view_ && dock_view_->isDockedOpen()) {
+                dock_view_->toggleVisible();
+                updateResponsiveDock();
+            }
+            selectWorkspace(WorkspaceId::AiChat);
+            if (ai_view_ && !session_id.empty()) {
+                ai_view_->selectSessionById(session_id);
+                ai_view_->focusComposer(true);
+            }
+            DesktopInputController::markDirty(main_split_);
+        });
+    dock_view_->setId("omnidesk/pane_dock");
+    dock_view_->setDomainContext(pending_dock_domain_, pending_dock_summary_);
+    main_split_->addView(dock_view_);
+    updateResponsiveDock();
+    DesktopInputController::markDirty(dock_view_);
+    return dock_view_;
 }
 
 void WorkspaceShellActivity::onContentAvailable() {
     rebuildRail();
     selectWorkspace(active_workspace_);
     refreshAiPill();
+    refreshAuthPill();
     updateResponsiveDock();
     refreshJobBar();
 
+    if (auth_ui_sub_token_ == 0) {
+        auth_ui_sub_token_ = AuthCenterManager::instance().subscribeChanges([this, alive = alive_]() {
+            brls::sync([this, alive]() {
+                if (alive->load(std::memory_order_acquire)) {
+                    refreshAuthPill();
+                }
+            });
+        });
+    }
+    AuthCenterManager::instance().triggerAsyncLiveVerification();
+
     DesktopInputController::install({
         .on_select_workspace = [this](int idx) { selectWorkspaceByIndex(idx); },
+        .on_select_plugin_shortcut = [this](char key) { return selectPluginByShortcut(key); },
+        .on_open_settings = [this]() { selectWorkspace(WorkspaceId::Settings); },
         .on_cycle_workspace = [this](int delta) { cycleWorkspace(delta); },
         .on_toggle_dock = [this]() { toggleCompanionDock(); },
         .on_toggle_fullscreen = [this]() { toggleWindowFullscreen(); },
@@ -372,6 +668,11 @@ void WorkspaceShellActivity::onContentAvailable() {
         .on_toggle_theme = [this]() { toggleTheme(); },
         .on_cancel_active = [this]() { return cancelActiveWork(); },
         .on_skip_ad = [this]() { return skipSponsorSegment(); },
+        .is_busy = [this, alive = alive_]() {
+            if (!alive->load(std::memory_order_acquire)) return false;
+            return (ai_view_ && ai_view_->hasActiveStream()) ||
+                   (dock_view_ && dock_view_->hasActiveStream());
+        },
     });
 
     auto& kernel = HostKernel::instance();
@@ -404,6 +705,14 @@ void WorkspaceShellActivity::onContentAvailable() {
                         book_dirty_ = true;
                     }
                 }
+                if (ai_view_) {
+                    if (active_workspace_ == WorkspaceId::AiChat) {
+                        ai_view_->refresh();
+                        ai_dirty_ = false;
+                    } else {
+                        ai_dirty_ = true;
+                    }
+                }
                 if (store_view_ && active_workspace_ != WorkspaceId::Store) {
                     store_dirty_ = true;
                 }
@@ -415,8 +724,9 @@ void WorkspaceShellActivity::onContentAvailable() {
                         settings_dirty_ = true;
                     }
                 }
-                if (dock_view_) dock_view_->refreshAiRouteStatus();
+                if (dock_view_) dock_view_->onDomainsChanged();
                 refreshAiPill();
+                refreshAuthPill();
             });
         });
         bus_sub_token_ = kernel.bus().subscribe(
@@ -426,6 +736,7 @@ void WorkspaceShellActivity::onContentAvailable() {
                     if (!alive->load(std::memory_order_acquire)) return;
                     refreshAiPill();
                     if (dock_view_) dock_view_->refreshAiRouteStatus();
+                    if (ai_view_) ai_view_->refreshRouteStatus();
                 });
             });
         job_sub_token_ = kernel.jobs().subscribe([this, alive = alive_]() {
@@ -437,15 +748,17 @@ void WorkspaceShellActivity::onContentAvailable() {
         });
         for (const char* topic :
              {"entity.book.open", "entity.text.open", "entity.media.open",
-              "entity.web.open", "entity.workspace.return", "job.open_requested",
-              "cmd:curation:calendar", "cmd:curation:scheduler"}) {
+              "entity.web.open", "entity.workspace.open", "entity.workspace.return",
+              "job.open_requested", "cmd:curation:calendar", "cmd:curation:scheduler",
+              "cmd:auth:center", "entity.curation.filter_date"}) {
             uint64_t tok = kernel.bus().subscribe(
                 topic, "host.shell.job_open",
                 [this, alive = alive_](const std::string& ev_topic, const nlohmann::json& payload) {
                     if (!payload.is_object()) {
                         return;
                     }
-                    if (payload.value("origin", "") == "host_workbench") {
+                    const std::string origin = payload.value("origin", "");
+                    if (origin == "host_workbench" || origin == "plugin_music") {
                         return;
                     }
                     if (ev_topic == "job.open_requested" && !payload.contains("job_id")) {
@@ -466,10 +779,23 @@ void WorkspaceShellActivity::onContentAvailable() {
                 const std::string dom_s = payload.value("domain", "core");
                 const std::string ctx_s = payload.value("context", "");
                 const std::string prompt = payload.value("prompt", "");
-                brls::sync([this, alive, dom_s, ctx_s, prompt]() {
-                    if (!alive->load(std::memory_order_acquire) || !dock_view_) return;
-                    dock_view_->askWithContext(parseContentDomain(dom_s), ctx_s, prompt);
-                    updateResponsiveDock();
+                const bool full_stage = payload.value("full_stage", false);
+                const bool curate = payload.value("curation", false);
+                brls::sync([this, alive, dom_s, ctx_s, prompt, full_stage, curate]() {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    const ContentDomain dom = parseContentDomain(dom_s);
+                    if (full_stage || curate || active_workspace_ == WorkspaceId::AiChat) {
+                        selectWorkspace(WorkspaceId::AiChat);
+                        if (ai_view_) {
+                            ai_view_->askWithContext(dom, ctx_s, prompt, curate);
+                        }
+                    } else if (auto* dock = ensureCompanionDockCreated()) {
+                        setExternalAiContext(dom, ctx_s);
+                        setCompanionDomainContext(dom, ctx_s);
+                        dock->askWithContext(dom, ctx_s, prompt);
+                        updateResponsiveDock();
+                        DesktopInputController::markDirty(dock);
+                    }
                 });
             }));
         job_open_sub_tokens_.push_back(kernel.bus().subscribe(
@@ -588,7 +914,7 @@ void WorkspaceShellActivity::onContentAvailable() {
                     }
                     auto& k = HostKernel::instance();
                     if (!k.isInitialized()) return;
-                    if (!k.installer().hasStaleInstalledPlugins(false)) {
+                    if (!k.hasStaleAbiPlugins(false)) {
                         bool any_failed = false;
                         for (const auto& st : k.plugins().statuses()) {
                             if (st.record.enabled && !st.load_error.empty()) {
@@ -606,7 +932,7 @@ void WorkspaceShellActivity::onContentAvailable() {
 
         // Check boot-time ABI drift or load errors emitted before UI subscribed
         std::vector<std::string> stale_names;
-        for (const auto& entry : kernel.installer().checkInstalledAbiStatus(false)) {
+        for (const auto& entry : kernel.installedAbiStatuses(false)) {
             if (entry.needs_rebuild) {
                 stale_names.push_back(entry.plugin_id);
             }
@@ -634,57 +960,97 @@ void WorkspaceShellActivity::onContentAvailable() {
     resize_sub_ = brls::Application::getWindowSizeChangedEvent()->subscribe([this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) {
             updateResponsiveDock();
+            if (ai_view_) ai_view_->onViewportLayoutChanged();
         }
     });
 }
 
 brls::Box* WorkspaceShellActivity::makeRailButton(const std::string& label,
-                                                  const std::string& svg_rel,
+                                                  const std::string& icon_kind,
+                                                  const std::string& domain_token,
                                                   const std::string& shortcut_hint,
                                                   bool active,
+                                                  bool compact,
                                                   std::function<void()> on_click,
-                                                  brls::Label** out_label) {
+                                                  NavEntry* out_refs) {
+    const bool dark = HostKernel::instance().isInitialized() ? HostKernel::instance().isDarkTheme() : true;
+    const NVGcolor dom_col = ui::color(domain_token);
+    const NVGcolor surf_col = ui::color("desktop/surface");
+    const NVGcolor soft_col = ui::color("desktop/soft");
+    const NVGcolor line_col = ui::color("desktop/line");
+    const NVGcolor text_col = ui::color("brls/text");
+    const NVGcolor muted_col = ui::color("font/grey");
+
     auto* item = new brls::Box(brls::Axis::ROW);
     item->setWidthPercentage(100);
-    item->setHeight(46);
+    item->setHeight(compact ? 34.0f : 38.0f);
     item->setShrink(0.0f);
-    item->setPadding(0, 12, 0, 12);
-    item->setMarginBottom(6);
-    item->setCornerRadius(10);
+    item->setPadding(0, 8, 0, 0);
+    item->setMarginBottom(compact ? 2.0f : 3.0f);
+    item->setCornerRadius(8.0f);
     item->setFocusable(true);
-    item->setHighlightCornerRadius(10);
+    item->setHighlightCornerRadius(8.0f);
     item->setAlignItems(brls::AlignItems::CENTER);
     item->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-    item->setBackgroundColor(ui::color(active ? "desktop/active" : "desktop/surface"));
-    if (active) {
-        item->setBorderThickness(1);
-        item->setBorderColor(ui::color("brls/accent"));
-    }
+    item->setBorderThickness(0.0f);
+    item->setBackgroundColor(
+        active ? blendColor(surf_col, dom_col, dark ? 0.16f : 0.10f) : nvgRGBA(0, 0, 0, 0));
 
     auto* left = new brls::Box(brls::Axis::ROW);
     left->setAlignItems(brls::AlignItems::CENTER);
     left->setShrink(1.0f);
-    if (!svg_rel.empty()) {
-        auto* icon = new SvgIconView(HostKernel::instance().assetPath(svg_rel));
-        icon->setDimensions(20, 20);
+    left->setMinWidth(0);
+
+    // Soft left semantic accent bar (replaces harsh full-width pink border)
+    auto* bar = new brls::Box(brls::Axis::COLUMN);
+    bar->setWidth(3.0f);
+    bar->setHeight(compact ? 16.0f : 18.0f);
+    bar->setCornerRadius(1.5f);
+    bar->setShrink(0.0f);
+    bar->setMarginLeft(2.5f);
+    bar->setMarginRight(7.5f);
+    bar->setBackgroundColor(active ? dom_col : nvgRGBA(0, 0, 0, 0));
+    left->addView(bar);
+
+    SvgIconView* icon = nullptr;
+    if (!icon_kind.empty()) {
+        icon = new SvgIconView();
+        const NVGcolor icon_col = active ? dom_col : blendColor(muted_col, dom_col, 0.28f);
+        icon->setNavIcon(icon_kind, icon_col);
+        const float sz = compact ? 16.0f : 18.0f;
+        icon->setDimensions(sz, sz);
         icon->setShrink(0.0f);
-        icon->setMarginRight(10);
+        icon->setMarginRight(8.5f);
         left->addView(icon);
     }
-    auto* lbl = ui::makeLabel(label, 15.5f, active ? "brls/accent" : "brls/text");
+
+    auto* lbl = ui::makeLabel(label, compact ? 13.8f : 14.8f, "brls/text");
     lbl->setSingleLine(true);
     lbl->setShrink(1.0f);
+    lbl->setTextColor(active ? blendColor(text_col, dom_col, 0.28f)
+                             : blendColor(text_col, muted_col, compact ? 0.14f : 0.03f));
     left->addView(lbl);
-    if (out_label) {
-        *out_label = lbl;
-    }
     item->addView(left);
 
+    brls::Box* kbd_box = nullptr;
+    brls::Label* kbd_lbl = nullptr;
     if (!shortcut_hint.empty()) {
-        auto* hint_lbl = ui::makeLabel(shortcut_hint, 12.5f, "font/grey");
-        hint_lbl->setShrink(0.0f);
-        hint_lbl->setMarginLeft(6);
-        item->addView(hint_lbl);
+        const NVGcolor k_bg = active ? blendColor(surf_col, dom_col, dark ? 0.24f : 0.15f) : soft_col;
+        const NVGcolor k_bd = active ? blendColor(line_col, dom_col, 0.65f) : line_col;
+        const NVGcolor k_fg = active ? dom_col : muted_col;
+        kbd_box = makeKeycapBadge(shortcut_hint, k_bg, k_bd, k_fg, &kbd_lbl);
+        kbd_box->setMarginLeft(6.0f);
+        item->addView(kbd_box);
+    }
+
+    if (out_refs) {
+        out_refs->button = item;
+        out_refs->accent_bar = bar;
+        out_refs->icon_view = icon;
+        out_refs->title_label = lbl;
+        out_refs->keycap_box = kbd_box;
+        out_refs->keycap_label = kbd_lbl;
+        out_refs->styled_state = (active ? 1 : 0) | (dark ? 2 : 0);
     }
 
     item->registerClickAction([alive = alive_, fn = std::move(on_click)](brls::View*) {
@@ -704,41 +1070,54 @@ void WorkspaceShellActivity::rebuildRail() {
     }
     built_in_nav_box_->clearViews();
     nav_entries_.clear();
+    group_headers_.clear();
+    alt_shortcut_map_.clear();
 
     struct BaseNav {
         WorkspaceId id;
         const char* label;
-        const char* svg;
+        const char* icon_kind;
         const char* shortcut;
         ContentDomain domain;
+        const char* domain_token;
     };
     const BaseNav items[] = {
-        {WorkspaceId::Store, "插件市场", "svg/nav_store.svg", "Ctrl+1", ContentDomain::Core},
-        {WorkspaceId::Media, "影视与音乐", "svg/nav_media.svg", "Ctrl+2", ContentDomain::Media},
-        {WorkspaceId::Text, "文字与期刊", "svg/nav_text.svg", "Ctrl+3", ContentDomain::Text},
-        {WorkspaceId::Book, "书本与 PDF", "svg/nav_book.svg", "Ctrl+4", ContentDomain::Book},
+        {WorkspaceId::Store, "插件市场", "store", "Ctrl+1", ContentDomain::Core, "domain/core"},
+        {WorkspaceId::Media, "影视与音乐", "media", "Ctrl+2", ContentDomain::Media, "domain/media"},
+        {WorkspaceId::Text, "文字与期刊", "text", "Ctrl+3", ContentDomain::Text, "domain/text"},
+        {WorkspaceId::Book, "书本与 PDF", "book", "Ctrl+4", ContentDomain::Book, "domain/book"},
+        {WorkspaceId::AiChat, "AI 对话", "ai", "Ctrl+5", ContentDomain::Core, "domain/core"},
     };
 
     for (const auto& it : items) {
         const bool active = (active_workspace_ == it.id);
-        brls::Label* title_lbl = nullptr;
-        auto* btn = makeRailButton(it.label, it.svg, it.shortcut, active, [this, id = it.id]() {
-            selectWorkspace(id);
-        }, &title_lbl);
+        NavEntry entry{};
+        entry.id = it.id;
+        entry.label = it.label;
+        entry.domain = it.domain;
+        entry.domain_token = it.domain_token;
+        entry.icon_kind = it.icon_kind;
+        entry.shortcut_label = it.shortcut;
+        entry.group_idx = -1;
+        auto* btn = makeRailButton(
+            it.label, it.icon_kind, it.domain_token, it.shortcut, active, false,
+            [this, id = it.id]() { selectWorkspace(id); }, &entry);
         built_in_nav_box_->addView(btn);
-        nav_entries_.push_back({it.id, "", it.label, it.domain, btn, title_lbl});
+        nav_entries_.push_back(std::move(entry));
     }
 
     rebuildPluginTabs();
 }
 
-void WorkspaceShellActivity::rebuildPluginTabs() {
-    const bool restore_focus = focusIsInside(custom_nav_box_);
-    if (restore_focus) {
+void WorkspaceShellActivity::rebuildPluginTabs(int focus_group_idx) {
+    const bool restore_focus = (focus_group_idx < 0) && focusIsInside(custom_nav_box_);
+    if (restore_focus || focus_group_idx >= 0) {
         brls::Application::giveFocus(nullptr);
     }
     custom_nav_box_->clearViews();
-    nav_entries_.resize(std::min<size_t>(nav_entries_.size(), 4));
+    group_headers_.clear();
+    alt_shortcut_map_.clear();
+    nav_entries_.resize(std::min<size_t>(nav_entries_.size(), 5));
 
     auto& kernel = HostKernel::instance();
     if (!kernel.isInitialized()) {
@@ -773,52 +1152,215 @@ void WorkspaceShellActivity::rebuildPluginTabs() {
         return;
     }
 
-    auto* hdr = ui::makeLabel("插件工作区扩展", 12.5f, "font/grey");
-    hdr->setShrink(0.0f);
-    hdr->setMarginBottom(6);
-    hdr->setMarginLeft(4);
-    custom_nav_box_->addView(hdr);
-
-    int slot = 5;
-    for (const auto& t : tabs) {
-        const bool active =
-            (active_workspace_ == WorkspaceId::CustomPluginTab && active_custom_tab_id_ == t.tab_id);
-        std::string hint = slot <= 9 ? ("Ctrl+" + std::to_string(slot)) : "";
-        brls::Label* title_lbl = nullptr;
-        auto* btn = makeRailButton(t.title, "", hint, active, [this, tid = t.tab_id]() {
-            selectWorkspace(WorkspaceId::CustomPluginTab, tid);
-        }, &title_lbl);
-        custom_nav_box_->addView(btn);
-        nav_entries_.push_back({WorkspaceId::CustomPluginTab, t.tab_id, t.title, t.domain, btn, title_lbl});
-        ++slot;
+    const auto assigned = assignPluginNavTabs(tabs);
+    std::vector<AssignedPluginTab> buckets[3];
+    for (const auto& item : assigned) {
+        if (item.alt_key != '\0') {
+            alt_shortcut_map_[item.alt_key] = item.spec.tab_id;
+        }
+        const int gi = std::clamp(static_cast<int>(item.group), 0, 2);
+        buckets[gi].push_back(item);
     }
-    if (restore_focus) focusActiveWorkspace();
+
+    brls::View* target_group_header = nullptr;
+    const NavGroupId groups[] = {NavGroupId::Media, NavGroupId::CommunityWeb, NavGroupId::Book};
+
+    for (NavGroupId g : groups) {
+        const int gi = static_cast<int>(g);
+        const auto& bucket = buckets[gi];
+        if (bucket.empty()) continue;
+
+        const bool collapsed = collapsed_groups_[gi];
+        const char* dom_tok = navGroupDomainToken(g);
+        const NVGcolor dom_col = ui::color(dom_tok);
+        const NVGcolor muted_col = ui::color("font/grey");
+
+        // Collapsible domain group header
+        auto* hdr_row = new brls::Box(brls::Axis::ROW);
+        hdr_row->setShrink(0.0f);
+        hdr_row->setWidthPercentage(100);
+        hdr_row->setHeight(25.0f);
+        hdr_row->setPadding(0, 6, 0, 6);
+        hdr_row->setMarginTop(6.0f);
+        hdr_row->setMarginBottom(2.0f);
+        hdr_row->setCornerRadius(6.0f);
+        hdr_row->setHighlightCornerRadius(6.0f);
+        hdr_row->setFocusable(true);
+        hdr_row->setAlignItems(brls::AlignItems::CENTER);
+        hdr_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+
+        auto* hdr_left = new brls::Box(brls::Axis::ROW);
+        hdr_left->setAlignItems(brls::AlignItems::CENTER);
+        auto* dot = new brls::Box(brls::Axis::ROW);
+        dot->setWidth(6.0f);
+        dot->setHeight(6.0f);
+        dot->setCornerRadius(3.0f);
+        dot->setBackgroundColor(dom_col);
+        dot->setMarginRight(7.0f);
+        hdr_left->addView(dot);
+
+        auto* grp_lbl = ui::makeLabel(
+            std::string(navGroupTitle(g)) + " · " + std::to_string(bucket.size()),
+            11.8f, "font/grey");
+        grp_lbl->setSingleLine(true);
+        hdr_left->addView(grp_lbl);
+        hdr_row->addView(hdr_left);
+
+        auto* hdr_right = new brls::Box(brls::Axis::ROW);
+        hdr_right->setAlignItems(brls::AlignItems::CENTER);
+
+        brls::Label* collapsed_active_lbl = nullptr;
+        auto* collapsed_active_badge = makeKeycapBadge(
+            "", ui::color("desktop/soft"), blendColor(ui::color("desktop/line"), dom_col, 0.55f),
+            dom_col, &collapsed_active_lbl);
+        collapsed_active_badge->setMarginRight(5.0f);
+        collapsed_active_badge->setVisibility(brls::Visibility::GONE);
+        hdr_right->addView(collapsed_active_badge);
+
+        auto* chev = new SvgIconView();
+        chev->setNavIcon(collapsed ? "chevron_right" : "chevron_down", muted_col);
+        chev->setDimensions(12.0f, 12.0f);
+        chev->setShrink(0.0f);
+        hdr_right->addView(chev);
+        hdr_row->addView(hdr_right);
+
+        hdr_row->registerClickAction([this, alive = alive_, gi](brls::View*) {
+            brls::sync([this, alive, gi]() {
+                if (!alive->load(std::memory_order_acquire)) return;
+                collapsed_groups_[gi] = !collapsed_groups_[gi];
+                rebuildPluginTabs(gi);
+            });
+            return true;
+        });
+
+        custom_nav_box_->addView(hdr_row);
+        group_headers_.push_back({gi, dom_tok, hdr_row, collapsed_active_badge, collapsed_active_lbl});
+        if (focus_group_idx == gi) {
+            target_group_header = hdr_row;
+        }
+
+        for (const auto& item : bucket) {
+            const bool active =
+                (active_workspace_ == WorkspaceId::CustomPluginTab &&
+                 active_custom_tab_id_ == item.spec.tab_id);
+            NavEntry entry{};
+            entry.id = WorkspaceId::CustomPluginTab;
+            entry.custom_tab_id = item.spec.tab_id;
+            entry.label = item.spec.title;
+            entry.domain = item.spec.domain;
+            entry.domain_token = item.domain_token;
+            entry.icon_kind = item.icon_kind;
+            entry.alt_key = item.alt_key;
+            entry.shortcut_label = item.shortcut_label;
+            entry.group_idx = gi;
+
+            if (!collapsed) {
+                auto* btn = makeRailButton(
+                    item.spec.title, item.icon_kind, item.domain_token, item.shortcut_label,
+                    active, true,
+                    [this, tid = item.spec.tab_id]() {
+                        selectWorkspace(WorkspaceId::CustomPluginTab, tid);
+                    },
+                    &entry);
+                custom_nav_box_->addView(btn);
+            }
+            nav_entries_.push_back(std::move(entry));
+        }
+    }
+
+    updateActiveNavStyling();
+    DesktopInputController::markDirty(rail_box_);
+
+    if (target_group_header) {
+        brls::Application::giveFocus(target_group_header);
+    } else if (restore_focus) {
+        focusActiveWorkspace();
+    }
 }
 
 void WorkspaceShellActivity::updateActiveNavStyling() {
-    for (const auto& entry : nav_entries_) {
-        if (!entry.button) continue;
+    const bool dark = HostKernel::instance().isInitialized() ? HostKernel::instance().isDarkTheme() : true;
+    const NVGcolor surf_col = ui::color("desktop/surface");
+    const NVGcolor soft_col = ui::color("desktop/soft");
+    const NVGcolor line_col = ui::color("desktop/line");
+    const NVGcolor text_col = ui::color("brls/text");
+    const NVGcolor muted_col = ui::color("font/grey");
+
+    int active_group_idx = -1;
+    std::string active_group_shortcut;
+
+    for (auto& entry : nav_entries_) {
         const bool active =
             (entry.id == active_workspace_) &&
             (active_workspace_ != WorkspaceId::CustomPluginTab ||
              entry.custom_tab_id == active_custom_tab_id_);
-        entry.button->setBackgroundColor(ui::color(active ? "desktop/active" : "desktop/surface"));
-        entry.button->setBorderThickness(active ? 1.0f : 0.0f);
-        if (active) {
-            entry.button->setBorderColor(ui::color("brls/accent"));
+        if (active && entry.group_idx >= 0) {
+            active_group_idx = entry.group_idx;
+            active_group_shortcut = entry.shortcut_label;
+        }
+        if (!entry.button) continue;
+
+        const int desired_state = (active ? 1 : 0) | (dark ? 2 : 0);
+        if (entry.styled_state == desired_state) {
+            continue;
+        }
+        entry.styled_state = desired_state;
+
+        const bool compact = (entry.group_idx >= 0);
+        const NVGcolor dom_col = ui::color(entry.domain_token);
+
+        entry.button->setBackgroundColor(
+            active ? blendColor(surf_col, dom_col, dark ? 0.16f : 0.10f) : nvgRGBA(0, 0, 0, 0));
+        entry.button->setBorderThickness(0.0f);
+
+        if (entry.accent_bar) {
+            entry.accent_bar->setBackgroundColor(active ? dom_col : nvgRGBA(0, 0, 0, 0));
+        }
+        if (entry.icon_view && !entry.icon_kind.empty()) {
+            const NVGcolor icon_col = active ? dom_col : blendColor(muted_col, dom_col, 0.28f);
+            entry.icon_view->setNavIcon(entry.icon_kind, icon_col);
         }
         if (entry.title_label) {
-            entry.title_label->setTextColor(ui::color(active ? "brls/accent" : "brls/text"));
+            entry.title_label->setTextColor(
+                active ? blendColor(text_col, dom_col, 0.28f)
+                       : blendColor(text_col, muted_col, compact ? 0.14f : 0.03f));
+        }
+        if (entry.keycap_box && entry.keycap_label) {
+            entry.keycap_box->setBackgroundColor(
+                active ? blendColor(surf_col, dom_col, dark ? 0.24f : 0.15f) : soft_col);
+            entry.keycap_box->setBorderColor(
+                active ? blendColor(line_col, dom_col, 0.65f) : line_col);
+            entry.keycap_label->setTextColor(active ? dom_col : muted_col);
+        }
+    }
+
+    // If a collapsed section owns the currently active plugin tab, surface its keycap on the header
+    for (const auto& gh : group_headers_) {
+        if (!gh.active_badge_box || !gh.active_badge_label) continue;
+        const bool show = collapsed_groups_[gh.group_idx] &&
+                          (gh.group_idx == active_group_idx) &&
+                          !active_group_shortcut.empty();
+        if (show) {
+            gh.active_badge_label->setText(active_group_shortcut);
+            gh.active_badge_box->setVisibility(brls::Visibility::VISIBLE);
+        } else {
+            gh.active_badge_box->setVisibility(brls::Visibility::GONE);
         }
     }
 }
 
 void WorkspaceShellActivity::selectWorkspace(WorkspaceId id, const std::string& custom_tab_id) {
+    InlineEditorRegistry::blurActiveEditor();
     if (immersive_fullscreen_ && id != WorkspaceId::Media) {
         setImmersiveFullscreen(false);
     }
     active_workspace_ = id;
     active_custom_tab_id_ = custom_tab_id;
+    if (id != WorkspaceId::AiChat) {
+        last_companion_workspace_ = id;
+        last_companion_custom_tab_id_ = custom_tab_id;
+        has_last_companion_workspace_ = true;
+    }
 
     if (active_custom_view_) {
         if (focusIsInside(active_custom_view_)) {
@@ -828,19 +1370,33 @@ void WorkspaceShellActivity::selectWorkspace(WorkspaceId id, const std::string& 
         active_custom_view_ = nullptr;
     }
 
-    store_view_->setVisibility(id == WorkspaceId::Store ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
-    media_view_->setVisibility(id == WorkspaceId::Media ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
-    text_view_->setVisibility(id == WorkspaceId::Text ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
-    book_view_->setVisibility(id == WorkspaceId::Book ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
-    settings_view_->setVisibility(id == WorkspaceId::Settings ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
-
     ContentDomain dock_dom = ContentDomain::Core;
     if (id == WorkspaceId::Media) dock_dom = ContentDomain::Media;
     else if (id == WorkspaceId::Text) dock_dom = ContentDomain::Text;
     else if (id == WorkspaceId::Book) dock_dom = ContentDomain::Book;
 
-    if (dock_view_ && id != WorkspaceId::CustomPluginTab) {
-        dock_view_->setDomainContext(dock_dom);
+    if (id != WorkspaceId::CustomPluginTab) {
+        setCompanionDomainContext(dock_dom);
+        ensureWorkspaceCreated(id);
+    }
+
+    if (store_view_) {
+        store_view_->setVisibility(id == WorkspaceId::Store ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+    if (media_view_) {
+        media_view_->setVisibility(id == WorkspaceId::Media ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+    if (text_view_) {
+        text_view_->setVisibility(id == WorkspaceId::Text ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+    if (book_view_) {
+        book_view_->setVisibility(id == WorkspaceId::Book ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+    if (ai_view_) {
+        ai_view_->setVisibility(id == WorkspaceId::AiChat ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+    }
+    if (settings_view_) {
+        settings_view_->setVisibility(id == WorkspaceId::Settings ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
     }
 
     if (id == WorkspaceId::CustomPluginTab) {
@@ -861,32 +1417,37 @@ void WorkspaceShellActivity::selectWorkspace(WorkspaceId id, const std::string& 
                 break;
             }
         }
-        if (dock_view_) {
-            dock_view_->setDomainContext(dock_dom);
-        }
-    } else if (id == WorkspaceId::Store) {
+        setCompanionDomainContext(dock_dom);
+    } else if (id == WorkspaceId::Store && store_view_) {
         if (store_dirty_) {
             store_view_->refresh();
             store_dirty_ = false;
         } else {
             store_view_->refreshIfNeeded();
         }
-    } else if (id == WorkspaceId::Media && media_dirty_) {
+    } else if (id == WorkspaceId::Media && media_view_ && media_dirty_) {
         media_view_->refresh();
         media_dirty_ = false;
-    } else if (id == WorkspaceId::Text && text_dirty_) {
+    } else if (id == WorkspaceId::Text && text_view_ && text_dirty_) {
         text_view_->refresh();
         text_dirty_ = false;
-    } else if (id == WorkspaceId::Book && book_dirty_) {
+    } else if (id == WorkspaceId::Book && book_view_ && book_dirty_) {
         book_view_->refresh();
         book_dirty_ = false;
-    } else if (id == WorkspaceId::Settings && settings_dirty_) {
+    } else if (id == WorkspaceId::AiChat && ai_view_ && ai_dirty_) {
+        ai_view_->refresh();
+        ai_dirty_ = false;
+    } else if (id == WorkspaceId::Settings && settings_view_ && settings_dirty_) {
         settings_view_->refresh();
         settings_dirty_ = false;
     }
 
     updateActiveNavStyling();
     focusActiveWorkspace();
+    if (id == WorkspaceId::AiChat && ai_view_) {
+        ai_view_->focusComposer(true);
+    }
+    DesktopInputController::markDirty(views_host_);
 }
 
 void WorkspaceShellActivity::focusActiveWorkspace() {
@@ -896,6 +1457,7 @@ void WorkspaceShellActivity::focusActiveWorkspace() {
         case WorkspaceId::Media: target = media_view_; break;
         case WorkspaceId::Text: target = text_view_; break;
         case WorkspaceId::Book: target = book_view_; break;
+        case WorkspaceId::AiChat: target = ai_view_; break;
         case WorkspaceId::Settings: target = settings_view_; break;
         case WorkspaceId::CustomPluginTab: target = active_custom_view_; break;
     }
@@ -930,6 +1492,15 @@ void WorkspaceShellActivity::selectWorkspaceByIndex(int zero_based_index) {
     selectWorkspace(target.id, target.custom_tab_id);
 }
 
+bool WorkspaceShellActivity::selectPluginByShortcut(char alt_key) {
+    const auto it = alt_shortcut_map_.find(alt_key);
+    if (it == alt_shortcut_map_.end() || it->second.empty()) {
+        return false;
+    }
+    selectWorkspace(WorkspaceId::CustomPluginTab, it->second);
+    return true;
+}
+
 void WorkspaceShellActivity::cycleWorkspace(int delta) {
     if (nav_entries_.empty()) return;
     int cur = 0;
@@ -947,14 +1518,17 @@ void WorkspaceShellActivity::cycleWorkspace(int delta) {
 }
 
 void WorkspaceShellActivity::toggleCompanionDock() {
-    if (!dock_view_) return;
+    auto* dock = ensureCompanionDockCreated();
+    if (!dock) return;
     if (immersive_fullscreen_) {
         setImmersiveFullscreen(false);
     }
-    dock_view_->toggleVisible();
+    dock->toggleVisible();
     updateResponsiveDock();
     if (media_view_) media_view_->onViewportLayoutChanged();
     if (book_view_) book_view_->onViewportLayoutChanged();
+    if (ai_view_) ai_view_->onViewportLayoutChanged();
+    DesktopInputController::markDirty(main_split_);
 }
 
 void WorkspaceShellActivity::toggleWindowFullscreen() {
@@ -1025,8 +1599,12 @@ void WorkspaceShellActivity::setImmersiveFullscreen(bool active) {
         if (book_view_) {
             book_view_->onViewportLayoutChanged();
         }
+        if (ai_view_) {
+            ai_view_->onViewportLayoutChanged();
+        }
         focusActiveWorkspace();
     }
+    DesktopInputController::markDirty(root_box_);
 }
 
 void WorkspaceShellActivity::triggerSearch() {
@@ -1035,6 +1613,7 @@ void WorkspaceShellActivity::triggerSearch() {
         case WorkspaceId::Media: if (media_view_) media_view_->promptSearch(); break;
         case WorkspaceId::Text: if (text_view_) text_view_->promptSearch(); break;
         case WorkspaceId::Book: if (book_view_) book_view_->promptSearch(); break;
+        case WorkspaceId::AiChat: if (ai_view_) ai_view_->focusComposer(true); break;
         default: break;
     }
 }
@@ -1047,6 +1626,15 @@ void WorkspaceShellActivity::openCommandPalette(const std::string& initial_query
         else if (cmd == "workspace:media") selectWorkspace(WorkspaceId::Media);
         else if (cmd == "workspace:text") selectWorkspace(WorkspaceId::Text);
         else if (cmd == "workspace:book") selectWorkspace(WorkspaceId::Book);
+        else if (cmd == "workspace:ai") selectWorkspace(WorkspaceId::AiChat);
+        else if (cmd == "auth:center") openAuthCenter();
+        else if (cmd == "ai:curate") {
+            selectWorkspace(WorkspaceId::AiChat);
+            if (ai_view_) {
+                ai_view_->startNewSession(true);
+                ai_view_->focusComposer(true);
+            }
+        }
         else if (cmd == "workspace:settings") selectWorkspace(WorkspaceId::Settings);
         else if (cmd == "toggle_dock") toggleCompanionDock();
         else if (cmd == "toggle_fullscreen") toggleWindowFullscreen();
@@ -1071,10 +1659,38 @@ void WorkspaceShellActivity::openCommandPalette(const std::string& initial_query
     OmniCommandPalette::open(initial_query, std::move(cbs));
 }
 
+void WorkspaceShellActivity::openPluginConfigInStore(const std::string& plugin_id) {
+    selectWorkspace(WorkspaceId::Store);
+    if (store_view_ && !plugin_id.empty()) {
+        store_view_->focusPluginConfig(plugin_id);
+    }
+}
+
+void WorkspaceShellActivity::openAuthCenter(const std::string& focus_plugin_id) {
+    AuthCenterCallbacks cbs;
+    cbs.on_open_plugin_config = [this, alive = alive_](const std::string& plugin_id) {
+        if (alive->load(std::memory_order_acquire)) {
+            openPluginConfigInStore(plugin_id);
+        }
+    };
+    cbs.on_open_custom_tab = [this, alive = alive_](const std::string& tab_id) {
+        if (alive->load(std::memory_order_acquire) && !tab_id.empty()) {
+            selectWorkspace(WorkspaceId::CustomPluginTab, tab_id);
+        }
+    };
+    cbs.on_open_ai_workbench = [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) {
+            selectWorkspace(WorkspaceId::AiChat);
+        }
+    };
+    AuthCenterDialog::open(std::move(cbs), focus_plugin_id);
+}
+
 void WorkspaceShellActivity::toggleTheme() {
     if (immersive_fullscreen_) {
         setImmersiveFullscreen(false);
     }
+    InlineEditorRegistry::blurActiveEditor();
     auto& kernel = HostKernel::instance();
     kernel.toggleTheme();
     brls::Application::notify(kernel.isDarkTheme() ? "已切换 Graphite 暗色主题" : "已切换 Paper 亮色主题");
@@ -1083,12 +1699,11 @@ void WorkspaceShellActivity::toggleTheme() {
         brls::Application::giveFocus(nullptr);
         const WorkspaceId cur = active_workspace_;
         const std::string cid = active_custom_tab_id_;
-        const bool had_dock = (dock_view_ != nullptr);
         const bool was_dock_open = dock_view_ && dock_view_->isDockedOpen();
         const ContentDomain saved_dock_domain =
-            dock_view_ ? dock_view_->domainContext() : ContentDomain::Core;
+            dock_view_ ? dock_view_->domainContext() : pending_dock_domain_;
         const std::string saved_dock_summary =
-            dock_view_ ? dock_view_->entitySummary() : std::string{};
+            dock_view_ ? dock_view_->entitySummary() : pending_dock_summary_;
 
         active_custom_view_ = nullptr;
         custom_tab_views_.clear();
@@ -1096,13 +1711,17 @@ void WorkspaceShellActivity::toggleTheme() {
         media_dirty_ = false;
         text_dirty_ = false;
         book_dirty_ = false;
+        ai_dirty_ = false;
         settings_dirty_ = false;
         nav_entries_.clear();
+        group_headers_.clear();
+        alt_shortcut_map_.clear();
         root_box_->clearViews();
         store_view_ = nullptr;
         media_view_ = nullptr;
         text_view_ = nullptr;
         book_view_ = nullptr;
+        ai_view_ = nullptr;
         settings_view_ = nullptr;
         dock_view_ = nullptr;
         chrome_bottom_box_ = nullptr;
@@ -1111,22 +1730,25 @@ void WorkspaceShellActivity::toggleTheme() {
         fault_banner_box_ = nullptr;
         fault_banner_label_ = nullptr;
         ai_route_pill_ = nullptr;
+        auth_status_pill_ = nullptr;
         curation_status_pill_ = nullptr;
 
         populateRootBox();
         rebuildRail();
         selectWorkspace(cur, cid);
-        if (dock_view_) {
-            if (had_dock) {
-                dock_view_->setDomainContext(saved_dock_domain, saved_dock_summary);
-            }
-            if (was_dock_open && !dock_view_->isDockedOpen()) {
-                dock_view_->toggleVisible();
+        setCompanionDomainContext(saved_dock_domain, saved_dock_summary);
+        if (was_dock_open) {
+            if (auto* dock = ensureCompanionDockCreated()) {
+                if (!dock->isDockedOpen()) {
+                    dock->toggleVisible();
+                }
             }
         }
         refreshAiPill();
+        refreshAuthPill();
         refreshCurationPill();
         updateResponsiveDock();
+        DesktopInputController::markDirty(root_box_);
     });
 }
 
@@ -1149,6 +1771,32 @@ void WorkspaceShellActivity::refreshAiPill() {
     }
 }
 
+void WorkspaceShellActivity::refreshAuthPill() {
+    if (!auth_status_pill_) return;
+    auto& mgr = AuthCenterManager::instance();
+    std::string active_pid;
+    if (mgr.isBrowserLoginRunning(&active_pid, nullptr)) {
+        auth_status_pill_->setText("账号授权: 浏览器登录中…");
+        auth_status_pill_->setTextColor(ui::color("brls/accent"));
+        return;
+    }
+    const auto counts = mgr.summarizeCounts(mgr.inspectAll());
+    std::string txt = "账号授权: " + std::to_string(counts.authenticated_count) + "/" +
+                      std::to_string(counts.total_auth_plugins) + " 已就绪";
+    if (counts.guest_cookie_warning_count > 0) {
+        txt += " · ⚠" + std::to_string(counts.guest_cookie_warning_count);
+        auth_status_pill_->setText(txt);
+        auth_status_pill_->setTextColor(ui::color("status/warn_fg"));
+    } else if (counts.missing_required_count > 0) {
+        txt += " · 待配" + std::to_string(counts.missing_required_count);
+        auth_status_pill_->setText(txt);
+        auth_status_pill_->setTextColor(ui::color("status/info_fg"));
+    } else {
+        auth_status_pill_->setText(txt);
+        auth_status_pill_->setTextColor(ui::color("status/ok_fg"));
+    }
+}
+
 void WorkspaceShellActivity::updateResponsiveDock() {
     if (!main_split_ || !dock_view_ || immersive_fullscreen_) return;
     const float w = brls::Application::contentWidth > 0
@@ -1166,6 +1814,10 @@ void WorkspaceShellActivity::updateResponsiveDock() {
 bool WorkspaceShellActivity::cancelActiveWork() {
     if (immersive_fullscreen_) {
         setImmersiveFullscreen(false);
+        return true;
+    }
+    if (ai_view_ && ai_view_->cancelActiveStream()) {
+        brls::Application::notify("已中断 AI 流式回答");
         return true;
     }
     if (dock_view_ && dock_view_->cancelActiveStream()) {
@@ -1359,6 +2011,7 @@ void WorkspaceShellActivity::refreshJobBar() {
     job_bar_box_->addView(actions);
     job_bar_box_->setVisibility(brls::Visibility::VISIBLE);
     job_bar_box_->invalidate();
+    DesktopInputController::markDirty(job_bar_box_);
 }
 
 void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const nlohmann::json& payload) {
@@ -1384,15 +2037,69 @@ void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const 
         CurationSchedulerDialog::open();
         return;
     }
+    if (topic == "cmd:auth:center") {
+        const std::string pid =
+            (payload.is_object() && payload.contains("plugin_id") && payload["plugin_id"].is_string())
+                ? payload["plugin_id"].get<std::string>()
+                : std::string{};
+        openAuthCenter(pid);
+        return;
+    }
+    if (topic == "entity.curation.filter_date") {
+        const std::string bdate =
+            (payload.is_object() && payload.contains("business_date") && payload["business_date"].is_string())
+                ? payload["business_date"].get<std::string>()
+                : std::string{};
+        if (bdate.empty()) return;
+        if (domain == "music" || domain == "youtube" || domain == "video") {
+            selectWorkspace(WorkspaceId::Media);
+            if (media_view_) media_view_->applyDateFilter(bdate, domain);
+        } else if (domain == "english") {
+            selectWorkspace(WorkspaceId::Book);
+            if (book_view_) book_view_->applyDateFilter(bdate);
+        } else if (domain == "news" || domain == "reddit" || domain == "journal") {
+            selectWorkspace(WorkspaceId::Text);
+            if (text_view_) text_view_->applyDateFilter(bdate, domain);
+        } else {
+            pending_all_date_filter_ = bdate;
+            if (media_view_) media_view_->applyDateFilter(bdate, "all");
+            if (text_view_) text_view_->applyDateFilter(bdate, "all");
+            if (book_view_) book_view_->applyDateFilter(bdate);
+            if (active_workspace_ != WorkspaceId::Media &&
+                active_workspace_ != WorkspaceId::Text &&
+                active_workspace_ != WorkspaceId::Book) {
+                selectWorkspace(WorkspaceId::Text);
+            }
+        }
+        brls::Application::notify("已按 " + bdate + " 筛选每日推荐工作台");
+        return;
+    }
 
     if (topic == "entity.workspace.return") {
+        WorkspaceId landed_ws = WorkspaceId::Text;
         if (has_return_workspace_) {
             const WorkspaceId target_ws = return_workspace_;
             const std::string target_cid = return_custom_tab_id_;
             has_return_workspace_ = false;
+            landed_ws = target_ws;
             selectWorkspace(target_ws, target_cid);
         } else {
             selectWorkspace(WorkspaceId::Text);
+        }
+        if (landed_ws == WorkspaceId::Text && text_view_ && text_view_->isShowingAuthPrompt()) {
+            text_view_->refresh(true);
+        }
+        return;
+    }
+
+    if (topic == "entity.workspace.open") {
+        const std::string tab_id =
+            payload.is_object() ? payload.value("tab_id", "") : std::string{};
+        if (!tab_id.empty()) {
+            return_workspace_ = active_workspace_;
+            return_custom_tab_id_ = active_custom_tab_id_;
+            has_return_workspace_ = true;
+            selectWorkspace(WorkspaceId::CustomPluginTab, tab_id);
         }
         return;
     }
@@ -1413,10 +2120,8 @@ void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const 
             has_return_workspace_ = true;
             selectWorkspace(WorkspaceId::CustomPluginTab, tab_id);
         }
-        if (dock_view_ && !title.empty()) {
-            dock_view_->setDomainContext(ContentDomain::Text, title);
-        }
         if (!title.empty()) {
+            setCompanionDomainContext(ContentDomain::Text, title);
             brls::Application::notify("已在内嵌 Chrome 打开: " + title);
         }
         return;
@@ -1427,8 +2132,8 @@ void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const 
         if (book_view_) {
             book_view_->openExternalBook(payload);
         }
-        if (dock_view_ && !title.empty()) {
-            dock_view_->setDomainContext(ContentDomain::Book, title);
+        if (!title.empty()) {
+            setCompanionDomainContext(ContentDomain::Book, title);
         }
     } else if (payload.contains("sub_mode") && payload.value("sub_mode", "") == "vocab") {
         selectWorkspace(WorkspaceId::Book);
@@ -1440,8 +2145,8 @@ void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const 
         if (text_view_) {
             text_view_->openExternalArticle(payload);
         }
-        if (dock_view_ && !title.empty()) {
-            dock_view_->setDomainContext(ContentDomain::Text, title);
+        if (!title.empty()) {
+            setCompanionDomainContext(ContentDomain::Text, title);
         }
     } else if (topic == "entity.media.open" || domain == "media" || domain == "video" ||
                domain == "music" || domain == "nas") {
@@ -1449,8 +2154,8 @@ void WorkspaceShellActivity::handleJobOpenEvent(const std::string& topic, const 
         if (media_view_) {
             media_view_->openExternalMedia(payload);
         }
-        if (dock_view_ && !title.empty()) {
-            dock_view_->setDomainContext(ContentDomain::Media, title);
+        if (!title.empty()) {
+            setCompanionDomainContext(ContentDomain::Media, title);
         }
     }
     if (!title.empty()) {
@@ -1480,6 +2185,7 @@ void WorkspaceShellActivity::showWarningBanner(const std::string& message,
     fault_banner_label_->setText(clean);
     fault_banner_box_->setVisibility(brls::Visibility::VISIBLE);
     fault_banner_box_->invalidate();
+    DesktopInputController::markDirty(fault_banner_box_);
 }
 
 void WorkspaceShellActivity::dismissWarningBanner() {
@@ -1489,6 +2195,7 @@ void WorkspaceShellActivity::dismissWarningBanner() {
     active_warning_topic_.clear();
     fault_banner_box_->setVisibility(brls::Visibility::GONE);
     fault_banner_box_->invalidate();
+    DesktopInputController::markDirty(chrome_bottom_box_);
 }
 
 } // namespace omnidesk::host

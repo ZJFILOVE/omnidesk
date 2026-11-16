@@ -16,6 +16,9 @@
 #include "omnidesk/ui_task_runner.hpp"
 #include "omnidesk/worker_supervisor.hpp"
 
+#include <mutex>
+#include <unordered_set>
+
 namespace omnidesk::host {
 
 /**
@@ -55,6 +58,9 @@ public:
     pm::PluginInstaller& installer() { return *installer_; }
     pm::PluginManager& plugins() { return *plugins_; }
 
+    std::vector<pm::AbiStatusEntry> installedAbiStatuses(bool force_refresh = false);
+    bool hasStaleAbiPlugins(bool force_refresh = false);
+
     bool isDarkTheme() const;
     void setDarkTheme(bool dark);
     void toggleTheme();
@@ -64,6 +70,11 @@ public:
 private:
     HostKernel() = default;
     ~HostKernel() = default;
+
+    void scheduleSearchHydrate(uint32_t scopes,
+                               const std::string& source_id = "",
+                               bool all_domain_sources = false,
+                               int debounce_ms = 320);
 
     bool initialized_ = false;
     bool background_services_stopped_ = false;
@@ -92,6 +103,14 @@ private:
     uint64_t search_plugin_sub_ = 0;
     uint64_t search_recommend_sub_ = 0;
     uint64_t search_vocab_sub_ = 0;
+    uint64_t abi_plugin_sub_ = 0;
+    std::mutex abi_cache_mu_;
+    bool abi_cache_valid_ = false;
+    std::vector<pm::AbiStatusEntry> cached_abi_statuses_;
+    std::mutex search_hydrate_mu_;
+    uint32_t pending_hydrate_scopes_ = 0;
+    bool pending_hydrate_all_sources_ = false;
+    std::unordered_set<std::string> pending_hydrate_sources_;
 };
 
 } // namespace omnidesk::host

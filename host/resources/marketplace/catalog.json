@@ -154,7 +154,7 @@
       "kind": "hybrid",
       "domain": "media",
       "author": "OmniDesk",
-      "description": "IMDb 榜单与详情发现、Radarr (7878) / Sonarr (8989) 对数做种分档选片（同档优先较小体积、排除枪版、不限大小）、qBittorrent 队列联动及飞牛 NAS 已入库片源直连播放。",
+      "description": "IMDb 榜单与详情发现、Radarr (7878) / Sonarr (8989) 智能选片（支持对数做种分档选小体积与预计最快下载双模式、排除枪版、不限大小）、qBittorrent 队列联动及飞牛 NAS 已入库片源直连播放。",
       "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-arr-imdb",
       "repository": {
         "type": "git",

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include "omnidesk/host/ui_comfort.hpp"
 #include "omnidesk/image_cache.hpp"
 #include "omnidesk/ui_theme.hpp"
 
@@ -68,10 +69,12 @@ void MiniPlayerBar::buildStaticUi() {
     row->setPadding(8, 18, 8, 18);
     row->setAlignItems(brls::AlignItems::CENTER);
     row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    ui_comfort::enableFlexWrap(row, 6.0f);
 
     auto* left = new brls::Box(brls::Axis::ROW);
     left->setAlignItems(brls::AlignItems::CENTER);
     left->setGrow(1.0f);
+    left->setShrink(1.0f);
 
     thumb_box_ = new brls::Box(brls::Axis::ROW);
     thumb_box_->setDimensions(38, 38);
@@ -86,22 +89,23 @@ void MiniPlayerBar::buildStaticUi() {
     role_pill_box_->setCornerRadius(7.0f);
     role_pill_box_->setBackgroundColor(ui::color("desktop/active"));
     role_pill_box_->setMarginRight(12);
-    role_pill_label_ = ui::makeLabel("音乐", 13.0f, "brls/accent", 1.2f);
+    role_pill_label_ = ui::makeLabel("音乐", 12.8f, "brls/accent", 1.2f);
     role_pill_label_->setSingleLine(true);
     role_pill_box_->addView(role_pill_label_);
     left->addView(role_pill_box_);
 
     auto* info_col = new brls::Box(brls::Axis::COLUMN);
     info_col->setGrow(1.0f);
-    title_label_ = ui::makeLabel("未在播放", 15.0f, "brls/text", 1.25f);
+    info_col->setShrink(1.0f);
+    title_label_ = ui::makeLabel("未在播放", 14.8f, "brls/text", 1.25f);
     title_label_->setSingleLine(true);
-    meta_label_ = ui::makeLabel("", 13.0f, "font/grey", 1.2f);
+    meta_label_ = ui::makeLabel("", 12.8f, "font/grey", 1.2f);
     meta_label_->setSingleLine(true);
     info_col->addView(title_label_);
     info_col->addView(meta_label_);
     left->addView(info_col);
 
-    time_label_ = ui::makeLabel("00:00 / 00:00", 13.5f, "font/grey");
+    time_label_ = ui::makeLabel("00:00 / 00:00", 13.0f, "font/grey");
     time_label_->setMarginLeft(12);
     time_label_->setMarginRight(14);
     left->addView(time_label_);
@@ -109,37 +113,38 @@ void MiniPlayerBar::buildStaticUi() {
 
     auto* controls = new brls::Box(brls::Axis::ROW);
     controls->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(controls, 4.0f);
 
     prev_btn_ = ui::makeButton("上一曲", []() {
         PlaybackCoordinator::instance().prevTrack();
-    }, false, 34.0f);
+    }, false, 33.0f);
     prev_btn_->setMarginRight(6);
     prev_btn_->setVisibility(brls::Visibility::GONE);
     controls->addView(prev_btn_);
 
     play_btn_ = ui::makeButton("播放", []() {
         PlaybackCoordinator::instance().playPause();
-    }, true, 34.0f);
+    }, true, 33.0f);
     play_btn_->setMarginRight(6);
     controls->addView(play_btn_);
 
     next_btn_ = ui::makeButton("下一曲", []() {
         PlaybackCoordinator::instance().nextTrack();
-    }, false, 34.0f);
+    }, false, 33.0f);
     next_btn_->setMarginRight(6);
     next_btn_->setVisibility(brls::Visibility::GONE);
     controls->addView(next_btn_);
 
     sponsor_btn_ = ui::makeButton("跳过赞助 F9", []() {
         PlaybackCoordinator::instance().skipActiveSponsor();
-    }, false, 34.0f);
+    }, false, 33.0f);
     sponsor_btn_->setMarginRight(6);
     sponsor_btn_->setVisibility(brls::Visibility::GONE);
     controls->addView(sponsor_btn_);
 
     resume_music_btn_ = ui::makeButton("恢复音乐", []() {
         PlaybackCoordinator::instance().resumeSuspendedMusic();
-    }, false, 34.0f);
+    }, false, 33.0f);
     resume_music_btn_->setMarginRight(6);
     resume_music_btn_->setVisibility(brls::Visibility::GONE);
     controls->addView(resume_music_btn_);
@@ -147,13 +152,13 @@ void MiniPlayerBar::buildStaticUi() {
     open_stage_btn_ = ui::makeButton("舞台", [this]() {
         const auto st = PlaybackCoordinator::instance().state();
         if (on_open_stage_) on_open_stage_(st.active_role);
-    }, false, 34.0f);
+    }, false, 33.0f);
     open_stage_btn_->setMarginRight(6);
     controls->addView(open_stage_btn_);
 
     controls->addView(ui::makeButton("×", []() {
         PlaybackCoordinator::instance().stop(false);
-    }, false, 34.0f));
+    }, false, 33.0f));
 
     row->addView(controls);
     addView(row);

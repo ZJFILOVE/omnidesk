@@ -8,6 +8,7 @@
 
 #include "omnidesk/async.hpp"
 #include "omnidesk/host/kernel.hpp"
+#include "omnidesk/host/ui_comfort.hpp"
 #include "omnidesk/search_index.hpp"
 #include "omnidesk/ui_theme.hpp"
 
@@ -34,8 +35,8 @@ public:
         hdr->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
         hdr->setAlignItems(brls::AlignItems::CENTER);
         hdr->setMarginBottom(12);
-        hdr->addView(ui::makeLabel("OmniCommandPalette · Ctrl+K 跨三域全局检索与命令面板", 20.0f, "brls/text"));
-        status_label_ = ui::makeLabel("SQLite FTS5", 13.5f, "font/grey");
+        hdr->addView(ui::makeLabel("OmniCommandPalette · Ctrl+K 跨三域全局检索与命令面板", 19.5f, "brls/text"));
+        status_label_ = ui::makeLabel("SQLite FTS5", 13.0f, "font/grey");
         hdr->addView(status_label_);
         addView(hdr);
 
@@ -47,7 +48,7 @@ public:
         query_btn_ = ui::makeButton(
             query_.empty() ? "输入搜索关键词（台词 / 书名 / 往期精选 / 乐评 / 生词 / 命令）..." : ("关键词: " + query_),
             [this]() { openSearchIme(); },
-            false, 38.0f);
+            false, 36.0f);
         query_btn_->setGrow(1.0f);
         query_btn_->setMarginRight(8);
         search_row->addView(query_btn_);
@@ -58,16 +59,17 @@ public:
                 query_btn_->setText("输入搜索关键词（台词 / 书名 / 往期精选 / 乐评 / 生词 / 命令）...");
             }
             runQuery();
-        }, false, 38.0f);
+        }, false, 36.0f);
         clr_btn->setMarginRight(8);
         search_row->addView(clr_btn);
 
-        search_row->addView(ui::makeButton("重建索引", [this]() { triggerReindex(); }, false, 38.0f));
+        search_row->addView(ui::makeButton("重建索引", [this]() { triggerReindex(); }, false, 36.0f));
         addView(search_row);
 
         // Kind filter pills
         filter_bar_ = new brls::Box(brls::Axis::ROW);
         filter_bar_->setMarginBottom(10);
+        ui_comfort::enableFlexWrap(filter_bar_, 6.0f);
         rebuildFilters();
         addView(filter_bar_);
 
@@ -109,11 +111,12 @@ private:
             {"command", "快捷命令"},
         };
         for (const auto& f : filters) {
-            auto* btn = ui::makeButton(f.label, [this, k = std::string(f.kind)]() {
+            const char* accent = (f.kind[0] == '\0') ? "brls/accent" : kindColorToken(f.kind);
+            auto* btn = ui_comfort::makeFilterChip(f.label, [this, k = std::string(f.kind)]() {
                 active_kind_ = k;
                 rebuildFilters();
                 runQuery();
-            }, active_kind_ == f.kind, 34.0f);
+            }, active_kind_ == f.kind, accent, 31.0f);
             btn->setMarginRight(6);
             filter_bar_->addView(btn);
         }
@@ -225,9 +228,15 @@ private:
                 });
                 results_box_->addView(card);
             };
-            add_quick_cmd("📅 打开推荐日历与每日清单 (Calendar)",
+            add_quick_cmd("打开统一账号授权与浏览器自动 Cookie 中心 (Auth Hub)",
+                          "体检全平台真实登录状态，一键弹出浏览器登录并自动获取保存 Cookie", "auth:center");
+            add_quick_cmd("打开 AI 对话与深度思考工作台 (Ctrl+5)",
+                          "DeepSeek 风格全屏多轮对话、无字数限制内联输入、模型路由切换", "workspace:ai");
+            add_quick_cmd("AI 灵感策展 (反写三大工作台 + 歌单)",
+                          "开启内联灵感策展会话，按心情/主题推荐并反写前端与 Apple Music", "ai:curate");
+            add_quick_cmd("打开推荐日历与每日清单 (Calendar)",
                           "按日期/领域浏览全部历史与今日 AI 推荐", "curation:calendar");
-            add_quick_cmd("⚙ 每日定时推荐开关与后台 Agent 调度",
+            add_quick_cmd("每日定时推荐开关与后台 Agent 调度",
                           "查看今日 4 个定时工作流状态、手动开关或立即补跑", "curation:scheduler");
         }
 
@@ -381,7 +390,20 @@ void OmniCommandPalette::open(const std::string& initial_query,
     auto* box = new PaletteBox(initial_query, std::move(callbacks));
     auto* dlg = new brls::Dialog(box);
     box->setDialog(dlg);
+    if (auto* applet = dynamic_cast<brls::Box*>(dlg->getView("brls/dialog/applet"))) {
+        applet->setWidth(820.0f);
+        applet->setCornerRadius(14.0f);
+        applet->setBorderThickness(1.0f);
+        applet->setBorderColor(ui::color("desktop/line"));
+        applet->setBackgroundColor(ui::color("brls/background"));
+        applet->setClipsToBounds(true);
+    }
     dlg->addButton("关闭 Esc", [] {});
+    if (auto* btn1 = dlg->getView("brls/dialog/button1")) {
+        if (auto* btn_row = btn1->getParent()) {
+            btn_row->setHeight(52.0f);
+        }
+    }
     dlg->open();
 }
 

@@ -1,22 +1,24 @@
 #pragma once
 
 #include <borealis.hpp>
-#include <lunasvg.h>
-#include <memory>
+#include <cstdint>
 #include <string>
 
 namespace omnidesk::host {
 
 /**
- * Lightweight NanoVG + lunasvg icon view without coupling to wiliwili globals.
+ * Lightweight NanoVG + lunasvg icon view with per-NVGcontext RGBA texture caching.
+ * Repeated workspace switches or rail rebuilds reuse existing GL textures with zero
+ * XML re-parse and zero texture recreation.
  */
 class SvgIconView : public brls::View {
 public:
     explicit SvgIconView(const std::string& file_path = "");
-    ~SvgIconView() override;
+    ~SvgIconView() override = default;
 
     void setSvgFile(const std::string& file_path);
     void setSvgString(const std::string& xml);
+    void setNavIcon(const std::string& icon_kind, NVGcolor color);
 
     void draw(NVGcontext* vg,
               float x,
@@ -27,10 +29,21 @@ public:
               brls::FrameContext* ctx) override;
 
 private:
-    void rebuildTexture(NVGcontext* vg, int pw, int ph);
-    void freeTexture();
+    enum class SourceKind : uint8_t {
+        None = 0,
+        File,
+        Xml,
+        NavIcon,
+    };
 
-    std::unique_ptr<lunasvg::Document> doc_;
+    void resolveTexture(NVGcontext* vg, int pw, int ph);
+
+    SourceKind source_kind_ = SourceKind::None;
+    std::string source_key_;
+    std::string raw_payload_;
+    std::string nav_hex_color_;
+    float nav_opacity_ = 1.0f;
+
     int nvg_tex_ = 0;
     NVGcontext* owner_vg_ = nullptr;
     int rendered_w_ = 0;

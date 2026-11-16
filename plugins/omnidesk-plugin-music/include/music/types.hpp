@@ -11,9 +11,11 @@ namespace music_plugin {
 struct MusicConfig {
     std::string engine_bin;
     std::string engine_data_dir;
+    bool engine_data_dir_explicit = false;
     int engine_port = 20025;
     bool auto_launch_engine = true;
     std::string storefront = "us";
+    bool storefront_explicit = false;
     std::string language = "zh-CN";
     bool lossless_enabled = true;
     bool hires_enabled = true;
@@ -91,6 +93,7 @@ struct PlaybackSessionInfo {
     std::string title;
     std::string artist;
     std::string album;
+    std::string cover_url;
     double duration_sec = 0.0;
     std::string error;
 

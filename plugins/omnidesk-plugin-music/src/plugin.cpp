@@ -21,30 +21,68 @@ std::string safeEventStr(const nlohmann::json& j, const char* key, const std::st
     return def;
 }
 
-std::string extractAppleMusicIdFromUrl(const std::string& url) {
-    if (url.find("music.apple.com/") == std::string::npos) return "";
-    size_t song_pos = url.find("/song/");
-    if (song_pos != std::string::npos) {
-        size_t p = song_pos + 6;
-        // Handle either /song/12345 or /song/slug/12345
-        size_t q = url.find_first_of("?#", p);
-        std::string tail = (q == std::string::npos) ? url.substr(p) : url.substr(p, q - p);
-        size_t slash = tail.rfind('/');
-        std::string candidate = (slash == std::string::npos) ? tail : tail.substr(slash + 1);
-        if (isDigitsOnly(candidate)) return candidate;
-    }
-    size_t i_pos = url.find("i=");
-    if (i_pos != std::string::npos) {
-        size_t p = i_pos + 2;
-        size_t q = url.find_first_of("&#", p);
-        std::string candidate = (q == std::string::npos) ? url.substr(p) : url.substr(p, q - p);
-        if (isDigitsOnly(candidate)) return candidate;
+std::string extractStorefrontFromUrl(const std::string& url) {
+    size_t host_pos = url.find("music.apple.com/");
+    if (host_pos == std::string::npos) return "";
+    size_t p = host_pos + std::char_traits<char>::length("music.apple.com/");
+    size_t slash = url.find('/', p);
+    if (slash == std::string::npos || slash <= p) return "";
+    std::string seg = url.substr(p, slash - p);
+    if (seg.size() == 2 &&
+        std::isalpha(static_cast<unsigned char>(seg[0])) &&
+        std::isalpha(static_cast<unsigned char>(seg[1]))) {
+        seg[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(seg[0])));
+        seg[1] = static_cast<char>(std::tolower(static_cast<unsigned char>(seg[1])));
+        return seg;
     }
     return "";
 }
 
-std::string extractNumericSongIdFromPrefixedId(const std::string& raw_id) {
-    if (raw_id.rfind("am-cn-", 0) == 0) {
+std::string extractAppleMusicIdFromUrl(const std::string& url) {
+    if (url.find("music.apple.com/") == std::string::npos) return "";
+    size_t q_pos = url.find('?');
+    if (q_pos != std::string::npos) {
+        std::string query = url.substr(q_pos + 1);
+        size_t hash = query.find('#');
+        if (hash != std::string::npos) query.resize(hash);
+        size_t cur = 0;
+        while (cur < query.size()) {
+            size_t amp = query.find('&', cur);
+            std::string kv = (amp == std::string::npos) ? query.substr(cur) : query.substr(cur, amp - cur);
+            if (kv.rfind("i=", 0) == 0) {
+                std::string candidate = kv.substr(2);
+                if (isDigitsOnly(candidate)) return candidate;
+            }
+            if (amp == std::string::npos) break;
+            cur = amp + 1;
+        }
+    }
+    for (const char* marker : {"/song/", "/music-video/"}) {
+        size_t song_pos = url.find(marker);
+        if (song_pos != std::string::npos) {
+            size_t p = song_pos + std::char_traits<char>::length(marker);
+            // Handle either /song/12345 or /song/slug/12345
+            size_t q = url.find_first_of("?#", p);
+            std::string tail = (q == std::string::npos) ? url.substr(p) : url.substr(p, q - p);
+            while (!tail.empty() && tail.back() == '/') tail.pop_back();
+            size_t slash = tail.rfind('/');
+            std::string candidate = (slash == std::string::npos) ? tail : tail.substr(slash + 1);
+            if (isDigitsOnly(candidate)) return candidate;
+        }
+    }
+    return "";
+}
+
+std::string extractNumericSongIdFromPrefixedId(const std::string& raw_id, std::string* sf_out = nullptr) {
+    if (raw_id.rfind("am-", 0) == 0 && raw_id.size() > 6 && raw_id[5] == '-' &&
+        std::isalpha(static_cast<unsigned char>(raw_id[3])) &&
+        std::isalpha(static_cast<unsigned char>(raw_id[4]))) {
+        if (sf_out && sf_out->empty()) {
+            std::string sf = raw_id.substr(3, 2);
+            sf[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(sf[0])));
+            sf[1] = static_cast<char>(std::tolower(static_cast<unsigned char>(sf[1])));
+            *sf_out = sf;
+        }
         std::string rest = raw_id.substr(6);
         if (isDigitsOnly(rest)) return rest;
         size_t dash = rest.rfind('-');
@@ -105,7 +143,7 @@ bool MusicPlugin::onLoad(omnidesk::PluginContext& ctx) {
         {
             {"name", "Apple Music (Adam FairPlay ALAC)"},
             {"version", "0.1.0"},
-            {"actions", {"categories", "feed", "search", "playurl", "lyrics", "drm_status"}},
+            {"actions", {"categories", "feed", "search", "metadata", "playurl", "lyrics", "drm_status"}},
         },
         95);
 
@@ -167,13 +205,14 @@ bool MusicPlugin::onLoad(omnidesk::PluginContext& ctx) {
                                            const nlohmann::json& payload) {
         auto eng = weak.lock();
         if (!eng || !eng->isAlive() || !payload.is_object()) return;
-        if (safeEventStr(payload, "origin") == "plugin_music") return;
+        const std::string origin = safeEventStr(payload, "origin");
+        if (origin == "plugin_music") return;
 
         const std::string source_id = safeEventStr(payload, "source_id");
         std::string raw_id = safeEventStr(payload, "id");
         if (raw_id.empty()) raw_id = safeEventStr(payload, "item_id");
         const std::string kind = safeEventStr(payload, "kind");
-        if (raw_id.rfind("cache:", 0) == 0) return;
+        if (raw_id.rfind("cache:", 0) == 0 || raw_id.rfind("demo-", 0) == 0) return;
 
         std::string extra_song_id = safeEventStr(payload, "apple_music_song_id");
         std::string storefront;
@@ -184,10 +223,12 @@ bool MusicPlugin::onLoad(omnidesk::PluginContext& ctx) {
             }
             storefront = safeEventStr(extra, "storefront");
         }
-        std::string prefixed_song_id = extractNumericSongIdFromPrefixedId(raw_id);
+        std::string pref_sf;
+        std::string prefixed_song_id = extractNumericSongIdFromPrefixedId(raw_id, &pref_sf);
         std::string url_str = safeEventStr(payload, "play_url");
         if (url_str.empty()) url_str = safeEventStr(payload, "url");
         std::string url_song_id = extractAppleMusicIdFromUrl(url_str);
+        std::string url_sf = extractStorefrontFromUrl(url_str);
 
         const bool is_curated_am = !extra_song_id.empty() || !prefixed_song_id.empty() || !url_song_id.empty();
         if (source_id != "plugin-music" && source_id != "plugin-ai-curator" && !is_curated_am) {
@@ -217,12 +258,21 @@ bool MusicPlugin::onLoad(omnidesk::PluginContext& ctx) {
         tr.title = safeEventStr(payload, "title", resolved_id);
         tr.artist = safeEventStr(payload, "artist");
         if (tr.artist.empty()) tr.artist = safeEventStr(payload, "creator");
+        tr.cover_url = safeEventStr(payload, "cover_url");
         if (!storefront.empty()) {
             tr.storefront = storefront;
-        } else if (raw_id.rfind("am-cn-", 0) == 0 || source_id == "plugin-ai-curator") {
+        } else if (!url_sf.empty()) {
+            tr.storefront = url_sf;
+        } else if (!pref_sf.empty()) {
+            tr.storefront = pref_sf;
+        } else if (source_id == "plugin-ai-curator") {
             tr.storefront = "cn";
         }
-        eng->playTrack(tr);
+        if (origin == "host_workbench") {
+            eng->syncExternalTrack(tr);
+        } else {
+            eng->playTrack(tr);
+        }
     });
 
     engine_->startBackgroundTasks();

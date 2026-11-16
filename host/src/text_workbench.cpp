@@ -1,16 +1,23 @@
 #include "omnidesk/host/text_workbench.hpp"
 #include "omnidesk/host/async_load.hpp"
 #include "omnidesk/host/curation_calendar_dialog.hpp"
+#include "omnidesk/host/recycling_grid.hpp"
+#include "omnidesk/host/ui_comfort.hpp"
 
 #include "omnidesk/host/kernel.hpp"
+#include "omnidesk/image_cache.hpp"
+#include "omnidesk/markdown_view.hpp"
 #include "omnidesk/selection_action_popover.hpp"
 #include "omnidesk/ui_theme.hpp"
 
+#include <SDL2/SDL.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <functional>
 #include <future>
 #include <set>
+#include <sstream>
 
 namespace omnidesk::host {
 namespace {
@@ -22,6 +29,60 @@ bool isIsoDateStr(const std::string& s) {
         if (!std::isdigit(static_cast<unsigned char>(s[i]))) return false;
     }
     return true;
+}
+
+std::string stripLeadingHashes(const std::string& raw) {
+    size_t i = 0;
+    while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t')) ++i;
+    size_t hashes = 0;
+    while (i + hashes < raw.size() && raw[i + hashes] == '#' && hashes < 6) ++hashes;
+    if (hashes > 0 && i + hashes < raw.size() &&
+        (raw[i + hashes] == ' ' || raw[i + hashes] == '\t')) {
+        size_t start = i + hashes;
+        while (start < raw.size() && (raw[start] == ' ' || raw[start] == '\t')) ++start;
+        return raw.substr(start);
+    }
+    return raw;
+}
+
+std::string ensureQuoteMarkdown(const std::string& raw) {
+    std::istringstream iss(raw);
+    std::string line;
+    std::string out;
+    bool first = true;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t ns = 0;
+        while (ns < line.size() && (line[ns] == ' ' || line[ns] == '\t')) ++ns;
+        if (!first) out += '\n';
+        first = false;
+        if (ns < line.size() && line[ns] == '>') {
+            out += line;
+        } else if (ns == line.size()) {
+            out += ">";
+        } else {
+            out += "> " + line;
+        }
+    }
+    return out;
+}
+
+std::string ensureCodeFenceMarkdown(const std::string& raw) {
+    size_t i = 0;
+    while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\n')) ++i;
+    if (raw.compare(i, 3, "```") == 0 || raw.compare(i, 3, "~~~") == 0) {
+        return raw;
+    }
+    return "```\n" + raw + (raw.empty() || raw.back() == '\n' ? "" : "\n") + "```";
+}
+
+std::string ensureFormulaMarkdown(const std::string& raw) {
+    size_t i = 0;
+    while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\n')) ++i;
+    if (raw.compare(i, 2, "$$") == 0) {
+        return raw;
+    }
+    return "$$\n" + raw + (raw.empty() || raw.back() == '\n' ? "" : "\n") + "$$";
 }
 
 std::string extractTranslationTag(const std::string& raw) {
@@ -82,25 +143,158 @@ void applyTranslatedCommentsJson(std::vector<CommentNode>& nodes, const nlohmann
     }
 }
 
-std::string truncateUtf8Text(const std::string& text, size_t max_chars) {
-    if (text.empty()) return "";
-    size_t chars = 0;
+int estimateWrappedLines(const std::string& raw_md, float font_size, float avail_width, int max_lines) {
+    const std::string plain = stripMarkdownToPlainText(raw_md, true);
+    if (plain.empty()) return 0;
+    float est_px = 0.0f;
     size_t i = 0;
-    while (i < text.size()) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
+    while (i < plain.size()) {
+        const unsigned char ch = static_cast<unsigned char>(plain[i]);
         size_t adv = 1;
-        if ((c & 0x80) == 0) adv = 1;
-        else if ((c & 0xE0) == 0xC0) adv = 2;
-        else if ((c & 0xF0) == 0xE0) adv = 3;
-        else if ((c & 0xF8) == 0xF0) adv = 4;
-        if (i + adv > text.size()) break;
-        i += adv;
-        if (++chars >= max_chars) {
-            return i < text.size() ? (text.substr(0, i) + "…") : text;
+        if ((ch & 0x80u) == 0) {
+            adv = 1;
+            est_px += font_size * 0.56f;
+        } else {
+            if ((ch & 0xE0u) == 0xC0u) adv = 2;
+            else if ((ch & 0xF0u) == 0xE0u) adv = 3;
+            else if ((ch & 0xF8u) == 0xF0u) adv = 4;
+            est_px += font_size * 1.02f;
+        }
+        i += std::min(adv, plain.size() - i);
+    }
+    const float w = std::max(140.0f, avail_width);
+    const int lines = std::max(1, static_cast<int>(std::ceil(est_px / w)));
+    return max_lines > 0 ? std::min(max_lines, lines) : lines;
+}
+
+class TextFeedCardCell final : public RecyclingGridCell {
+public:
+    TextFeedCardCell() : RecyclingGridCell(brls::Axis::COLUMN) {
+        setWidthPercentage(100);
+        setPadding(16.0f);
+        setBackgroundColor(ui::color("desktop/surface"));
+        setCornerRadius(12.0f);
+        setHighlightCornerRadius(12.0f);
+        setHideHighlightBackground(true);
+        setHideHighlightBorder(true);
+        setBorderThickness(1);
+        setBorderColor(ui::color("desktop/line"));
+        setFocusable(true);
+
+        top_row_ = new brls::Box(brls::Axis::ROW);
+        top_row_->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+        top_row_->setAlignItems(brls::AlignItems::CENTER);
+        top_row_->setMarginBottom(7);
+
+        source_pill_box_ = new brls::Box(brls::Axis::ROW);
+        source_pill_box_->setPadding(4, 10, 4, 10);
+        source_pill_box_->setCornerRadius(7);
+        source_pill_box_->setAlignItems(brls::AlignItems::CENTER);
+        source_pill_lbl_ = ui::makeLabel("", 13.0f, "domain/text", 1.2f);
+        source_pill_lbl_->setSingleLine(true);
+        source_pill_box_->addView(source_pill_lbl_);
+        top_row_->addView(source_pill_box_);
+
+        auth_pill_box_ = ui::makePill("需登录 · 点击直接登录", "status/warn_bg", "status/warn_fg");
+        top_row_->addView(auth_pill_box_);
+
+        stats_lbl_ = ui::makeLabel("", 13.0f, "font/grey");
+        stats_lbl_->setSingleLine(true);
+        top_row_->addView(stats_lbl_);
+        addView(top_row_);
+
+        prov_lbl_ = ui::makeLabel("", 13.0f, "font/grey");
+        prov_lbl_->setMarginBottom(4);
+        prov_lbl_->setSingleLine(true);
+        addView(prov_lbl_);
+
+        title_md_ = ui::makeMarkdownInline("", 16.2f, "brls/text", 1.42f, 3, false);
+        addView(title_md_);
+
+        excerpt_md_ = ui::makeMarkdownInline("", 14.2f, "font/grey", 1.48f, 3, false);
+        addView(excerpt_md_);
+
+        registerClickAction([this](brls::View*) {
+            if (on_activate_) on_activate_();
+            return true;
+        });
+
+        addGestureRecognizer(new brls::TapGestureRecognizer(
+            [this](brls::TapGestureStatus status, brls::Sound* soundToPlay) {
+                if (!isFocusable() || getVisibility() != brls::Visibility::VISIBLE) return;
+                if (status.state == brls::GestureState::START ||
+                    status.state == brls::GestureState::UNSURE) {
+                    playClickAnimation(false, false);
+                } else if (status.state == brls::GestureState::FAILED ||
+                           status.state == brls::GestureState::INTERRUPTED) {
+                    playClickAnimation(true);
+                } else if (status.state == brls::GestureState::END) {
+                    playClickAnimation(true);
+                    brls::Application::giveFocus(this);
+                    if (soundToPlay) *soundToPlay = brls::SOUND_CLICK;
+                    if (on_activate_) on_activate_();
+                }
+            }));
+    }
+
+    void prepareForReuse() override {
+        on_activate_ = nullptr;
+    }
+
+    void bind(const TextFeedItem& item,
+              bool selected,
+              bool auth_card,
+              const std::string& prov_date,
+              std::function<void()> on_activate) {
+        on_activate_ = std::move(on_activate);
+        ui_comfort::styleSelectableCard(this, selected, "domain/text");
+
+        source_pill_box_->setBackgroundColor(ui::color("status/info_bg"));
+        source_pill_lbl_->setTextColor(ui::color("domain/text"));
+        source_pill_lbl_->setText(item.source_name);
+
+        if (auth_card) {
+            auth_pill_box_->setVisibility(brls::Visibility::VISIBLE);
+            stats_lbl_->setVisibility(brls::Visibility::GONE);
+        } else {
+            auth_pill_box_->setVisibility(brls::Visibility::GONE);
+            stats_lbl_->setVisibility(brls::Visibility::VISIBLE);
+            stats_lbl_->setTextColor(ui::color("font/grey"));
+            stats_lbl_->setText("▲ " + std::to_string(item.score) + " · 评论 " +
+                                std::to_string(item.comment_count));
+        }
+
+        if (!prov_date.empty()) {
+            prov_lbl_->setVisibility(brls::Visibility::VISIBLE);
+            prov_lbl_->setTextColor(ui::color("font/grey"));
+            prov_lbl_->setText("曾入选每日精选 · " + prov_date);
+        } else {
+            prov_lbl_->setVisibility(brls::Visibility::GONE);
+        }
+
+        const std::string clean_ex = sanitizeMarkdownExcerpt(item.excerpt, 150);
+        title_md_->setMarkdown(item.title);
+        title_md_->setMarginBottom(clean_ex.empty() ? 0.0f : 6.0f);
+
+        if (!clean_ex.empty()) {
+            excerpt_md_->setVisibility(brls::Visibility::VISIBLE);
+            excerpt_md_->setMarkdown(clean_ex);
+        } else {
+            excerpt_md_->setVisibility(brls::Visibility::GONE);
         }
     }
-    return text;
-}
+
+private:
+    brls::Box* top_row_ = nullptr;
+    brls::Box* source_pill_box_ = nullptr;
+    brls::Label* source_pill_lbl_ = nullptr;
+    brls::Box* auth_pill_box_ = nullptr;
+    brls::Label* stats_lbl_ = nullptr;
+    brls::Label* prov_lbl_ = nullptr;
+    MarkdownRichTextView* title_md_ = nullptr;
+    MarkdownRichTextView* excerpt_md_ = nullptr;
+    std::function<void()> on_activate_;
+};
 
 } // namespace
 
@@ -110,16 +304,21 @@ TextWorkbench::TextWorkbench(std::function<void(const std::string&)> on_entity_f
       on_entity_focus_(std::move(on_entity_focus)),
       on_open_marketplace_(std::move(on_open_marketplace)) {
     setGrow(1.0f);
+    setShrink(1.0f);
+    setMinHeight(0);
+    setHeightPercentage(100);
     setPadding(22, 24, 18, 24);
     setBackgroundColor(ui::color("brls/background"));
 
     auto* header = new brls::Box(brls::Axis::ROW);
     header->setId("omnidesk/pane_header");
+    header->setShrink(0.0f);
     header->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
     header->setAlignItems(brls::AlignItems::CENTER);
     header->setMarginBottom(10);
 
     auto* left = new brls::Box(brls::Axis::COLUMN);
+    left->setShrink(1.0f);
     left->addView(ui::makeLabel("文字 · 社区 · 科学期刊 (Text Workbench)", 24.0f, "brls/text"));
     status_label_ = ui::makeLabel("个人博客 · 知乎 · Linux.do · Reddit · arXiv / Nature / PubMed", 14.5f, "font/grey");
     status_label_->setMarginTop(3);
@@ -127,52 +326,147 @@ TextWorkbench::TextWorkbench(std::function<void(const std::string&)> on_entity_f
     header->addView(left);
 
     auto* right = new brls::Box(brls::Axis::ROW);
-    date_filter_btn_ = ui::makeButton("📅 日历查找", [this, alive = alive_]() {
+    right->setShrink(0.0f);
+    right->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(right, 6.0f);
+    date_filter_btn_ = ui::makeButton("日历查找", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) promptDateFilter();
-    }, false, 36.0f);
+    }, false, 35.0f);
     date_filter_btn_->setMarginRight(8);
     right->addView(date_filter_btn_);
+    auto* r_btn = ui::makeButton("刷新 (R)", [this, alive = alive_]() {
+        if (alive->load(std::memory_order_acquire)) refresh(true);
+    }, true, 35.0f);
+    r_btn->setMarginRight(8);
+    right->addView(r_btn);
     auto* s_btn = ui::makeButton("检索文章 /", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire)) promptSearch();
-    }, false, 36.0f);
+    }, false, 35.0f);
     s_btn->setMarginRight(8);
     right->addView(s_btn);
     right->addView(ui::makeButton("阅读插件管理", [this, alive = alive_]() {
         if (alive->load(std::memory_order_acquire) && on_open_marketplace_) {
             on_open_marketplace_();
         }
-    }, false, 36.0f));
+    }, false, 35.0f));
     header->addView(right);
     addView(header);
 
     category_bar_ = new brls::Box(brls::Axis::ROW);
     category_bar_->setId("omnidesk/pane_filters");
+    category_bar_->setShrink(0.0f);
     category_bar_->setMarginBottom(8);
+    ui_comfort::enableFlexWrap(category_bar_, 6.0f);
     addView(category_bar_);
 
     channel_bar_ = new brls::Box(brls::Axis::ROW);
+    channel_bar_->setShrink(0.0f);
     channel_bar_->setMarginBottom(10);
     channel_bar_->setVisibility(brls::Visibility::GONE);
+    ui_comfort::enableFlexWrap(channel_bar_, 6.0f);
     addView(channel_bar_);
 
     auto* split = new brls::Box(brls::Axis::ROW);
     split->setGrow(1.0f);
+    split->setShrink(1.0f);
+    split->setMinHeight(0);
     split->setWidthPercentage(100);
+    split->setHeightPercentage(100);
 
-    auto* feed_scroll = new brls::ScrollingFrame();
-    feed_scroll->setId("omnidesk/pane_primary");
-    feed_scroll->setWidthPercentage(37);
-    feed_scroll->setHeightPercentage(100);
-    feed_scroll->setMarginRight(16);
-    feed_box_ = new brls::Box(brls::Axis::COLUMN);
-    feed_box_->setWidthPercentage(100);
-    feed_scroll->setContentView(feed_box_);
-    split->addView(feed_scroll);
+    class TextFeedDataSource final : public RecyclingGridDataSource {
+    public:
+        explicit TextFeedDataSource(TextWorkbench* owner) : owner_(owner) {}
 
-    auto* reader_scroll = new brls::ScrollingFrame();
-    reader_scroll->setId("omnidesk/pane_secondary");
-    reader_scroll->setWidthPercentage(63);
-    reader_scroll->setHeightPercentage(100);
+        size_t getItemCount() override {
+            return owner_ ? owner_->feed_items_.size() : 0;
+        }
+
+        float heightForRow(RecyclingGrid* recycler, size_t index) override {
+            if (!owner_ || index >= owner_->feed_items_.size()) return 148.0f;
+            const TextFeedItem& item = owner_->feed_items_[index];
+            const float text_w = std::max(180.0f, (recycler ? recycler->cellColumnWidth() : 380.0f) - 34.0f);
+
+            float h = 32.0f + 25.0f + 7.0f;  // vertical padding + top bar
+            if (owner_->provenance_dates_.find(item.source_id + ":" + item.id) !=
+                owner_->provenance_dates_.end()) {
+                h += 22.0f;
+            }
+            const int title_lines = std::max(1, estimateWrappedLines(item.title, 16.2f, text_w, 3));
+            h += static_cast<float>(title_lines) * 23.6f;
+
+            const std::string clean_ex = sanitizeMarkdownExcerpt(item.excerpt, 150);
+            if (!clean_ex.empty()) {
+                const int ex_lines = std::max(1, estimateWrappedLines(clean_ex, 14.2f, text_w, 3));
+                h += 6.0f + static_cast<float>(ex_lines) * 21.6f;
+            }
+            return h + 6.0f;
+        }
+
+        RecyclingGridCell* cellForRow(RecyclingGrid* recycler, size_t index) override {
+            auto* cell = static_cast<TextFeedCardCell*>(recycler->dequeueReusableCell("text_card"));
+            if (!cell || !owner_ || index >= owner_->feed_items_.size()) return cell;
+
+            const TextFeedItem& item = owner_->feed_items_[index];
+            const bool selected = (owner_->has_article_ && owner_->active_article_.id == item.id);
+            const bool auth_card = (item.id.find("auth_required") != std::string::npos ||
+                                    item.id.rfind("auth:login", 0) == 0);
+            std::string prov_date;
+            if (auto it = owner_->provenance_dates_.find(item.source_id + ":" + item.id);
+                it != owner_->provenance_dates_.end()) {
+                prov_date = it->second;
+            }
+
+            auto* wb = owner_;
+            auto alive = owner_->alive_;
+            cell->bind(item, selected, auth_card, prov_date, [wb, alive, item, auth_card]() {
+                brls::sync([wb, alive, item, auth_card]() {
+                    if (alive->load(std::memory_order_acquire)) {
+                        wb->openArticle(item);
+                        if (auth_card && !item.url.empty()) {
+                            wb->openLoginInChrome(item.url, item.title, false);
+                        }
+                    }
+                });
+            });
+            return cell;
+        }
+
+    private:
+        TextWorkbench* owner_ = nullptr;
+    };
+
+    feed_grid_ = new RecyclingGrid();
+    feed_grid_->setId("omnidesk/pane_primary");
+    feed_grid_->setWidthPercentage(37);
+    feed_grid_->setHeightPercentage(100);
+    feed_grid_->setShrink(1.0f);
+    feed_grid_->setMinHeight(0);
+    feed_grid_->setMarginRight(16);
+    feed_grid_->setSpanCount(1);
+    feed_grid_->setEstimatedRowHeight(152.0f);
+    feed_grid_->setEstimatedRowSpace(10.0f);
+    feed_grid_->setPreFetchLine(2);
+    feed_grid_->registerCell("text_card", []() { return new TextFeedCardCell(); });
+
+    auto* empty_card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
+    empty_card->addView(ui::makeLabel("当前分类下暂无内容。", 15.0f, "font/grey"));
+    feed_grid_->setEmptyView(empty_card);
+
+    feed_grid_->setOnNextPage([this, alive = alive_]() {
+        if (!alive->load(std::memory_order_acquire)) return;
+        if (getVisibility() != brls::Visibility::VISIBLE) return;
+        if (loading_more_ || !has_more_ || active_category_ == "daily_curation" || feed_items_.empty()) return;
+        loadMoreFeed();
+    });
+    feed_grid_->setDataSource(new TextFeedDataSource(this), true);
+    split->addView(feed_grid_);
+
+    reader_scroll_ = new brls::ScrollingFrame();
+    reader_scroll_->setId("omnidesk/pane_secondary");
+    reader_scroll_->setWidthPercentage(63);
+    reader_scroll_->setHeightPercentage(100);
+    reader_scroll_->setShrink(1.0f);
+    reader_scroll_->setMinHeight(0);
     reader_box_ = new brls::Box(brls::Axis::COLUMN);
     reader_box_->setWidthPercentage(100);
     reader_article_box_ = new brls::Box(brls::Axis::COLUMN);
@@ -184,8 +478,8 @@ TextWorkbench::TextWorkbench(std::function<void(const std::string&)> on_entity_f
     comment_tree_ = new CommentTreeView();
     cmt_wrap->addView(comment_tree_);
     reader_box_->addView(cmt_wrap);
-    reader_scroll->setContentView(reader_box_);
-    split->addView(reader_scroll);
+    reader_scroll_->setContentView(reader_box_);
+    split->addView(reader_scroll_);
 
     addView(split);
 
@@ -196,13 +490,13 @@ TextWorkbench::TextWorkbench(std::function<void(const std::string&)> on_entity_f
             [this, alive = alive_](const std::string&, const nlohmann::json&) {
                 brls::sync([this, alive]() {
                     if (alive->load(std::memory_order_acquire)) {
-                        refresh();
+                        refresh(false);
                     }
                 });
             });
     }
 
-    refresh();
+    refresh(false);
 }
 
 TextWorkbench::~TextWorkbench() {
@@ -212,6 +506,7 @@ TextWorkbench::~TextWorkbench() {
         recommend_sub_ = 0;
     }
     feed_request_->cancel();
+    load_more_request_->cancel();
     article_request_->cancel();
     action_request_->cancel();
     if (translate_request_) {
@@ -220,14 +515,23 @@ TextWorkbench::~TextWorkbench() {
     }
 }
 
-void TextWorkbench::refresh() {
+void TextWorkbench::refresh(bool force_remote) {
     feed_cache_.clear();
-    loadCurrentFeed();
+    loadCurrentFeed(force_remote);
 }
 
-void TextWorkbench::loadCurrentFeed() {
+void TextWorkbench::loadCurrentFeed(bool force_refresh) {
     feed_request_->cancel();
     feed_request_ = CancelToken::create();
+    load_more_request_->cancel();
+    load_more_request_ = CancelToken::create();
+    loading_more_ = false;
+    current_page_ = 1;
+    has_more_ = (active_category_ != "daily_curation");
+    if (feed_grid_) {
+        feed_grid_->setContentOffsetY(0.0f, false);
+    }
+
     auto& kernel = HostKernel::instance();
     feed_items_.clear();
     provenance_dates_.clear();
@@ -237,17 +541,22 @@ void TextWorkbench::loadCurrentFeed() {
         const bool has_recipe_cap = kernel.capabilities().has("feed.recipe.v1");
         if (!sources.empty() || has_recipe_cap) {
             const std::string cache_key = active_category_ + "|" + active_channel_id_ + "|" + search_query_ + "|" + curation_scope_ + "|" + curation_date_;
-            if (auto it = feed_cache_.find(cache_key); it != feed_cache_.end()) {
-                cached_recipe_pills_ = it->second.recipes;
-                feed_items_ = it->second.items;
-                active_channels_ = it->second.channels;
-                status_label_->setText("已接入 " + std::to_string(sources.size()) + " 个实时 TextSource 插件");
-                finishRefresh();
-                loadProvenance();
-                return;
+            if (!force_refresh) {
+                if (auto it = feed_cache_.find(cache_key); it != feed_cache_.end()) {
+                    cached_recipe_pills_ = it->second.recipes;
+                    feed_items_ = it->second.items;
+                    active_channels_ = it->second.channels;
+                    current_page_ = it->second.page;
+                    has_more_ = it->second.has_more;
+                    status_label_->setText("已接入 " + std::to_string(sources.size()) + " 个实时 TextSource 插件 · 共 " +
+                                           std::to_string(feed_items_.size()) + " 篇");
+                    finishRefresh();
+                    loadProvenance();
+                    return;
+                }
             }
 
-            status_label_->setText("正在加载文章列表…");
+            status_label_->setText(force_refresh ? "正在强制刷新最新文章列表…" : "正在加载文章列表…");
             rebuildCategoryPills();
             rebuildChannelPills();
             struct FeedLoadResult {
@@ -257,7 +566,7 @@ void TextWorkbench::loadCurrentFeed() {
             };
             loadUiInBackground(kernel.uiTasks(), "text.feed", feed_request_,
                 [sources, query = search_query_, category = active_category_,
-                 channel_id = active_channel_id_, scope = curation_scope_, date = curation_date_](const auto& cancel) {
+                 channel_id = active_channel_id_, scope = curation_scope_, date = curation_date_, force_refresh](const auto& cancel) {
                     FeedLoadResult out;
                     std::future<std::vector<std::pair<std::string, std::string>>> recipe_fut;
                     const bool fetch_recipes = category != "daily_curation" && !cancel->isCancelled() && HostKernel::instance().isInitialized() &&
@@ -295,7 +604,7 @@ void TextWorkbench::loadCurrentFeed() {
                         const bool multi = source_category == "recipe" || source_category == "multi";
                         if (!multi && category != "all" && source_category != category) continue;
                         src_futs.push_back(std::async(std::launch::async,
-                            [source, source_category, multi, category, channel_id, query, scope, date, curator, cancel]() {
+                            [source, source_category, multi, category, channel_id, query, scope, date, curator, force_refresh, cancel]() {
                                 PerSourceResult res;
                                 if (cancel->isCancelled()) return res;
                                 if (curator) {
@@ -355,9 +664,11 @@ void TextWorkbench::loadCurrentFeed() {
                                     !channel_id.empty() &&
                                     ((category != "all" && source_category == category) ||
                                      (source_category == "multi" && owns_selected_channel));
-                                auto items = use_channel
-                                                 ? source->fetchFeedInChannel(channel_id, query)
-                                                 : source->fetchFeed(query);
+                                auto items = force_refresh
+                                    ? source->fetchFeedPage(use_channel ? channel_id : "", query, 1, true)
+                                    : (use_channel
+                                           ? source->fetchFeedInChannel(channel_id, query)
+                                           : source->fetchFeed(query));
                                 for (auto& item : items) {
                                     if (!multi || itemMatchesCategory(item, source_category, category)) {
                                         res.items.push_back(std::move(item));
@@ -387,7 +698,9 @@ void TextWorkbench::loadCurrentFeed() {
                 [this, alive = alive_, count = sources.size(), cache_key](FeedLoadResult result) {
                     if (!alive->load(std::memory_order_acquire)) return;
                     cached_recipe_pills_ = result.recipes;
-                    feed_cache_[cache_key] = {result.items, result.channels, result.recipes};
+                    current_page_ = 1;
+                    has_more_ = (active_category_ != "daily_curation" && !result.items.empty());
+                    feed_cache_[cache_key] = {result.items, result.channels, result.recipes, current_page_, has_more_};
                     feed_items_ = std::move(result.items);
                     active_channels_ = std::move(result.channels);
                     if (!active_channel_id_.empty()) {
@@ -403,7 +716,8 @@ void TextWorkbench::loadCurrentFeed() {
                             : "每日精选 · 最新一期" + (feed_items_.empty() ? std::string{} : " · " + feed_items_.front().published_at);
                         status_label_->setText(scope + " · " + std::to_string(feed_items_.size()) + " 篇");
                     } else {
-                        status_label_->setText("已接入 " + std::to_string(count) + " 个实时 TextSource 插件");
+                        status_label_->setText("已接入 " + std::to_string(count) + " 个实时 TextSource 插件 · 共 " +
+                                               std::to_string(feed_items_.size()) + " 篇");
                     }
                     finishRefresh();
                     loadProvenance();
@@ -418,6 +732,112 @@ void TextWorkbench::loadCurrentFeed() {
         ? "每日精选插件尚未接入" : "暂无已接入的阅读源，请从插件管理添加订阅");
 
     finishRefresh();
+}
+
+void TextWorkbench::loadMoreFeed() {
+    if (loading_more_ || !has_more_ || active_category_ == "daily_curation" || feed_items_.empty()) {
+        return;
+    }
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return;
+    const auto sources = kernel.domains().textSources();
+    if (sources.empty()) return;
+
+    loading_more_ = true;
+    const int next_page = current_page_ + 1;
+    const std::string cache_key = active_category_ + "|" + active_channel_id_ + "|" + search_query_ + "|" + curation_scope_ + "|" + curation_date_;
+    if (status_label_) {
+        status_label_->setText("正在加载第 " + std::to_string(next_page) + " 页文章…");
+    }
+    rebuildFeedFooter();
+
+    load_more_request_->cancel();
+    load_more_request_ = CancelToken::create();
+    loadUiInBackground(kernel.uiTasks(), "text.feed.more", load_more_request_,
+        [sources, query = search_query_, category = active_category_,
+         channel_id = active_channel_id_, next_page](const auto& cancel) {
+            std::vector<TextFeedItem> out;
+            std::vector<std::future<std::vector<TextFeedItem>>> futs;
+            for (const auto& source : sources) {
+                if (source->sourceId() == "plugin-ai-curator") continue;
+                const auto source_category = source->category();
+                const bool multi = source_category == "recipe" || source_category == "multi";
+                if (!multi && category != "all" && source_category != category) continue;
+                futs.push_back(std::async(std::launch::async,
+                    [source, source_category, multi, category, channel_id, query, next_page, cancel]() {
+                        std::vector<TextFeedItem> res;
+                        if (cancel->isCancelled()) return res;
+                        bool owns_selected_channel = false;
+                        if (!channel_id.empty() && source_category == "multi") {
+                            for (const auto& ch : source->channels()) {
+                                if (ch.id == channel_id) {
+                                    owns_selected_channel = true;
+                                    break;
+                                }
+                            }
+                        }
+                        const bool use_channel =
+                            !channel_id.empty() &&
+                            ((category != "all" && source_category == category) ||
+                             (source_category == "multi" && owns_selected_channel));
+                        auto items = source->fetchFeedPage(use_channel ? channel_id : "", query, next_page, false);
+                        for (auto& item : items) {
+                            if (!multi || itemMatchesCategory(item, source_category, category)) {
+                                res.push_back(std::move(item));
+                            }
+                        }
+                        return res;
+                    }));
+            }
+            for (auto& f : futs) {
+                auto part = f.get();
+                for (auto& item : part) {
+                    out.push_back(std::move(item));
+                }
+            }
+            return out;
+        },
+        [this, alive = alive_, next_page, cache_key](std::vector<TextFeedItem> more_items) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            loading_more_ = false;
+            std::set<std::string> existing_keys;
+            for (const auto& it : feed_items_) {
+                existing_keys.insert(it.source_id + ":" + it.id);
+            }
+            size_t added = 0;
+            for (auto& it : more_items) {
+                if (existing_keys.insert(it.source_id + ":" + it.id).second) {
+                    feed_items_.push_back(std::move(it));
+                    ++added;
+                }
+            }
+            if (added > 0) {
+                current_page_ = next_page;
+                has_more_ = true;
+                status_label_->setText("已加载至第 " + std::to_string(current_page_) + " 页 · 共 " +
+                                       std::to_string(feed_items_.size()) + " 篇");
+            } else {
+                has_more_ = false;
+                status_label_->setText("没有更多新内容了 · 共 " + std::to_string(feed_items_.size()) + " 篇");
+            }
+            if (auto it = feed_cache_.find(cache_key); it != feed_cache_.end()) {
+                it->second.items = feed_items_;
+                it->second.page = current_page_;
+                it->second.has_more = has_more_;
+            }
+            if (feed_grid_) {
+                feed_grid_->notifyDataChanged();
+            }
+            rebuildFeedFooter();
+            if (added > 0) {
+                loadProvenance();
+            }
+        },
+        [this, alive = alive_]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            loading_more_ = false;
+            rebuildFeedFooter();
+        });
 }
 
 void TextWorkbench::finishRefresh() {
@@ -460,7 +880,9 @@ void TextWorkbench::loadProvenance() {
         [this, alive = alive_](std::unordered_map<std::string, std::string> dates) {
             if (!alive->load(std::memory_order_acquire)) return;
             provenance_dates_ = std::move(dates);
-            rebuildFeed();
+            if (feed_grid_) {
+                feed_grid_->reloadData(false);
+            }
         });
 }
 
@@ -485,7 +907,7 @@ void TextWorkbench::rebuildCategoryPills() {
     }
 
     for (const auto& [cid, label] : cats) {
-        auto* b = ui::makeButton(label, [this, alive = alive_, cid]() {
+        auto* b = ui_comfort::makeFilterChip(label, [this, alive = alive_, cid]() {
             brls::sync([this, alive, cid]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 active_category_ = cid;
@@ -494,8 +916,8 @@ void TextWorkbench::rebuildCategoryPills() {
                 has_article_ = false;
                 loadCurrentFeed();
             });
-        }, active_category_ == cid, 34.0f);
-        b->setMarginRight(8);
+        }, active_category_ == cid, "domain/text", 32.0f);
+        b->setMarginRight(7);
         category_bar_->addView(b);
     }
 }
@@ -512,14 +934,14 @@ void TextWorkbench::rebuildChannelPills() {
     channel_bar_->setVisibility(brls::Visibility::VISIBLE);
 
     if (show_channels) {
-        auto* all_btn = ui::makeButton("全部栏目", [this, alive = alive_]() {
+        auto* all_btn = ui_comfort::makeFilterChip("全部栏目", [this, alive = alive_]() {
             brls::sync([this, alive]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 active_channel_id_.clear();
                 has_article_ = false;
                 loadCurrentFeed();
             });
-        }, active_channel_id_.empty(), 32.0f);
+        }, active_channel_id_.empty(), "domain/text", 30.0f);
         all_btn->setMarginRight(6);
         channel_bar_->addView(all_btn);
 
@@ -530,14 +952,14 @@ void TextWorkbench::rebuildChannelPills() {
             } else if (ch.requires_auth) {
                 label += " (需登录)";
             }
-            auto* btn = ui::makeButton(label, [this, alive = alive_, cid = ch.id]() {
+            auto* btn = ui_comfort::makeFilterChip(label, [this, alive = alive_, cid = ch.id]() {
                 brls::sync([this, alive, cid]() {
                     if (!alive->load(std::memory_order_acquire)) return;
                     active_channel_id_ = cid;
                     has_article_ = false;
                     loadCurrentFeed();
                 });
-            }, active_channel_id_ == ch.id, 32.0f);
+            }, active_channel_id_ == ch.id, "domain/text", 30.0f);
             btn->setMarginRight(6);
             channel_bar_->addView(btn);
         }
@@ -552,66 +974,81 @@ void TextWorkbench::rebuildChannelPills() {
                  {"latest", "最新一期"}, {"all", "全部归档"}}) {
             if (active_channel_id_ == "interactive" && option.first == "latest") continue;
             const auto label = active_channel_id_ == "interactive" ? std::string("全部会话") : option.second;
-            auto* button = ui::makeButton(label, [this, alive = alive_, scope = option.first]() {
+            const bool scope_active =
+                curation_scope_ == option.first ||
+                (active_channel_id_ == "interactive" && option.first == "all" && curation_scope_ == "latest");
+            auto* button = ui_comfort::makeFilterChip(label, [this, alive = alive_, scope = option.first]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 curation_scope_ = scope;
                 has_article_ = false;
                 loadCurrentFeed();
-            }, curation_scope_ == option.first || (active_channel_id_ == "interactive" &&
-                option.first == "all" && curation_scope_ == "latest"), 32.0f);
+            }, scope_active, "domain/text", 30.0f);
             button->setMarginRight(6);
             channel_bar_->addView(button);
         }
     }
 }
 
-void TextWorkbench::rebuildFeed() {
-    feed_box_->clearViews();
+void TextWorkbench::rebuildFeedFooter() {
+    if (!feed_grid_) return;
     if (feed_items_.empty()) {
-        auto* card = ui::makeCard("desktop/surface", 18.0f, 10.0f);
-        card->addView(ui::makeLabel("当前分类下暂无内容。", 15.0f, "font/grey"));
-        feed_box_->addView(card);
+        feed_grid_->setFooterView(nullptr);
         return;
     }
 
-    for (const auto& item : feed_items_) {
-        const bool selected = (has_article_ && active_article_.id == item.id);
-        auto* card = ui::makeCard(selected ? "desktop/active" : "desktop/surface", 16.0f, 12.0f);
-        card->setMarginBottom(10);
-        card->setFocusable(true);
-        if (selected) card->setBorderColor(ui::color("domain/text"));
+    auto* footer = ui::makeCard("desktop/soft", 12.0f, 10.0f);
+    footer->setMarginTop(10);
+    footer->setMarginBottom(14);
+    auto* f_row = new brls::Box(brls::Axis::ROW);
+    f_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
+    f_row->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(f_row, 6.0f);
 
-        auto* top = new brls::Box(brls::Axis::ROW);
-        top->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
-        top->setMarginBottom(6);
-        top->addView(ui::makePill(item.source_name, "status/info_bg", "domain/text"));
-        top->addView(ui::makeLabel("▲ " + std::to_string(item.score) + " · 💬 " + std::to_string(item.comment_count),
-                                   13.5f, "font/grey"));
-        card->addView(top);
-        if (auto it = provenance_dates_.find(item.source_id + ":" + item.id); it != provenance_dates_.end()) {
-            card->addView(ui::makeLabel("曾入选每日精选 · " + it->second, 13.5f, "font/grey"));
-        }
-
-        auto* title = ui::makeLabel(item.title, 16.5f, "brls/text", 1.4f);
-        if (!item.excerpt.empty()) {
-            title->setMarginBottom(6);
-        }
-        card->addView(title);
-
-        if (!item.excerpt.empty()) {
-            auto* ex = ui::makeLabel(truncateUtf8Text(item.excerpt, 140), 14.5f, "font/grey", 1.45f);
-            card->addView(ex);
-        }
-
-        card->registerClickAction([this, alive = alive_, item](brls::View*) {
-            brls::sync([this, alive, item]() {
-                if (alive->load(std::memory_order_acquire)) {
-                    openArticle(item);
-                }
+    if (active_category_ != "daily_curation") {
+        const std::string more_lbl = loading_more_
+            ? "正在加载下一页…"
+            : (has_more_
+                   ? ("加载下一页 (第 " + std::to_string(current_page_ + 1) + " 页)")
+                   : "已到底部 · 再试加载");
+        auto* more_btn = ui::makeButton(more_lbl, [this, alive = alive_]() {
+            brls::sync([this, alive]() {
+                if (!alive->load(std::memory_order_acquire) || loading_more_) return;
+                has_more_ = true;
+                loadMoreFeed();
             });
-            return true;
+        }, has_more_ && !loading_more_, 33.0f);
+        more_btn->setGrow(1.0f);
+        more_btn->setMarginRight(8);
+        f_row->addView(more_btn);
+    }
+
+    auto* ref_btn = ui::makeButton("刷新", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire)) {
+                refresh(true);
+            }
         });
-        feed_box_->addView(card);
+    }, false, 33.0f);
+    ref_btn->setMarginRight(8);
+    f_row->addView(ref_btn);
+
+    auto* top_btn = ui::makeButton("顶部", [this, alive = alive_]() {
+        brls::sync([this, alive]() {
+            if (alive->load(std::memory_order_acquire) && feed_grid_) {
+                feed_grid_->setContentOffsetY(0.0f, false);
+            }
+        });
+    }, false, 33.0f);
+    f_row->addView(top_btn);
+
+    footer->addView(f_row);
+    feed_grid_->setFooterView(footer);
+}
+
+void TextWorkbench::rebuildFeed() {
+    rebuildFeedFooter();
+    if (feed_grid_) {
+        feed_grid_->reloadData(false);
     }
 }
 
@@ -648,7 +1085,7 @@ void TextWorkbench::showArticle(TextArticle article) {
     auto& kernel = HostKernel::instance();
     has_article_ = true;
     if (on_entity_focus_) {
-        std::string summary = active_article_.title;
+        std::string summary = stripMarkdownToPlainText(active_article_.title, true);
         if (!active_article_.source_name.empty()) summary += " · " + active_article_.source_name;
         if (!active_article_.published_at.empty()) summary += " · " + active_article_.published_at;
         on_entity_focus_(summary);
@@ -692,7 +1129,9 @@ void TextWorkbench::showArticle(TextArticle article) {
     }
     rebuildCategoryPills();
     rebuildChannelPills();
-    rebuildFeed();
+    if (feed_grid_) {
+        feed_grid_->reloadData(false);
+    }
     rebuildReader();
 }
 
@@ -708,9 +1147,12 @@ void TextWorkbench::rebuildReader() {
     top_row->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
     top_row->setAlignItems(brls::AlignItems::CENTER);
     top_row->setMarginBottom(10);
+    ui_comfort::enableFlexWrap(top_row, 6.0f);
     top_row->addView(ui::makePill(active_article_.source_name, "status/info_bg", "domain/text"));
 
     auto* mode_row = new brls::Box(brls::Axis::ROW);
+    mode_row->setAlignItems(brls::AlignItems::CENTER);
+    ui_comfort::enableFlexWrap(mode_row, 6.0f);
     auto& kernel = HostKernel::instance();
     const bool can_translate = kernel.isInitialized() &&
                                (kernel.capabilities().has("feed.recipe.v1") ||
@@ -722,14 +1164,14 @@ void TextWorkbench::rebuildReader() {
             [this, alive = alive_]() {
                 if (alive->load(std::memory_order_acquire)) translateActiveArticle();
             },
-            false, 32.0f);
+            false, 31.0f);
         tr_btn->setMarginLeft(6);
         mode_row->addView(tr_btn);
     }
     if (kernel.isInitialized() && kernel.capabilities().has("web.embed.v1") && !active_article_.url.empty()) {
         auto* web_btn = ui::makeButton("Chrome 原页", [this, alive = alive_]() {
             if (alive->load(std::memory_order_acquire)) openActiveInChrome();
-        }, false, 32.0f);
+        }, false, 31.0f);
         web_btn->setMarginLeft(6);
         mode_row->addView(web_btn);
     }
@@ -739,7 +1181,7 @@ void TextWorkbench::rebuildReader() {
     if (kernel.isInitialized() && is_journal && kernel.capabilities().has("book.bilingual_pdf.v1")) {
         auto* pdf_btn = ui::makeButton("BabelDOC 精译 PDF", [this, alive = alive_]() {
             if (alive->load(std::memory_order_acquire)) handoffJournalToBabelDoc();
-        }, false, 32.0f);
+        }, false, 31.0f);
         pdf_btn->setMarginLeft(6);
         mode_row->addView(pdf_btn);
     }
@@ -754,38 +1196,153 @@ void TextWorkbench::rebuildReader() {
         {BilingualMode::OriginalOnly, "仅原文"},
     };
     for (const auto& md : modes) {
-        auto* btn = ui::makeButton(md.label, [this, alive = alive_, m = md.m]() {
+        auto* btn = ui_comfort::makeFilterChip(md.label, [this, alive = alive_, m = md.m]() {
             brls::sync([this, alive, m]() {
                 if (!alive->load(std::memory_order_acquire)) return;
                 bilingual_mode_ = m;
                 rebuildReader();
             });
-        }, bilingual_mode_ == md.m, 32.0f);
+        }, bilingual_mode_ == md.m, "domain/text", 31.0f);
         btn->setMarginLeft(6);
         mode_row->addView(btn);
     }
     top_row->addView(mode_row);
     doc->addView(top_row);
 
-    auto* h1 = ui::makeLabel(active_article_.title, 23.0f, "brls/text", 1.35f);
+    const bool auth_article = (active_article_.id.find("auth_required") != std::string::npos ||
+                               active_article_.id.rfind("auth:login", 0) == 0);
+    if (auth_article && !active_article_.url.empty() &&
+        kernel.isInitialized() && kernel.capabilities().has("web.embed.v1")) {
+        auto* auth_bar = ui::makeCard("desktop/soft", 14.0f, 10.0f);
+        auth_bar->setMarginBottom(14);
+        auto* auth_row = new brls::Box(brls::Axis::ROW);
+        auth_row->setAlignItems(brls::AlignItems::CENTER);
+        ui_comfort::enableFlexWrap(auth_row, 6.0f);
+
+        const std::string login_url = active_article_.url;
+        const std::string login_title = active_article_.title;
+
+        auto* emb_login_btn = ui::makeButton("立即打开登录界面", [this, alive = alive_, login_url, login_title]() {
+            if (alive->load(std::memory_order_acquire)) {
+                openLoginInChrome(login_url, login_title, false);
+            }
+        }, true, 35.0f);
+        emb_login_btn->setMarginRight(8);
+        auth_row->addView(emb_login_btn);
+
+        auto* ext_login_btn = ui::makeButton("外部 Chrome 窗口登录", [this, alive = alive_, login_url, login_title]() {
+            if (alive->load(std::memory_order_acquire)) {
+                openLoginInChrome(login_url, login_title, true);
+            }
+        }, false, 35.0f);
+        ext_login_btn->setMarginRight(8);
+        auth_row->addView(ext_login_btn);
+
+        auto* sync_btn = ui::makeButton("已完成登录 · 同步刷新", [this, alive = alive_]() {
+            if (alive->load(std::memory_order_acquire)) {
+                syncCookiesAndRefresh();
+            }
+        }, false, 35.0f);
+        auth_row->addView(sync_btn);
+
+        auth_bar->addView(auth_row);
+        doc->addView(auth_bar);
+    }
+
+    auto linkClickHandler = [this, alive = alive_](const std::string& raw_url, const std::string& label) {
+        if (!alive->load(std::memory_order_acquire) || raw_url.empty()) return;
+        if (raw_url.rfind("wikilink:", 0) == 0) {
+            const std::string target = raw_url.substr(9);
+            auto tryMapVaultId = [](const std::string& path) -> std::string {
+                const size_t slash = path.find_last_of('/');
+                if (slash == std::string::npos || slash + 1 >= path.size()) return "";
+                std::string date = path.substr(slash + 1);
+                if (date.size() > 3 && date.substr(date.size() - 3) == ".md") {
+                    date.resize(date.size() - 3);
+                }
+                if (!isIsoDateStr(date)) return "";
+                if (path.find("English/Weekly/TV/") != std::string::npos) return "english-weekly-tv-" + date;
+                if (path.find("English/Weekly/") != std::string::npos) return "english-weekly-" + date;
+                if (path.find("English/Daily/") != std::string::npos) return "english-daily-" + date;
+                if (path.find("English/Translation/") != std::string::npos) return "english-translation-" + date;
+                if (path.find("English/Vocabulary/") != std::string::npos) return "english-vocabulary-" + date;
+                if (path.find("News/Daily/") != std::string::npos) return "news-" + date;
+                return "";
+            };
+            const std::string mapped_id = tryMapVaultId(target);
+            if (!mapped_id.empty()) {
+                openExternalArticle({
+                    {"article_id", mapped_id},
+                    {"source_id", "plugin-ai-curator"},
+                    {"title", label.empty() ? target : label},
+                });
+                return;
+            }
+            brls::Application::notify("知识库内链: " + (label.empty() ? target : label));
+            return;
+        }
+        const std::string resolved = ImageCache::normalizeImageUrl(raw_url, active_article_.url);
+        if (resolved.empty()) return;
+        auto& k = HostKernel::instance();
+        if (k.isInitialized() && k.capabilities().has("web.embed.v1")) {
+            const std::string link_title = label.empty() ? stripMarkdownToPlainText(active_article_.title, true) : label;
+            action_request_->cancel();
+            action_request_ = CancelToken::create();
+            loadUiInBackground(k.uiTasks(), "text.link", action_request_,
+                [resolved, link_title](const auto& cancel) {
+                    return HostKernel::instance().capabilities().callCancellable("web.embed.v1", {
+                        {"action", "open"},
+                        {"url", resolved},
+                        {"title", link_title},
+                    }, cancel);
+                },
+                [alive, resolved](CapabilityResult res) {
+                    if (!alive->load(std::memory_order_acquire)) return;
+                    if (!res.ok) {
+                        SDL_OpenURL(resolved.c_str());
+                    }
+                });
+        } else {
+            SDL_OpenURL(resolved.c_str());
+        }
+    };
+
+    MarkdownStyle h1_style;
+    h1_style.font_size = 23.0f;
+    h1_style.line_height = 1.36f;
+    h1_style.text_color_token = "brls/text";
+    h1_style.bold_base = true;
+    h1_style.interactive_links = false;
+    auto* h1 = new MarkdownRichTextView(stripLeadingHashes(active_article_.title), std::move(h1_style));
     h1->setMarginBottom(6);
     doc->addView(h1);
 
     std::string meta = active_article_.subtitle;
-    if (!active_article_.doi.empty()) meta += " · DOI: " + active_article_.doi;
-    auto* meta_lbl = ui::makeLabel(meta, 14.5f, "font/grey");
-    meta_lbl->setMarginBottom(12);
-    doc->addView(meta_lbl);
+    if (!active_article_.doi.empty()) {
+        meta += (meta.empty() ? "" : " · ") + std::string("DOI: [") + active_article_.doi +
+                "](https://doi.org/" + active_article_.doi + ")";
+    }
+    if (!meta.empty()) {
+        MarkdownStyle meta_style;
+        meta_style.font_size = 14.5f;
+        meta_style.line_height = 1.45f;
+        meta_style.text_color_token = "font/grey";
+        meta_style.on_link_click = linkClickHandler;
+        auto* meta_lbl = new MarkdownRichTextView(meta, std::move(meta_style));
+        meta_lbl->setMarginBottom(12);
+        doc->addView(meta_lbl);
+    }
 
     doc->addView(ui::makeDivider(8.0f));
 
     auto openPopoverFor = [this](const std::string& text) {
         auto& k = HostKernel::instance();
-SelectionContext sctx;
-sctx.context_sentence = text;
-sctx.source_title = active_article_.title;
-if (!active_article_.source_name.empty()) sctx.source_title += " · " + active_article_.source_name;
-if (!active_article_.published_at.empty()) sctx.source_title += " · " + active_article_.published_at;
+        SelectionContext sctx;
+        const std::string clean_text = stripMarkdownToPlainText(text);
+        sctx.context_sentence = clean_text.empty() ? text : clean_text;
+        sctx.source_title = stripMarkdownToPlainText(active_article_.title, true);
+        if (!active_article_.source_name.empty()) sctx.source_title += " · " + active_article_.source_name;
+        if (!active_article_.published_at.empty()) sctx.source_title += " · " + active_article_.published_at;
         sctx.source_id = active_article_source_id_;
         sctx.domain = ContentDomain::Text;
         if (k.isInitialized()) {
@@ -796,44 +1353,109 @@ if (!active_article_.published_at.empty()) sctx.source_title += " · " + active_
         SelectionActionPopover::show(std::move(sctx));
     };
 
+    auto makeBlockStyle = [&](float font_size, const std::string& color_token, float line_height) {
+        MarkdownStyle st;
+        st.font_size = font_size;
+        st.line_height = line_height;
+        st.text_color_token = color_token;
+        st.block_gap = 7.0f;
+        st.base_url = active_article_.url;
+        st.image_headers = active_article_.image_headers;
+        st.on_link_click = linkClickHandler;
+        return st;
+    };
+
     for (const auto& p : active_article_.paragraphs) {
+        if (p.kind == "image") {
+            const std::string img_url = ImageCache::normalizeImageUrl(p.original, active_article_.url);
+            if (!img_url.empty()) {
+                auto* fig = ui::makeCard("desktop/soft", 10.0f, 10.0f);
+                fig->setAlignItems(brls::AlignItems::CENTER);
+                fig->setMarginTop(8);
+                fig->setMarginBottom(8);
+                auto* img = new CachedImageView();
+                img->setWidthPercentage(100);
+                img->setHeight(260.0f);
+                img->setScalingType(brls::ImageScalingType::FIT);
+                img->setCornerRadius(6.0f);
+                img->setImageUrl(img_url, active_article_.image_headers);
+                fig->addView(img);
+                if (!p.translated.empty()) {
+                    auto cap_style = makeBlockStyle(13.5f, "font/grey", 1.45f);
+                    cap_style.italic_base = true;
+                    auto* cap = new MarkdownRichTextView(p.translated, std::move(cap_style));
+                    cap->setMarginTop(6);
+                    fig->addView(cap);
+                }
+                doc->addView(fig);
+            }
+            continue;
+        }
         if (p.kind == "heading") {
             if (bilingual_mode_ != BilingualMode::TranslatedOnly || p.translated.empty()) {
-                auto* hl = ui::makeLabel(p.original, 19.0f, "brls/text");
-                hl->setMarginTop(12);
+                auto h_style = makeBlockStyle(19.5f, "brls/text", 1.42f);
+                h_style.bold_base = true;
+                auto* hl = new MarkdownRichTextView(stripLeadingHashes(p.original), std::move(h_style));
+                hl->setMarginTop(14);
                 hl->setMarginBottom(p.translated.empty() ? 6 : 2);
                 doc->addView(hl);
             }
             if (!p.translated.empty() && bilingual_mode_ != BilingualMode::OriginalOnly) {
-                auto* htr = ui::makeLabel(p.translated, 17.0f, "font/grey");
+                auto htr_style = makeBlockStyle(17.0f, "font/grey", 1.42f);
+                htr_style.bold_base = true;
+                auto* htr = new MarkdownRichTextView(stripLeadingHashes(p.translated), std::move(htr_style));
                 htr->setMarginTop(2);
                 htr->setMarginBottom(6);
                 doc->addView(htr);
             }
             continue;
         }
-        if (p.kind == "code" || p.kind == "quote" || p.kind == "formula") {
-            auto* blk = ui::makeCard("desktop/soft", 14.0f, 8.0f);
-            blk->setMarginTop(8);
-            blk->setMarginBottom(8);
+        if (p.kind == "code" || p.kind == "formula") {
+            auto* wrap = new brls::Box(brls::Axis::COLUMN);
+            wrap->setWidthPercentage(100);
+            wrap->setMarginTop(8);
+            wrap->setMarginBottom(8);
             if (bilingual_mode_ != BilingualMode::TranslatedOnly || p.translated.empty()) {
-                blk->addView(ui::makeLabel(p.original, 15.0f, "brls/text", 1.48f));
+                const std::string md_src = (p.kind == "code")
+                                               ? ensureCodeFenceMarkdown(p.original)
+                                               : ensureFormulaMarkdown(p.original);
+                wrap->addView(new MarkdownView(md_src, makeBlockStyle(15.0f, "brls/text", 1.52f)));
             }
             if (!p.translated.empty() && bilingual_mode_ != BilingualMode::OriginalOnly) {
-                auto* tr = ui::makeLabel(p.translated, 15.0f, "font/grey", 1.48f);
+                auto* tr = new MarkdownView(p.translated, makeBlockStyle(15.0f, "font/grey", 1.52f));
                 tr->setMarginTop(6);
-                blk->addView(tr);
+                wrap->addView(tr);
             }
-            if (p.kind == "quote" && !p.original.empty()) {
-                blk->setFocusable(true);
-                blk->registerClickAction([openPopoverFor, text = p.original](brls::View*) {
+            doc->addView(wrap);
+            continue;
+        }
+        if (p.kind == "quote") {
+            auto* q_wrap = new brls::Box(brls::Axis::COLUMN);
+            q_wrap->setWidthPercentage(100);
+            q_wrap->setMarginTop(6);
+            q_wrap->setMarginBottom(6);
+            if (!p.original.empty()) {
+                q_wrap->setFocusable(true);
+                q_wrap->setHighlightCornerRadius(8.0f);
+                q_wrap->registerClickAction([openPopoverFor, text = p.original](brls::View*) {
                     openPopoverFor(text);
                     return true;
                 });
             }
-            doc->addView(blk);
+            if (bilingual_mode_ != BilingualMode::TranslatedOnly || p.translated.empty()) {
+                q_wrap->addView(new MarkdownView(ensureQuoteMarkdown(p.original),
+                                                 makeBlockStyle(15.5f, "brls/text", 1.58f)));
+            }
+            if (!p.translated.empty() && bilingual_mode_ != BilingualMode::OriginalOnly) {
+                auto* tr = new MarkdownView(ensureQuoteMarkdown(p.translated),
+                                            makeBlockStyle(15.0f, "font/grey", 1.56f));
+                tr->setMarginTop(6);
+                q_wrap->addView(tr);
+            }
+            doc->addView(q_wrap);
             continue;
         }
+
         auto* para_box = new brls::Box(brls::Axis::COLUMN);
         para_box->setWidthPercentage(100);
         para_box->setPadding(6, 10, 6, 10);
@@ -849,11 +1471,11 @@ if (!active_article_.published_at.empty()) sctx.source_title += " · " + active_
             });
         }
         if (bilingual_mode_ != BilingualMode::TranslatedOnly || p.translated.empty()) {
-            para_box->addView(ui::makeLabel(p.original, 16.5f, "brls/text", 1.65f));
+            para_box->addView(new MarkdownView(p.original, makeBlockStyle(16.5f, "brls/text", 1.65f)));
         }
         if (!p.translated.empty() && bilingual_mode_ != BilingualMode::OriginalOnly) {
-            auto* tr = ui::makeLabel(p.translated, 15.5f, "font/grey", 1.65f);
-            tr->setMarginTop(4);
+            auto* tr = new MarkdownView(p.translated, makeBlockStyle(15.5f, "font/grey", 1.62f));
+            tr->setMarginTop(6);
             para_box->addView(tr);
         }
         doc->addView(para_box);
@@ -868,6 +1490,18 @@ if (!active_article_.published_at.empty()) sctx.source_title += " · " + active_
     }
 }
 
+void TextWorkbench::applyDateFilter(const std::string& date, const std::string& domain) {
+    if (date.empty()) return;
+    active_category_ = "daily_curation";
+    if (domain == "news" || domain == "reddit" || domain == "journal" || domain == "english") {
+        active_channel_id_ = domain;
+    }
+    curation_scope_ = "selected";
+    curation_date_ = date;
+    has_article_ = false;
+    refresh();
+}
+
 void TextWorkbench::promptDateFilter() {
     std::string init_date = curation_scope_ == "selected" ? curation_date_ : "";
     std::string init_dom = "all";
@@ -880,11 +1514,7 @@ void TextWorkbench::promptDateFilter() {
         .initial_domain = init_dom,
         .on_apply_date_filter = [this, alive = alive_](const std::string& d) {
             if (!alive->load(std::memory_order_acquire)) return;
-            active_category_ = "daily_curation";
-            curation_scope_ = "selected";
-            curation_date_ = d;
-            has_article_ = false;
-            refresh();
+            applyDateFilter(d);
         },
         .on_clear_date_filter = [this, alive = alive_]() {
             if (!alive->load(std::memory_order_acquire)) return;
@@ -1057,28 +1687,89 @@ void TextWorkbench::translateActiveArticle() {
         });
 }
 
+bool TextWorkbench::isShowingAuthPrompt() const {
+    if (has_article_ &&
+        (active_article_.id.find("auth_required") != std::string::npos ||
+         active_article_.id.rfind("auth:login", 0) == 0)) {
+        return true;
+    }
+    if (feed_items_.size() == 1) {
+        const std::string& fid = feed_items_.front().id;
+        if (fid.find("auth_required") != std::string::npos || fid.rfind("auth:login", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void TextWorkbench::openActiveInChrome() {
+    if (active_article_.url.empty()) return;
+    openLoginInChrome(active_article_.url, active_article_.title, false);
+}
+
+void TextWorkbench::openLoginInChrome(const std::string& url,
+                                      const std::string& title,
+                                      bool external_window) {
     auto& kernel = HostKernel::instance();
-    if (!kernel.isInitialized() || !kernel.capabilities().has("web.embed.v1") || active_article_.url.empty()) {
+    if (!kernel.isInitialized() || !kernel.capabilities().has("web.embed.v1")) {
+        brls::Application::notify("未装载 Chrome 网页桥接插件 (plugin-chrome-web)");
         return;
     }
-    const std::string url = active_article_.url;
-    const std::string title = active_article_.title;
+    if (url.empty()) return;
+    if (status_label_) {
+        status_label_->setText(external_window ? "正在打开外部 Chrome 登录窗口…"
+                                               : "正在打开内嵌 Chrome 登录界面…");
+    }
     action_request_->cancel();
     action_request_ = CancelToken::create();
     loadUiInBackground(kernel.uiTasks(), "text.chrome", action_request_,
-        [url, title](const auto& cancel) {
-            return HostKernel::instance().capabilities().callCancellable("web.embed.v1", {
+        [url, title, external_window](const auto& cancel) {
+            nlohmann::json req = {
                 {"action", "open"},
                 {"url", url},
                 {"title", title},
-            }, cancel);
+                {"auto_translate", false},
+            };
+            if (external_window) {
+                req["window_mode"] = "external";
+            }
+            return HostKernel::instance().capabilities().callCancellable("web.embed.v1", req, cancel);
         },
-        [alive = alive_](CapabilityResult res) {
+        [this, alive = alive_, external_window](CapabilityResult res) {
             if (!alive->load(std::memory_order_acquire)) return;
             if (!res.ok) {
-                brls::Application::notify("打开内嵌 Chrome 失败: " + res.error);
+                if (status_label_) status_label_->setText("打开 Chrome 失败: " + res.error);
+                brls::Application::notify("打开 Chrome 登录界面失败: " + res.error);
+            } else if (external_window) {
+                if (status_label_) {
+                    status_label_->setText("已弹出 Chrome 登录窗口，登录完成后点击『已完成登录 · 同步刷新』");
+                }
+                brls::Application::notify("已打开外部 Chrome 登录窗口，完成后点『已完成登录 · 同步刷新』");
             }
+        });
+}
+
+void TextWorkbench::syncCookiesAndRefresh() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return;
+    if (status_label_) {
+        status_label_->setText("正在同步浏览器会话 Cookie 并刷新…");
+    }
+    action_request_->cancel();
+    action_request_ = CancelToken::create();
+    loadUiInBackground(kernel.uiTasks(), "text.sync_cookies", action_request_,
+        [](const auto& cancel) {
+            auto& caps = HostKernel::instance().capabilities();
+            if (caps.has("web.embed.v1")) {
+                return caps.callCancellable("web.embed.v1", {{"action", "sync_cookies"}}, cancel);
+            }
+            return CapabilityResult{true, "", nlohmann::json::object()};
+        },
+        [this, alive = alive_](CapabilityResult) {
+            if (!alive->load(std::memory_order_acquire)) return;
+            has_article_ = false;
+            refresh(true);
+            brls::Application::notify("已同步会话并刷新当前订阅源");
         });
 }
 

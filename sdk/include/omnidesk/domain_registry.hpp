@@ -28,9 +28,23 @@ public:
     virtual std::vector<std::string> categories() const = 0;
     virtual std::vector<MediaItem> fetchItems(const std::string& category,
                                               const std::string& query = "") = 0;
+    virtual std::vector<MediaItem> fetchItemsPage(const std::string& category,
+                                                  const std::string& query,
+                                                  int page,
+                                                  bool force_refresh = false) {
+        (void)force_refresh;
+        return page <= 1 ? fetchItems(category, query) : std::vector<MediaItem>{};
+    }
     virtual std::shared_ptr<CancelToken> fetchItemsAsync(
         const std::string& category,
         const std::string& query,
+        std::function<void(std::vector<MediaItem> items, bool cancelled)> callback,
+        std::shared_ptr<CancelToken> cancel = nullptr);
+    virtual std::shared_ptr<CancelToken> fetchItemsPageAsync(
+        const std::string& category,
+        const std::string& query,
+        int page,
+        bool force_refresh,
         std::function<void(std::vector<MediaItem> items, bool cancelled)> callback,
         std::shared_ptr<CancelToken> cancel = nullptr);
     virtual std::vector<LyricLine> fetchLyrics(const std::string& item_id) {
@@ -60,6 +74,14 @@ public:
         (void)channel_id;
         return fetchFeed(query);
     }
+    virtual std::vector<TextFeedItem> fetchFeedPage(const std::string& channel_id,
+                                                    const std::string& query,
+                                                    int page,
+                                                    bool force_refresh = false) {
+        (void)force_refresh;
+        if (page > 1) return {};
+        return channel_id.empty() ? fetchFeed(query) : fetchFeedInChannel(channel_id, query);
+    }
     virtual std::shared_ptr<CancelToken> fetchFeedAsync(
         const std::string& query,
         std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
@@ -67,6 +89,13 @@ public:
     virtual std::shared_ptr<CancelToken> fetchFeedInChannelAsync(
         const std::string& channel_id,
         const std::string& query,
+        std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
+        std::shared_ptr<CancelToken> cancel = nullptr);
+    virtual std::shared_ptr<CancelToken> fetchFeedPageAsync(
+        const std::string& channel_id,
+        const std::string& query,
+        int page,
+        bool force_refresh,
         std::function<void(std::vector<TextFeedItem> items, bool cancelled)> callback,
         std::shared_ptr<CancelToken> cancel = nullptr);
     virtual TextArticle fetchArticle(const std::string& article_id) = 0;
