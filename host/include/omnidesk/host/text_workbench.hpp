@@ -92,6 +92,7 @@ private:
     bool translating_ = false;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<CancelToken> feed_request_ = CancelToken::create();
+    std::shared_ptr<CancelToken> provenance_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> load_more_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> article_request_ = CancelToken::create();
     std::shared_ptr<CancelToken> action_request_ = CancelToken::create();

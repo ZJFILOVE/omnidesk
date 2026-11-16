@@ -506,6 +506,7 @@ TextWorkbench::~TextWorkbench() {
         recommend_sub_ = 0;
     }
     feed_request_->cancel();
+    provenance_request_->cancel();
     load_more_request_->cancel();
     article_request_->cancel();
     action_request_->cancel();
@@ -523,6 +524,8 @@ void TextWorkbench::refresh(bool force_remote) {
 void TextWorkbench::loadCurrentFeed(bool force_refresh) {
     feed_request_->cancel();
     feed_request_ = CancelToken::create();
+    provenance_request_->cancel();
+    provenance_request_ = CancelToken::create();
     load_more_request_->cancel();
     load_more_request_ = CancelToken::create();
     loading_more_ = false;
@@ -858,7 +861,9 @@ void TextWorkbench::loadProvenance() {
                          {"source_id", item.source_id}, {"published_at", item.published_at},
                          {"tags", item.tags}});
     }
-    loadUiInBackground(kernel.uiTasks(), "text.provenance", feed_request_,
+    provenance_request_->cancel();
+    provenance_request_ = CancelToken::create();
+    loadUiInBackground(kernel.uiTasks(), "text.provenance", provenance_request_,
         [items = std::move(items)](const auto& cancel) {
             std::unordered_map<std::string, std::string> dates;
             try {
@@ -1543,7 +1548,6 @@ void TextWorkbench::translateActiveArticle() {
         translate_request_->cancel();
     }
     auto req = CancelToken::create();
-    action_request_ = req;
     translate_request_ = req;
     translating_ = true;
     const TextArticle snapshot = active_article_;

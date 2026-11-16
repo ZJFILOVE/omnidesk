@@ -253,6 +253,8 @@ void CommentTreeView::setArticleContext(std::string source_plugin_id,
     article_title_ = std::move(article_title);
     op_author_ = std::move(op_author);
     if (changed) {
+        if (fetch_cancel_) fetch_cancel_->cancel();
+        backend_loading_ = false;
         backend_offset_ = 0;
         backend_cursor_.clear();
         reddit_link_fullname_.clear();
@@ -411,7 +413,9 @@ void CommentTreeView::fetchFromBackend(bool append_more) {
             if (res.data.contains("next_offset") && res.data["next_offset"].is_number_integer()) {
                 backend_offset_ = res.data["next_offset"].get<int>();
             } else {
-                backend_offset_ += static_cast<int>(comments_.size());
+                backend_offset_ = append_more
+                                      ? backend_offset_ + static_cast<int>(fetched.size())
+                                      : static_cast<int>(fetched.size());
             }
             backend_cursor_ = res.data.value("next_cursor", std::string{});
             if (res.data.contains("paging") && res.data["paging"].is_object()) {
@@ -454,8 +458,9 @@ void CommentTreeView::translateComment(const std::string& node_id) {
     auto* caps_ptr = caps_;
     const std::string text = node->body;
     const std::string aid = article_id_;
+    const std::string title = article_title_;
     auto cancel = CancelToken::create();
-    auto work = [this, alive = alive_, caps_ptr, node_id, text, aid](
+    auto work = [this, alive = alive_, caps_ptr, node_id, text, aid, title](
                     const std::shared_ptr<CancelToken>& c) {
         CapabilityResult res;
         if (caps_ptr->has("llm.translate.v1")) {
@@ -463,7 +468,7 @@ void CommentTreeView::translateComment(const std::string& node_id) {
                 {"text", text},
                 {"source_lang", "auto"},
                 {"target_lang", "zh-CN"},
-                {"context", article_title_},
+                {"context", title},
             }, c);
         } else {
             res = caps_ptr->callCancellable("llm.chat.v1", {
