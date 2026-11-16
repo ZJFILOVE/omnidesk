@@ -28,8 +28,8 @@
                         └──────────────────┬──────────────────┘
                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                HostKernel 入站控制桥 (ControlServer · control.sock)              │
-│          CapabilityRegistry::call(...)  +  EntityBus::publish(...)              │
+│              omnidesk_core 入站控制桥 (ControlServer · control.sock)             │
+│           CapabilityRegistry.call(...)  +  EntityBus.publish(...)               │
 └──────────────┬───────────────────────────────────────────┬──────────────────────┘
                │ recommend.feed.v1                         │ media.playlist.v1
                ▼                                           ▼
@@ -45,7 +45,7 @@
        ▼               ▼              ▼                         ▼
 ┌─────────────┐ ┌─────────────┐ ┌─────────────┐        ┌──────────────────────────┐
 │MediaWorkbench│ │TextWorkbench│ │BookWorkbench│        │ Apple Music 云端资料库   │
-│YouTube/音乐 │ │News/Reddit/ │ │英语双语精读/│        │ + MPVCore 本地无损播放队 │
+│YouTube/音乐 │ │News/Reddit/ │ │英语双语精读/│        │ + libmpv 本地无损播放队  │
 │今日+历史归档│ │期刊今日+归档│ │SM-2 生词闪卡│        │   列实时同步             │
 └─────────────┘ └─────────────┘ └─────────────┘        └──────────────────────────┘
 ```
@@ -53,14 +53,14 @@
 ### 1.1 两种 Agent 进驻形态（共享同一套 Capability 接口）
 
 1. **内驻主控 Agent（In-App Embedded Agent）**：
-   - 由 `plugin-magpie-agent`（提供 `ai.curation.v1`）联合 `plugin-ai-curator`（提供 `recommend.feed.v1`）在宿主后台 `JobCenter` 中运行。
+   - 由 `plugin-magpie-agent`（提供 `ai.curation.v1`）联合 `plugin-ai-curator`（提供 `recommend.feed.v1`）在内核 `JobCenter` 异步任务池中运行。
    - 模型推理直接走本机 Magpie 网关 `http://127.0.0.1:3425/v1/chat/completions`（绑定专属组 `group/omnidesk-active`，零改动终端 Harness 默认配置）。
-   - 用户可在 `F8` 伴读栏（[`AiCompanionDock`](../host/src/companion_dock.cpp)）输入自然语言需求实时生成推荐并反写前端/歌单，或点击工作台顶部的「同步历史归档 / 生成今日精选」按钮触发。
+   - 用户可在 `F8` 伴读栏（前端 `CompanionDock`）或 `AiWorkbench` 输入自然语言需求实时生成推荐并反写前端/歌单，或点击工作台顶部的「同步历史归档 / 生成今日精选」按钮触发。
 2. **外部 / 定时 Agent 入站直连（Inbound External Agent）**：
-   - 宿主 [`HostKernel`](../host/src/kernel.cpp) 启动时监听权限为 `0600` 的本地 Unix Domain Socket：`$XDG_RUNTIME_DIR/omnidesk/control.sock`（若未设置 `XDG_RUNTIME_DIR`，回退至 `<XDG_DATA_HOME>/omnidesk/run/control.sock`）。
+   - 内核 `omnidesk_core` 启动时监听权限为 `0600` 的本地 Unix Domain Socket：`$XDG_RUNTIME_DIR/omnidesk/control.sock`（若未设置 `XDG_RUNTIME_DIR`，回退至 `<XDG_DATA_HOME>/omnidesk/run/control.sock`）。
    - `omnidesk-pm` CLI 提供入站命令（及可选 stdio MCP 桥接 `omnidesk-pm mcp-serve`）：
-     - `omnidesk-pm rpc <capability_id> '<json_payload>'`：向运行中的 `omnidesk` 宿主转发 Capability 调用；
-     - `omnidesk-pm emit <topic> '<json_payload>'`：向宿主 `EntityBus` 广播事件驱动 `brls::sync` 实时刷新；
+     - `omnidesk-pm rpc <capability_id> '<json_payload>'`：向运行中的 `omnidesk` 内核转发 Capability 调用；
+     - `omnidesk-pm emit <topic> '<json_payload>'`：向 `EntityBus` 广播事件驱动前端工作台实时刷新；
      - **离线兜底（Offline Fallback）**：当桌面端 GUI 未启动时，`omnidesk-pm curate ...` / `omnidesk-pm rehydrate` 直接操作本地克隆仓与 `<XDG_DATA_HOME>/omnidesk/curation/`，下次打开桌面端即刻呈现全部历史与最新推荐。
 
 ---
@@ -87,7 +87,7 @@
 | 源仓库与真实相对路径 | 结构化特征与解析规则 | 回灌后的前端落点与交互能力 |
 | :--- | :--- | :--- |
 | **`music-daily`**:<br>`recommendations/YYYY/MM/YYYY-MM-DD.json`<br>`state/tracks.json`<br>**`obsidian-vault` 镜像**:<br>`Music/Daily/manifests/YYYY-MM-DD.json`<br>`Music/Daily/YYYY-MM-DD.md` | • 直接读取 `daily5.schema.json` 结构：`date`、`tracks[0..4]`（含 `position`、`title`、`artist`、`album`、`canonical_id`、`apple_music.{song_id, url, storefront}`、`analysis_summary`、`listening_cue`）<br>• 合并 `Music/Daily/YYYY-MM-DD.md` 中 `<!-- AUTO:END -->` 之后的 `## Notes` 用户手写批注 | **`MediaWorkbench`**：<br>• 子栏目 `每日 5 首 · 最新`、`每日 5 首 · 往期日历 (YYYY-MM-DD)`、`每日 5 首 · 全量曲库连播`<br>• 点击任意历史曲目直接通过 `plugin-music` 无损播放，右侧展示完整多段 `analysis_summary` 编曲解析与 `listening_cue` 两遍听法指南 |
-| **`obsidian-vault`**:<br>`Resources/YouTube/Daily/YYYY-MM-DD.md`<br>`.recommendation/history/youtube.jsonl` | • 解析 YAML Frontmatter（`type: youtube-daily`）与 `<!-- AUTO:START/END -->` 区块：<br>• 提取 `## 今日优先级`、核验声明引用块、以及 `## 1..5. <Title>` 下的 `频道`、`主题`、`链接`（提取 11 位 `video_id` 构造 `hqdefault.jpg` 封面）、`### Why watch` 与 `### 核验说明`（提取 `verification_method`） | **`MediaWorkbench`**：<br>• 子栏目 `YouTube 每日精选 · 最新` 与 `YouTube · 往期归档`<br>• 卡片底部展示主题徽章（含 `wildcard` 标记）与核验范围说明，点击调用 `plugin-youtube` / `MPVCore` 播放并挂载 `Why watch` 至 `F8` 伴读栏 |
+| **`obsidian-vault`**:<br>`Resources/YouTube/Daily/YYYY-MM-DD.md`<br>`.recommendation/history/youtube.jsonl` | • 解析 YAML Frontmatter（`type: youtube-daily`）与 `<!-- AUTO:START/END -->` 区块：<br>• 提取 `## 今日优先级`、核验声明引用块、以及 `## 1..5. <Title>` 下的 `频道`、`主题`、`链接`（提取 11 位 `video_id` 构造 `hqdefault.jpg` 封面）、`### Why watch` 与 `### 核验说明`（提取 `verification_method`） | **`MediaWorkbench`**：<br>• 子栏目 `YouTube 每日精选 · 最新` 与 `YouTube · 往期归档`<br>• 卡片底部展示主题徽章（含 `wildcard` 标记）与核验范围说明，点击调用 `plugin-youtube` / `libmpv` 播放并挂载 `Why watch` 至 `F8` 伴读栏 |
 | **`obsidian-vault`**:<br>`News/Daily/YYYY-MM-DD.md` | • 解析 `type: daily-news-daily`：<br>• 提取 `## Executive View` 总纲，以及每条 `## N. <标题>` 的 `事件日期`、`影响等级`（如 `4/5`）、`### 事实摘要`、`### Why it matters`、`### Long-term impact`、`### What to watch next` 与 `### Sources` 原始链接 | **`TextWorkbench`**：<br>• 子栏目 `每日早报 (News)`（按期聚合或拆条浏览）<br>• 阅读器以结构化分节卡片呈现事实与推演边界，支持一键在托管阅读窗打开原始信源 |
 | **`obsidian-vault`**:<br>`Resources/Reddit/Daily/YYYY-MM-DD.md`<br>`.recommendation/history/reddit.jsonl` | • 解析每日 10 条精选社区帖：提取子版块 `r/...`、标题、原帖链接、核心讨论价值、`Why read` 以及 `original_post_verification` 诚实核验状态 | **`TextWorkbench`**：<br>• 子栏目 `Reddit 每日精选`（支持按日期与子版块过滤）<br>• 点击可在 `plugin-reddit` 中实时拉取最新可折叠嵌套评论树（`CommentTreeView`）对照阅读 |
 | **`obsidian-vault`**:<br>`00-inbox/Journal/YYYY-MM-DD.md`<br>`00-inbox/Journal/Index.md`<br>`.recommendation/history/journal.jsonl` | • 解析 `type: journal-daily`：<br>• 提取 `## 今日科学问题`（含「今日最值得精读」高亮提示）、`## ①/②/③ <英文原题>` 下的中文译题、作者/年份/期刊、`[DOI]`/`[PubMed]`/`[PMC]` 链接，以及 `问题与观测`、`作者解释`、`证据边界与 reviewer_synthesis`、`更正说明`、`为何推荐`、`追问`、`阅读范围与待核`、`## 建议阅读顺序` | **`TextWorkbench`（`category = "journal"` 专属排版）**：<br>• 子栏目 `科学期刊 · 每日精读` 与 `Journal 专题索引`<br>• 完整渲染论文元数据卡与审稿级证据边界拆解，顶部提供一键调用 `book.bilingual_pdf.v1` 转交 BabelDOC 生成双栏 PDF 按钮 |
@@ -106,7 +106,7 @@
 | **永久历史账本读写** | **必读 + 门禁后追加写**：读取本地克隆仓 `.recommendation/policy.json`、`.recommendation/history/*.jsonl`、`state/tracks.json` 与全部 `PREPARED` 事务单；仅在校验通过后追加记录并推送到远端 GitHub | **只读可选、严禁写入**：`record_permanent_history` 恒为 `false`；仅可只读匹配本地回灌索引以标注 `曾于 YYYY-MM-DD 推荐 · 经典重温` 徽章，**绝不修改本地克隆仓内的任何文件、历史账本或事务目录** |
 | **Git / Obsidian 副作用** | 按两阶段可恢复协议更新本地 `obsidian-vault` / `music-daily` 克隆仓（严格保留 `<!-- AUTO:START/END -->` 之外的 `## Notes` 手写内容），校验无误后 `git commit && git push` | **零仓库污染**：完全不触碰 `obsidian-vault` 与 `music-daily` 的每日正式目录与历史账本 |
 | **本地前端持久化目录** | `<XDG_DATA_HOME>/omnidesk/curation/daily/<YYYY-MM-DD>/<project>.json`（与 Git 克隆仓双向同步） | `<XDG_DATA_HOME>/omnidesk/curation/interactive/sessions/<session_id>.json` 及 `pinned.json` |
-| **Apple Music 歌单目标** | 经 `local_sync_gate.py` / QA 门禁后同步至固定累计歌单 **`p.YJXV7dEIeb3GzZX`（`ChatGPT Daily 5`）** 及可选当日歌单 `ChatGPT Daily 5 · YYYY-MM-DD` | **硬编码禁止修改 `p.YJXV7dEIeb3GzZX`**；仅允许写入 `MPVCore` 即时播放队列、本地会话歌单或专用可重复歌单（如 `OmniDesk AI 灵感电台` 或用户命名歌单） |
+| **Apple Music 歌单目标** | 经 `local_sync_gate.py` / QA 门禁后同步至固定累计歌单 **`p.YJXV7dEIeb3GzZX`（`ChatGPT Daily 5`）** 及可选当日歌单 `ChatGPT Daily 5 · YYYY-MM-DD` | **硬编码禁止修改 `p.YJXV7dEIeb3GzZX`**；仅允许写入 `libmpv` 即时播放队列、本地会话歌单或专用可重复歌单（如 `OmniDesk AI 灵感电台` 或用户命名歌单） |
 | **前端视觉徽章** | `每日精选 · YYYY-MM-DD`（使用 `status/ok_{bg,fg}` 语义色） | `AI 灵感推荐 · 可重温`（若命中历史归档则附 `经典重温 · YYYY-MM-DD` 副标，使用 `domain/core` 语义色） |
 
 ---
@@ -142,15 +142,15 @@
 3. **只读回标与零污染守卫**：
    - 若候选条目命中本地历史索引，在 `extra.previously_recommended_on` 填入首次推荐日期 `"YYYY-MM-DD"`，前端展示 `经典重温 · YYYY-MM-DD` 徽章；
    - 强制 `record_permanent_history = false`，绝不写入 `.recommendation/` 或 `music-daily/state/`；
-   - 歌单反写仅允许进入 `MPVCore` 播放队列或独立可重复歌单（如 `"OmniDesk AI 灵感电台"`），服务端硬拦截对 `p.YJXV7dEIeb3GzZX` 的任何修改。
+   - 歌单反写仅允许进入 `libmpv` 播放队列或独立可重复歌单（如 `"OmniDesk AI 灵感电台"`），服务端硬拦截对 `p.YJXV7dEIeb3GzZX` 的任何修改。
 
 ---
 
-## 六、核心接口契约（Host Control Socket + 三大标准 Capability）
+## 六、核心接口契约（Core Control Socket + 三大标准 Capability）
 
-### 6.1 宿主入站控制网关协议（`control.sock` NDJSON RPC）
+### 6.1 内核入站控制网关协议（`control.sock` NDJSON RPC）
 
-宿主 `ControlServer` 监听 `$XDG_RUNTIME_DIR/omnidesk/control.sock`（`0600`），采用与 `WorkerSupervisor` 一致的单行 UTF-8 NDJSON 帧格式（上限 `8 MiB`）：
+`omnidesk_core` 的 `ControlServer` 监听 `$XDG_RUNTIME_DIR/omnidesk/control.sock`（`0600`），采用单行 UTF-8 NDJSON 帧格式（上限 `8 MiB`）：
 
 - **请求帧**：
   ```json
@@ -188,18 +188,18 @@
 - **CLI 快捷命令**：
   ```bash
   # 一键克隆/拉取双仓并将全部历史推荐回灌进 OmniDesk 本地策展库
-  omnidesk-pm rpc recommend.feed.v1 '{"action":"bootstrap_and_rehydrate","pull_remote":true}'
+  uv run omnidesk-pm rpc recommend.feed.v1 '{"action":"bootstrap_and_rehydrate","pull_remote":true}'
 
   # 推送单日正式精选或交互式可重复推荐集
-  omnidesk-pm rpc recommend.feed.v1 --file /path/to/curation_payload.json
+  uv run omnidesk-pm rpc recommend.feed.v1 --file /path/to/curation_payload.json
 
   # 写回 Apple Music 歌单
-  omnidesk-pm rpc media.playlist.v1 --file /path/to/playlist_sync.json
+  uv run omnidesk-pm rpc media.playlist.v1 --file /path/to/playlist_sync.json
   ```
 
 ### 6.2 `recommend.feed.v1` —— 历史回灌与三域前端反写接口（提供者：`plugin-ai-curator`）
 
-`plugin-ai-curator`（`kind = "hybrid"`，`domain = "core"`）向 `DomainRegistry` 注册 `IMediaSource`、`ITextSource`（`category() == "multi"`，原生适配 [`TextWorkbench`](../host/src/text_workbench.cpp) 动态多子栏目过滤）与 `IBookSource`：
+`plugin-ai-curator`（`kind = "hybrid"`，`domain = "core"`）向 `DomainRegistry` 注册 Python `MediaSource`、`TextSource`（`category == "multi"`，原生适配前端 `TextWorkbench` 动态多子栏目过滤）与 `BookSource`：
 
 | `action` | 适用模式 | 核心职责 |
 | :--- | :--- | :--- |
@@ -208,11 +208,11 @@
 | `"search_archive"` | 只读查询 | 在本地已回灌的全量历史推荐（乐评、导看、早报、Reddit、期刊、英语）中按关键词/标签/艺人检索，供前端搜索或模式 B `prefer_familiar` 选品使用 |
 | `"publish_daily_bundle"` | `daily_immutable` | 在 `qa_verified == true` **且** `publication_evidence` 证明上游已提交 `PUBLISHED` 事务后，将当日新推荐写入本地缓存与双仓镜像（处理 `ephemeral_chat_note` 瞬时饮食气泡而不落盘），刷新前端并触发生词入库；只有 QA 标记时返回 `needs_verified_bundle` |
 | `"push_interactive_set"` | `interactive_ephemeral` | 将用户按需触发的可重复推荐集写入 `curation/interactive/sessions/`（强校验 `record_permanent_history == false`），实时推送至前端 `AI 灵感推荐` 栏目 |
-| `"pin_item" \| "dismiss_item" \| "clear_interactive" \| "status"` | 狀態管理 | 收藏固定单条灵感推荐、隐藏条目、一键清空临时会话流或查询双仓同步健康度 |
+| `"pin_item" \| "dismiss_item" \| "clear_interactive" \| "status"` | 状态管理 | 收藏固定单条灵感推荐、隐藏条目、一键清空临时会话流或查询双仓同步健康度 |
 
 ### 6.3 `media.playlist.v1` —— Apple Music 歌单写回接口（提供者：`plugin-music`）
 
-在 [`omnidesk-plugin-music`](https://github.com/ZJFILOVE/omnidesk-plugin-music) 现有 `AdamClient` 基础上新增 Apple Music Library 写回动作：
+在 `plugin-music`（直接同源复用 `qwen-translator` Apple Music / Adam 会话能力）基础上提供 Apple Music Library 写回动作：
 
 1. **`"preflight_cn_catalog"`**：调用 `/v1/catalog/cn/songs?ids=...` 批量实证核验国区曲目存在性与可播状态。
 2. **`"sync_daily_authorized"`**（仅限 `mode == "daily_immutable"`、`qa_verified == true`，且能读取到与 `operation_id` / `business_date` 完全匹配的已提交 `PUBLISHED` 事务与 QA 收据）：
@@ -222,7 +222,7 @@
 3. **`"write_interactive_playlist" | "enqueue_playback"`**（`mode == "interactive_ephemeral"`）：
    - **硬拦截保护**：任何试图指向 `p.YJXV7dEIeb3GzZX` 或 `"ChatGPT Daily 5*"` 名称的调用一律返回 `error_code = "protected_daily_playlist"`；
    - 云端写回前必须用 `preflight_cn_catalog` 返回的 `verified_ids` 做严格集合校验；预检失败、缺少 `verified_ids` 或部分不可播时一律禁止云端歌单写入；
-   - 支持写入独立可重复歌单（默认 `"OmniDesk AI 灵感电台"` 或用户指定歌单名，支持包含历史已推曲目）及一键推入 `MPVCore` 当前无损播放队列；`local_checkpoint_only` 仅做本地暂存，不得标记为云端已同步。
+   - 支持写入独立可重复歌单（默认 `"OmniDesk AI 灵感电台"` 或用户指定歌单名，支持包含历史已推曲目）及一键推入 `libmpv` 当前无损播放队列；`local_checkpoint_only` 仅做本地暂存，不得标记为云端已同步。
 
 ### 6.4 `ai.curation.v1` —— 内驻 Agent 策展编排接口（提供者：`plugin-magpie-agent`）
 

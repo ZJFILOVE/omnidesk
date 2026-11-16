@@ -1,6 +1,0 @@
-# Optional video preparation tools; installed into the project's virtualenv.
-yt-dlp[default]==2026.8.19
-ffsubsync==0.5.1
-srt==3.5.3
-charset-normalizer==3.5.1
-playwright==1.62.0

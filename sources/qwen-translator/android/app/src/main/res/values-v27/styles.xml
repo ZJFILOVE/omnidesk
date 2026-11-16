@@ -1,9 +1,0 @@
-<resources>
-    <style name="Theme.Feiniu.Light" parent="Base.Theme.Feiniu.Light">
-        <item name="android:windowLightNavigationBar">true</item>
-        <item name="android:navigationBarColor">@color/app_light_base</item>
-    </style>
-    <style name="Theme.Feiniu.Dark" parent="Base.Theme.Feiniu.Dark">
-        <item name="android:windowLightNavigationBar">false</item>
-    </style>
-</resources>

@@ -1,5 +1,0 @@
-# Internal BabelDOC API adapter in pdf_translation.py is verified against this version.
-BabelDOC==0.6.4
-PyMuPDF==1.26.7
-peewee==3.18.3
-bitstring==4.3.1

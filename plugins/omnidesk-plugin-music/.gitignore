@@ -1,4 +1,0 @@
-build/
-cmake-build-*/
-*.user
-.DS_Store

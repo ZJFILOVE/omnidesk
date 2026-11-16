@@ -1,9 +1,0 @@
-prefix=@OMNIDESK_PREFIX@
-libdir=${prefix}/lib
-includedir=${prefix}/include
-
-Name: omnidesk-sdk
-Description: OmniDesk C++17 Plugin SDK (ABI v1 + Borealis UI primitives)
-Version: @OMNIDESK_VERSION@
-Libs: -L${libdir} -lomnidesk_sdk
-Cflags: -I${includedir} -I${includedir}/borealis_bundle -DYG_ENABLE_EVENTS -D__SDL2__ -DBOREALIS_USE_OPENGL -DFONS_HASH_LUT_SIZE=4096

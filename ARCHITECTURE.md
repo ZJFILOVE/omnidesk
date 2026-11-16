@@ -1,107 +1,109 @@
-# 万象 · OmniDesk：全插件化微内核 + 插件市场 + 上游持续跟进架构
+# 万象 · OmniDesk（v2）：极简三层架构 + 全键盘空间交互 + 零 ABI 纯 Python 插件体系
 
-## 一、核心设计哲学：一切皆插件（宿主微内核 + 插件市场）
+## 一、核心设计哲学与防膨胀铁律
 
-宿主（`omnidesk` + `libomnidesk_sdk.so`）只保留**纯粹的渲染、窗口、键盘焦点树、通用组件（`MPVCore` / `EbookReaderView` / `CommentTreeView`）以及插件运行时与总线**，**不包含任何具体站点、具体翻译模型、具体网盘或具体文档引擎的业务代码**。
+OmniDesk v2 彻底告别 v1 时期「18 万行 C++17 Borealis 手搓 UI + 22 个独立 CMake `.so` 二进制插件仓 + 头文件哈希连坐重编」的历史包袱，转向**总代码量严格控制在 `~16,000` 行以内**的现代三层架构：
 
-连 B 站、飞牛 NAS、PDF 翻译、Chrome 论文/网页双语浏览、本地语音识别在内，全部以独立插件包（`plugins/<plugin-id>/plugin.json`）形态存在，由内置的 **「插件市场与更新中心（Plugin Store）」** 统一安装、启停、配置密钥和追踪上游更新。
+1. **零二进制插件 ABI（JSON / Pydantic 契约即唯一边界）**：
+   - 彻底废除 C++ `.so` 动态库、`dlopen`、`OMNIDESK_DECLARE_PLUGIN`、`sdk_abi_signature` 编译期指纹与 `DsoViewLease`。
+   - 所有站点接入、AI 路由、NAS 连接、字幕/电子书/PDF 处理与策展逻辑全部采用 **纯 Python（`3.14+`，`uv` 管理）** 编写，仅通过 `CapabilityRegistry`（版本化 JSON/Pydantic RPC）与 `EntityBus`（主题事件）解耦协作——改内核永不破坏插件，保存 `.py` 秒级热重载。
+2. **「键盘控制一切」的一等公民桌面体验**：
+   - 完整继承并升级 **Paper `#F6F5F3`（纸感亮色）& Graphite `#181718`（石墨深色）** 视觉系统与无遮罩 `F8` 伴读栏。
+   - 前端内置 **二维空间焦点引擎（2D Spatial Focus Engine）**：焦点绑定在稳定的业务 `item.id` 上（异步刷新绝不丢焦点），任何时刻都有清晰焦点环；支持 `h/j/k/l` 与方向键跨分栏几何跳转、显式键帽角标（`Ctrl+1..5` 工作台、确定性 `Alt+字母` 插件页、`f` 全屏字母闪跳、`Ctrl+K` 命令面板、`F8` 伴读抽屉），并在 Fcitx5 / Rime 中文输入 `isComposing` 期间自动避让单键快捷键。
+3. **原生硬解不妥协，富文本排版不造轮子**：
+   - 视频与无损音频由极薄原生壳内嵌 **`libmpv` OpenGL 硬解画布（`hwdec=auto-safe`）** 驱动，画质、帧率与系统媒体键（MPRIS2）100% 原生。
+   - 双语文章、LaTeX 公式（KaTeX）、代码块高亮、可折叠嵌套评论树、EPUB/PDF 划词气泡（Selection API）直接交由现代 Web 排版引擎原生承载，不再手搓几千行 NanoVG 文本测量与纹理缓存。
+4. **四条硬性代码规模红线（防止人类与 AI 维护失控）**：
+   - **单文件上限 `<= 400` 行**：任何 `.py` / `.tsx` / `.ts` / `.rs` 文件超过 400 行必须按职责拆分，严禁出现数千行的大泥球状态机。
+   - **原生层零业务逻辑**：`shell-tauri/`（Rust）总计不超过 `~500` 行，只负责 Wayland 窗口与 `libmpv` 帧渲染，写完即封存。
+   - **单仓收编 + 公共底座复用**：22 个核心与社区插件统一收编进仓库 `plugins/<plugin-id>/`（仍支持外部 Git 插件按需安装），HTTP 重试、代理隔离、Cookie 读取与缓存统一收口至 `omnidesk_sdk`（`~400` 行），严禁在各插件内重复造网络与解析轮子。
+   - **兄弟项目活体同源引用**：直接 `import` 本机 `/home/zhu/Projects/qwen-translator` 的成熟 Python 模块（双语歌词、字幕、网页/PDF 翻译、Codex/Antigravity 会话），修一处两端同时受益。
 
 ---
 
-## 二、插件分类与解耦交互模型
-
-平台将插件分为两类正交形态，通过 **`CapabilityRegistry`（能力注册表）** 与 **`EntityBus`（跨插件实体总线）** 松耦合协作——装了就能联动，卸了自动优雅降级，绝不硬编码互相依赖：
+## 二、总体三层架构图
 
 ```mermaid
 flowchart TB
-    subgraph Microkernel["C++17 宿主微内核 (omnidesk + libomnidesk_sdk.so, ABI v1)"]
-        Shell["WorkspaceShellActivity (左侧动态工作区栏 Ctrl+1..9 + 内置『插件市场』)"]
-        CoreUI["通用 UI 原语 (MPVCore | 双语 SubtitleOverlay | EbookReaderView | CommentTreeView | AiDock)"]
-        Bus["插件内核总线 (PluginManager + CapabilityRegistry + EntityBus + SecretVault + JobCenter)"]
+    subgraph Shell["Layer 1 · 极薄原生壳 shell-tauri (~500 行 Rust / Tauri v2)"]
+        WL["Wayland / Hyprland 原生桌面窗 (app_id='omnidesk')"]
+        MPV["libmpv 2.5 OpenGL 硬解渲染画布 + MPRIS2 媒体键"]
     end
 
-    subgraph Providers["底座能力插件 (Headless / 扩展型插件，按需安装)"]
-        C_LLM["plugin-llm-gateway (Codex Luna / Antigravity / 飞牛 8766 / 兼容 API)"]
-        C_ASR["plugin-asr-funasr (本地 Vulkan GPU SenseVoiceSmall 语音识别)"]
-        C_SUB["plugin-sub-hunter (SubHD / ASSRT / ffsubsync 字幕抓取对齐)"]
-        C_SB["plugin-sponsorblock (B站 / YouTube 空降片段跳过)"]
+    subgraph UI["Layer 2 · 全键盘桌面前端 ui (~5,500 行 React 19 + TS + Tailwind v4)"]
+        Focus["2D 空间键盘焦点引擎 (hjkl/方向键 + Keycap Badge + f 闪跳 + IME 守卫)"]
+        WB["五大工作台 (Media | Text | Book | AI | PluginStore) + F8 响应式伴读栏"]
+        Reader["原生排版底座 (Markdown + KaTeX + 划词气泡 + 虚拟折叠评论树)"]
     end
 
-    subgraph Workspaces["独立工作区插件 (Workspace UI 插件，各自独立 .so + 可选 worker)"]
-        W_BILI["plugin-bilibili (B站工作区)"]
-        W_YT["plugin-youtube (YouTube工作区)"]
-        W_NAS["plugin-fnos-nas (飞牛 NAS 影院与字幕写回)"]
-        W_ARR["plugin-arr-imdb (IMDb 发现 + Radarr/Sonarr 选片队列)"]
-        W_PDF["plugin-pdf-babeldoc (PDF 左右双语排版翻译)"]
-        W_EBOOK["plugin-ebook (EPUB/MOBI/AZW3/TXT 原版书伴读 + 生词本)"]
-        W_ZLIB["plugin-zlib (Z-Library 书库检索与下载)"]
-        W_ANNAS["plugin-annas-archive (Anna's Archive 元搜索与下载)"]
-        W_CHROME["plugin-chrome-web (托管 Chrome --app 论文/网页浏览 + 自动注入 MV3 网页翻译与下载接管插件)"]
-        W_COMM["plugin-linuxdo / plugin-zhihu / plugin-reddit (社区插件)"]
+    subgraph Core["Layer 3 · Python 微内核与插件生态 core + plugins (~10,000 行 Python 3.14 / uv)"]
+        Bus["omnidesk_core (CapabilityRegistry + EntityBus + JobCenter + SQLite FTS5)"]
+        Sec["安全与网关 (0600 ConfigStore & SecretVault + control.sock 入站网关)"]
+        SDK["omnidesk_sdk (统一 httpx 客户端 + 多源 Cookie 桥 + 数据源 ABC)"]
+        Plugs["plugins/* (22 个零编译 Python 插件，按需启停与秒级热重载)"]
     end
 
-    Providers -->|"注册标准接口 (asr.v1 / llm.v1 / subtitle.v1)"| Bus
-    Bus <-->|"按能力接口调用 / EntityBus 联动"| Workspaces
-    Shell --> CoreUI & Bus
+    WL & MPV <-->|"本地 IPC / 视频视口同步"| UI
+    UI <-->|"本地双向 WebSocket / JSON-RPC 流"| Bus
+    Bus --- Sec & SDK
+    SDK <--> Plugs
 ```
 
-### 插件清单矩阵（每个插件均可单独开关、独立升级、独立卸载）
+### 代码预算表（目标总量 `~16,000` 行，较 v1 缩减 `91%`）
 
-| 插件 ID | 类型 | 职责边界 | 提供 / 消费的标准能力 |
-| :--- | :--- | :--- | :--- |
-| `plugin-llm-gateway` | 能力底座 | 统一封装本机 `codex` (`gpt-6-luna`)、`Antigravity`、飞牛 `8766` 与兼容 API 会话池 | **提供** `llm.chat.v1`, `llm.translate.v1` |
-| `plugin-asr-funasr` | 能力底座 | 本地 Vulkan GPU `FunASR SenseVoiceSmall Q8` 离线/分块语音转写（不装不占显存与模型空间） | **提供** `speech.asr.v1` |
-| `plugin-sub-hunter` | 能力底座 | SubHD 浏览器抓取、ASSRT API、`ffsubsync` 自动音轨/参考轴对齐 | **提供** `subtitle.fetch.v1`, `subtitle.sync.v1` |
-| `plugin-sponsorblock` | 播放器扩展 | 为任意声明了视频 ID 的播放器注入进度条空降色块与 `F9` 跳过 | **扩展** `player.timeline.v1` |
-| `plugin-chrome-web` | **工作区 + 浏览器能力** | **彻底抛弃 Zen/Firefox XPI 签名折腾**：将现有出版商论文级网页翻译扩展迁为标准 **Chrome MV3 扩展**；工作区内管理论文链接/外刊书签/浏览会话，点击即拉起无地址栏干扰的托管 **Chrome `--app` 阅读窗**（自动 `--load-extension`、自动注入 `127.0.0.1:8766` 免手动配对、接管 PDF/EPUB 下载、划词送伴读） | **提供** `web.open_and_translate.v1`, `download.browser_intercept.v1`；消费 `llm.translate.v1` |
-| `plugin-bilibili` | 工作区 | 推荐/动态/我的/番剧/直播、Android 4K、双扫码 | 消费 `llm.v1`, 可选消费 `speech.asr.v1`, `player.timeline.v1` |
-| `plugin-youtube` | 工作区 | 订阅/搜索/频道、`yt-dlp` 流解析、边播边预译双语字幕 | 消费 `llm.v1`, 可选消费 `speech.asr.v1`, `player.timeline.v1` |
-| `plugin-fnos-nas` | 工作区 + 能力 | `/mnt/feiniu-smb` 原盘内嵌 `MPVCore` 硬解播放、飞牛 `8765` 接口、`nas_io` 安全防覆盖写回 | **提供** `media.local_match.v1`, `media.clip_jump.v1`；消费 `subtitle.*`, `llm.v1` |
-| `plugin-arr-imdb` | 工作区 | IMDb 榜单/详情 + Radarr (`7878`) / Sonarr (`8989`) 做种分档选片与 qBittorrent 队列管理 | 探测 `media.local_match.v1`（已入库直接调飞牛播，未入库一键下发 Arr） |
-| `plugin-pdf-babeldoc` | 工作区 + 能力 | 基于 BabelDOC 的本地 PDF 版面识别、术语提取、页码范围选择与左右对照 `dual.pdf` 生成 | **提供** `doc.translate.pdf.v1`；消费 `llm.v1` |
-| `plugin-ebook` | 工作区 + 能力 | `.epub`/`.mobi`/`.azw3`/`.txt` 分页伴读、点词词源、前后段语境精读、SM-2 生词本、飞牛双端进度同步 | **提供** `doc.open.ebook.v1`；若检测到 `plugin-fnos-nas` 则激活「美剧台词一键跳播原片片段」 |
-| `plugin-zlib` | 工作区 + 能力 | Z-Library EAPI 搜书、域名自检、登录态/Cookie 认证、已下载书架管理，遇人机验证可交由 `plugin-chrome-web` 处理并投递给 BabelDOC 或 NAS | **提供** `book.search.v1`, `zlib.library.v1`；消费 `book.bilingual_pdf.v1`, `book.sync.v1`, `nas.connection.v1`, `web.embed.v1`, `web.extract.v1` |
-| `plugin-annas-archive` | 工作区 + 能力 | Anna's Archive 元搜索、Fast Download API 与慢速/外部镜像解析，下载完成后投递给 BabelDOC、EPUB 书架或 NAS | **提供** `book.search.v1`, `annas.archive.v1`；消费 `book.bilingual_pdf.v1`, `book.sync.v1`, `nas.connection.v1`, `web.embed.v1`, `web.extract.v1` |
-| `plugin-linuxdo` / `zhihu` / `reddit` | 工作区（各独立） | 帖子列表与评论树原生浏览；遇复杂外链论文/文章一键交给 `plugin-chrome-web` 打开并双语翻译 | 消费 `llm.translate.v1`, `web.open_and_translate.v1` |
-| `plugin-feed-recipe` | 工作区 + 能力 | 20 行声明式 JSON/Lua 轻量源配方引擎，免编译接入 HN / V2EX / 学者 Blog / 顶会论文列表，自动复用 `plugin-chrome-web` 登录 Cookie 过验证并注入纸白双语排版与折叠评论树 | **提供** `text.source.v1`, `text.comments.v1`, `feed.recipe.v1`；消费 `web.cookies.v1`, `web.embed.v1`, `web.extract.v1`, `llm.translate.v1`, `llm.chat.v1` |
+| 层级 | 目录 | 技术栈 | 目标行数 | 核心职责边界 |
+| :--- | :--- | :--- | :---: | :--- |
+| **原生壳** | `shell-tauri/` | Rust + Tauri v2 + `libmpv` | `~500` | Wayland 窗口管理、`libmpv` GPU 硬解视口同步、MPRIS2 媒体控制 |
+| **全键盘前端** | `ui/` | React 19 + TypeScript + Tailwind v4 | `~5,500` | Paper/Graphite 主题、2D 空间焦点导航、四大领域工作台、插件市场表单与 `F8` 伴读栏 |
+| **Python 内核与 SDK** | `core/` | Python 3.14 (`uv` / `asyncio` / Pydantic / SQLite FTS5) | `~2,500` | 插件生命周期、能力注册表、事件总线、任务中心、`0600` 密钥库、`control.sock` 与 `omnidesk-pm` CLI |
+| **插件群（22 个）** | `plugins/` | Python 3.14 (`httpx` / `selectolax` / 活体复用) | `~7,500` | 每个插件 `150~350` 行：站点抓取解析、Magpie 路由、飞牛 NAS、ASR、策展回灌与歌单同步 |
 
 ---
 
-## 三、`plugin-chrome-web` 设计：为什么“托管真 Chrome + MV3 翻译扩展”比内嵌 WebEngine 或 Zen 强得多？
+## 三、插件矩阵与松耦合协作模型
 
-你现有的 `qwen-translator/firefox-extension` 其实已经是 **Manifest V3**，而且专门针对**学术出版商论文 HTML 正文、摘要、上标引用 `[1]`、排除参考文献列表、单段重译与本地 SHA-256 缓存**打磨成熟了。换成 Chrome 方案有四大质变优势：
+平台将插件分为 **能力底座（`provider`）**、**领域工作区（`workspace` / `hybrid`）** 与 **扩展（`extension`）**，严禁插件间直接硬编码互引，一律经由 `CapabilityRegistry` 与 `EntityBus` 协作（装了即联动，停用自动优雅降级）：
 
-1. **彻底告别 Zen / Firefox 未签名扩展限制**：
-   - Chrome / Chromium 原生支持通过命令行参数 `--user-data-dir=~/.local/share/omnidesk/chrome-profile --load-extension=<plugin-dir>/chrome-ext --app=<url>` 直接加载未打包目录扩展，无需任何商店签名，随系统 `pacman -Syu` 自动升级内核，零额外体积（不引入 500MB 的 CEF WebEngine，也不会破坏 Fcitx5 输入法）。
-2. **零配置自动配对（无需再手工复制粘贴配对密钥）**：
-   - OmniDesk 启动 `web_translation.py` 服务时，直接把回环端口与当次密钥写进扩展的自动配置文件（或通过 Native Messaging 注入），打开网页按 `Alt+Shift+T`（或点工具条）即刻调用 `gpt-6-luna` / `Antigravity` 双语翻译。
-3. **无边框原生阅读窗（`--app=<url>` + Hyprland 窗口组）**：
-   - 在 OmniDesk 的「论文与网页工作区」里粘贴 Nature / Science / arXiv HTML 链接（或从社区帖、Z-Lib 点开），拉起的是**不带杂乱标签栏和书签栏的纯净 Chrome App 阅读窗**（带自定义 `--class=omnidesk-reader`，Hyprland 可自动与主窗口分屏或归组），MathJax 数学公式、高清矢量图表、学校机构登录态、Cloudflare 验证 100% 原生通过！
-4. **下载与划词伴读无缝回流 OmniDesk**：
-   - 在该 Chrome 阅读窗里点论文的「Download PDF」或在 Z-Lib / Anna's Archive 点下载，扩展通过 `chrome.downloads` 自动拦截把文件归入 OmniDesk 下载中心 → 一键转交 **`plugin-pdf-babeldoc`** 排双语 PDF 或 **`plugin-ebook`** 入书架；
-   - 在论文网页上选中任意长难句 → 右键「送入 OmniDesk 精读 / 查词源」直通你的「伴读」句段笔记与生词本。
-
----
-
-## 四、复用了这么多项目，如何轻松跟上所有上游更新？
-
-OmniDesk 采用 **「上游零侵入锁（`upstreams.lock.json`）+ 极薄适配器（Thin Adapter）+ 自动契约冒烟与一键回滚」** 机制，按三类上游分别治理：
-
-1. **外部 C++ 大型上游（`xfangfang/wiliwili`、`xfangfang/borealis`）：消灭巨型 Patch**
-   - `upstreams/wiliwili` 与 `upstreams/borealis` 以干净 Git Submodule 挂载，绝不在上游树里堆业务功能；原 `5,887` 行补丁拆成 `< 80` 行极薄钩子，98% 代码迁入 `plugins/bilibili/adapter/`。
-   - `bilibili::*` 类型严禁逃出插件目录——上游改 API 结构只需改 `adapter/` 百来行转换代码，宿主与其他插件零重编。
-2. **你自己的活跃兄弟项目（`qwen-translator`、`toefl-vocab-app`、`local-codex-bridge`）：活体同源引用**
-   - 同一台电脑只认唯一真源（Single Source of Truth）：Python 插件通过极薄 `adapter_worker.py` 直接挂载 `/home/zhu/Projects/qwen-translator` 的核心模块（包括 `web_translation.py`、`pdf_translation.py`、`local_subtitles.py`、`mobile_media.py`）；Chrome 扩展与 `qwen-translator` 共用同一份 `browserApi = globalThis.browser ?? globalThis.chrome` 跨浏览器源码，修一处两边同时受益！
-   - `plugin-ebook` 与 `/home/zhu/Projects/toefl-vocab-app` 共用 `ebook.ts` 解析契约与飞牛同步格式。
-3. **高频变动协议与算法引擎（`yt-dlp`、`BabelDOC`、`llama.cpp / FunASR`）：独立环境 + 冒烟门禁 + 1 秒回滚**
-   - 每个插件锁死自己的运行环境；内置插件市场「更新雷达」拉取新版后先在 `/tmp/omnidesk-staging` 自动跑 3 秒离线契约测试（`verify_cmd`），全绿才原子切换，失败自动回退，且随时支持一键回滚上一版。
+| 插件 ID | 类型 | 域 | 职责边界 | 提供 / 消费的标准能力 |
+| :--- | :--- | :--- | :--- | :--- |
+| `plugin-magpie-agent` | `provider` | `core` | 探测本机 Magpie（`127.0.0.1:3425`）Harness/模型/配额，通过专属组 `group/omnidesk-active` 反向打穿路由，驱动内驻 AI 对话与策展 | **提供** `llm.router.v1`, `ai.agent.v1`, `ai.curation.v1`, `llm.chat.v1`, `llm.translate.v1` |
+| `plugin-ai-curator` | `hybrid` | `core` | 克隆同步 `obsidian-vault` 与 `music-daily` 回灌全量历史推荐，硬隔离 `daily_immutable` 与 `interactive_ephemeral` 双模前端反写 | **提供** `recommend.feed.v1`, `media.source.v1`, `text.source.v1`, `book.source.v1` |
+| `plugin-asr-funasr` | `provider` | `core` | 本地 Vulkan/CPU `FunASR SenseVoiceSmall` 独立子进程分块离线转写与断点续传 | **提供** `speech.asr.v1` |
+| `plugin-sub-hunter` | `provider` | `media` | SubHD / ASSRT 字幕检索安全解压与 `ffsubsync` 自动音轨对齐 | **提供** `subtitle.fetch.v1`, `subtitle.sync.v1` |
+| `plugin-sponsorblock` | `extension` | `media` | Bilibili (`bsbsb.top`) / YouTube (`sponsor.ajay.app`) K-匿名空降与恰饭片段标记跳过 | **提供** `player.timeline.v1` |
+| `plugin-chrome-web` | `hybrid` | `text` | 托管纯净 Chrome `--app` 阅读/登录窗 + 自动注入 MV3 网页双语翻译与同源请求/下载接管扩展 | **提供** `web.embed.v1`, `web.cookies.v1`, `web.extract.v1`, `web.fetch.v1`；消费 `llm.translate.v1` |
+| `plugin-music` | `hybrid` | `media` | 直接复用 `qwen-translator` Apple Music / 双语歌词能力 + 国区曲库预检 + `ChatGPT Daily 5` 门禁写回 | **提供** `media.source.v1`, `media.playlist.v1`；消费 `llm.translate.v1` |
+| `plugin-bilibili` | `workspace` | `media` | 推荐/动态/追番/直播、4K 流解析、扫码鉴权与弹幕/双语字幕联动 | **提供** `media.source.v1`；可选消费 `speech.asr.v1`, `player.timeline.v1`, `llm.chat.v1` |
+| `plugin-youtube` | `workspace` | `media` | 订阅/搜索/频道、`yt-dlp` 流解析与边播边预译双语字幕 | **提供** `media.source.v1`；可选消费 `speech.asr.v1`, `player.timeline.v1`, `llm.translate.v1` |
+| `plugin-fnos-nas` | `hybrid` | `media` | 用户自配置挂载目录原盘硬解、受保护双语字幕原子写回、美剧台词切片跳播与阅读进度同步 | **提供** `nas.connection.v1`, `media.local_match.v1`, `media.clip_jump.v1`, `book.sync.v1` |
+| `plugin-arr-imdb` | `workspace` | `media` | IMDb 榜单/详情 + Radarr / Sonarr 选片核验与下载队列管理 | 消费 `media.local_match.v1` |
+| `plugin-pdf-babeldoc` | `hybrid` | `book` | 基于 BabelDOC 的本地 PDF 版面识别、术语锁定与左右双栏对照生成 | **提供** `book.source.v1`, `book.bilingual_pdf.v1`；消费 `llm.translate.v1` |
+| `plugin-ebook` | `hybrid` | `book` | `.epub`/`.mobi`/`.azw3`/`.txt` 分页伴读、点词词源、长难句精读与 SM-2 间隔重复生词本 | **提供** `book.source.v1`, `vocab.sm2.v1`；可选消费 `media.clip_jump.v1`, `book.sync.v1` |
+| `plugin-zlib` / `annas-archive` | `hybrid` | `book` | Z-Library / Anna's Archive 搜书下载，完成后一键转交 BabelDOC、EPUB 书架或飞牛 NAS | **提供** `book.search.v1`；消费 `book.bilingual_pdf.v1`, `book.sync.v1`, `web.cookies.v1` |
+| `plugin-zhihu` / `linuxdo` / `shuiyuan` / `v2ex` / `reddit` / `x` / `journals` | `workspace` | `text` | 各社区与科学期刊高信噪比信息流、公式代码块保真解析与可折叠评论树 | **提供** `text.source.v1`；消费 `web.cookies.v1`, `web.fetch.v1`, `llm.translate.v1` |
+| `plugin-blog` / `feed-recipe` | `hybrid` | `text` | 博主式个人博客订阅 + 20 行声明式 JSON 站点配方引擎 | **提供** `text.source.v1`, `blog.subscription.v1`, `feed.recipe.v1` |
 
 ---
 
-## 五、分阶段路线图
+## 四、`plugin-chrome-web`：为什么继续坚持「托管真 Chrome `--app` + MV3 扩展」？
 
-1. **Phase 1：宿主微内核 + 内置「插件市场 & 上游更新中心」+ `omnidesk-pm` 工具链**
-2. **Phase 2：底座能力插件（`plugin-llm-gateway`、`plugin-asr-funasr`、`plugin-sponsorblock`）+ `plugin-bilibili` 零侵入外挂化迁移**
-3. **Phase 3：`plugin-chrome-web`（托管 Chrome 论文/网页双语浏览与下载接管）+ `plugin-pdf-babeldoc` + `plugin-ebook` + `plugin-zlib` + `plugin-annas-archive`**
-4. **Phase 4：`plugin-fnos-nas` + `plugin-arr-imdb` + `plugin-sub-hunter` + `plugin-youtube`**
-5. **Phase 5：社区插件群（`plugin-linuxdo`、`plugin-zhihu`、`plugin-reddit`）**
+对于重度反爬登录（Cloudflare Turnstile、jAccount SSO、2FA）以及出版商复杂交互网页阅读，托管系统原生 Chrome 比在应用内塞重型浏览器爬虫更干净：
+
+1. **免商店签名直载 MV3 扩展**：通过 `--user-data-dir=~/.local/share/omnidesk/chrome-profile --load-extension=<ext-dir> --app=<url> --class=omnidesk-reader` 拉起无地址栏纯净阅读窗，随系统自动更新且完美兼容 Wayland / Hyprland 分屏规则与 Fcitx5 输入法。
+2. **零配置自动配对与兄弟仓库同源**：OmniDesk Python 内核直接复用 `/home/zhu/Projects/qwen-translator` 的网页翻译服务与跨浏览器 MV3 扩展源码，启动时自动注入回环端口与当次 Bearer Token，打开论文按 `Alt+Shift+T` 即刻双语对照并保护上标引用 `[1]` 与数学公式。
+3. **统一会话与下载回流底座**：在真实浏览器完成一次登录后，通过 `web.cookies.v1` / `web.fetch.v1` 反哺社区插件；页面点击 PDF/EPUB 下载自动归入 OmniDesk 书架或 BabelDOC 翻译队列。
+
+---
+
+## 五、迁移与演进路线图（v1 C++ → v2 Python + React + Tauri）
+
+> 注：仓库当前根目录下的 `host/`、`sdk/`、`pm/` 为已冻结的 v1 C++17 参考实现（可在归档分支 `legacy-cpp` 留存对照），新功能开发与插件迁移一律按以下 v2 阶段推进：
+
+1. **Stage 1：v2 核心骨架与全键盘空间工作台闭环**
+   - 建立 `shell-tauri/`（Wayland 原生窗 + `libmpv` 硬解嵌入）、`ui/`（Paper & Graphite 主题 + 2D 空间键盘焦点引擎 + 五大工作台骨架 + `F8` 伴读栏）与 `core/`（`omnidesk_core` + `omnidesk_sdk` + `control.sock` + 热重载插件加载器）。
+2. **Stage 2：核心底座与双模 AI 策展率先就位**
+   - 迁移 `plugin-magpie-agent`、`plugin-ai-curator`（双仓历史回灌 + 每日/交互双模隔离）与 `plugin-music`（直接复用 `qwen-translator` 的 `music_adam.py` / `music_lyrics.py` + Apple Music 写回门禁）。
+3. **Stage 3：文字社区、科学期刊与书本伴读工作台成型**
+   - 接入原生 Markdown + KaTeX + 划词气泡 + `CommentTreeView`，将 `chrome-web`、`ebook`、`pdf-babeldoc`、`zlib`、`annas-archive` 及各社区插件收敛为每个 `150~300` 行的精简 Python 插件。
+4. **Stage 4：影视源与飞牛 NAS 完整收官并退役 v1 C++ 树**
+   - 迁入 `fnos-nas`、`bilibili`、`youtube`、`sub-hunter`、`sponsorblock`、`asr-funasr`、`arr-imdb`，全套 `pytest` + `vitest` 绿灯后清理根目录下旧版 CMake / C++ 代码。

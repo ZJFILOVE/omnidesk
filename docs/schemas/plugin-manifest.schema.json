@@ -2,23 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://omnidesk.local/schemas/plugin-manifest.schema.json",
   "title": "OmniDesk Plugin Manifest (plugin.json)",
-  "description": "Schema v1 for standalone OmniDesk C++17 .so plugin repositories, validated by omnidesk::pm::parseManifestJson and validateManifest.",
+  "description": "Schema v2 for OmniDesk zero-ABI Python plugins (schema_version = 2).",
   "type": "object",
   "required": [
     "schema_version",
     "id",
     "name",
     "version",
-    "abi_version",
     "kind",
     "domain"
   ],
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 1,
-      "description": "Manifest schema version. Must be 1."
+      "const": 2,
+      "description": "Manifest schema version for Protocol v2 Python plugins. Must be 2."
     },
     "id": {
       "type": "string",
@@ -36,12 +35,19 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$",
-      "description": "Semantic version string (e.g. '0.1.0')."
+      "description": "Semantic version string (e.g. '0.2.0')."
     },
-    "abi_version": {
-      "type": "integer",
-      "const": 1,
-      "description": "Must match OMNIDESK_PLUGIN_ABI_VERSION (1)."
+    "runtime": {
+      "type": "string",
+      "enum": ["python"],
+      "default": "python",
+      "description": "Plugin execution runtime ('python')."
+    },
+    "entry": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$",
+      "default": "plugin:create_plugin",
+      "description": "Python module:callable entrypoint relative to the plugin directory."
     },
     "kind": {
       "type": "string",
@@ -78,7 +84,7 @@
         "url": {
           "type": "string",
           "minLength": 1,
-          "description": "Standalone GitHub/Git repository URL for this plugin."
+          "description": "Optional external Git repository URL."
         },
         "branch": {
           "type": "string",
@@ -86,45 +92,16 @@
         }
       }
     },
-    "release": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "archive_url": { "type": "string" },
-        "tar_zst_url": { "type": "string" },
-        "sha256_url": { "type": "string" },
-        "sha256": { "type": "string" },
-        "tag": { "type": "string" }
-      }
+    "python_dependencies": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Optional extra PEP 508 Python dependency specifiers managed via uv."
     },
-    "build": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "system": {
-          "type": "string",
-          "const": "cmake",
-          "default": "cmake"
-        },
-        "entry_target": {
-          "type": "string",
-          "description": "CMake shared library target name."
-        },
-        "output_lib": {
-          "type": "string",
-          "pattern": "^(?!/)(?!.*\\.\\.).+\\.so$",
-          "description": "Relative path inside CMake build directory to the compiled .so file."
-        },
-        "cmake_args": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": []
-        },
-        "verify_cmd": {
-          "type": "string",
-          "description": "Smoke verification command executed in staging build before atomic activation (e.g. 'ctest --output-on-failure')."
-        }
-      }
+    "verify_cmd": {
+      "type": "string",
+      "default": "uv run pytest -q",
+      "description": "Offline smoke test command executed before plugin activation."
     },
     "provides": {
       "type": "array",
@@ -148,19 +125,7 @@
       "type": "array",
       "items": { "type": "string" },
       "default": [],
-      "description": "Declarative capability/permission badges audited in the Plugin Store UI."
-    },
-    "isolation": {
-      "type": "string",
-      "enum": ["in_process", "subprocess"],
-      "default": "in_process",
-      "description": "Fault isolation boundary: 'in_process' (direct dlopen + exception barrier) or 'subprocess' (isolated omnidesk-plugin-worker process over JSON RPC)."
-    },
-    "worker_transport": {
-      "type": "string",
-      "enum": ["pipe", "unix_socket"],
-      "default": "pipe",
-      "description": "IPC transport used when isolation == 'subprocess' ('pipe' NDJSON stdio or 'unix_socket' AF_UNIX stream)."
+      "description": "Declarative permission badges audited in the Plugin Store UI."
     },
     "config_schema": {
       "type": "array",

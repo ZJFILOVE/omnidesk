@@ -1,3 +1,0 @@
-# Subtitle-only NAS service; Python 3.11+. No video, ASR, or desktop dependencies.
-fastapi>=0.135.0
-uvicorn[standard]>=0.42.0
