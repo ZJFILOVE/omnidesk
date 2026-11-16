@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include "omnidesk/capabilities.hpp"
@@ -34,7 +35,7 @@ public:
     void stopBackgroundServices();
     void shutdown();
 
-    bool isInitialized() const { return initialized_; }
+    bool isInitialized() const { return initialized_.load(std::memory_order_acquire); }
 
     const std::string& exePath() const { return exe_path_; }
     const std::string& dataRoot() const { return data_root_; }
@@ -76,7 +77,7 @@ private:
                                bool all_domain_sources = false,
                                int debounce_ms = 320);
 
-    bool initialized_ = false;
+    std::atomic<bool> initialized_{false};
     bool background_services_stopped_ = false;
     std::string exe_path_;
     std::string data_root_;

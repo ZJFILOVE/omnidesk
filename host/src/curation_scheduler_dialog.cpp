@@ -348,14 +348,14 @@ CurationSchedulerManager::~CurationSchedulerManager() {
 }
 
 void CurationSchedulerManager::start() {
+    auto& kernel = HostKernel::instance();
+    if (!kernel.isInitialized()) return;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (started_) return;
         started_ = true;
+        alive_->store(true, std::memory_order_release);
     }
-
-    auto& kernel = HostKernel::instance();
-    if (!kernel.isInitialized()) return;
 
     sched_bus_token_ = kernel.bus().subscribe(
         "entity.curation.scheduler_changed",
@@ -410,6 +410,7 @@ void CurationSchedulerManager::stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         started_ = false;
+        periodic_scheduled_ = false;
     }
     {
         std::lock_guard<std::mutex> jlock(job_mutex_);

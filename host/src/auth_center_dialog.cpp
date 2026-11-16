@@ -1339,7 +1339,7 @@ void AuthCenterManager::stop() {
         terminatePidGroupGracefully(pid_to_kill);
     }
     std::unique_lock<std::mutex> lock(login_mutex_);
-    login_cv_.wait_for(lock, std::chrono::milliseconds(1500), [this]() {
+    login_cv_.wait_for(lock, std::chrono::milliseconds(5000), [this]() {
         return active_bg_threads_ == 0;
     });
 }

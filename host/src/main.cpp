@@ -15,6 +15,7 @@
 #include "omnidesk/host/kernel.hpp"
 #include "omnidesk/host/shell_activity.hpp"
 #include "omnidesk/dso_view_lease.hpp"
+#include "omnidesk/image_cache.hpp"
 #include "omnidesk/ui_theme.hpp"
 
 namespace fs = std::filesystem;
@@ -257,7 +258,8 @@ int main(int argc, char** argv) {
     kernel.startDesktopServices();
     brls::Application::getExitEvent()->subscribe([ui_loop_alive]() {
         ui_loop_alive->store(false, std::memory_order_release);
-        omnidesk::host::HostKernel::instance().stopBackgroundServices();
+        omnidesk::MPVCore::instance().shutdown();
+        omnidesk::ImageCache::instance().shutdown();
     });
 
     auto* shell = new omnidesk::host::WorkspaceShellActivity(initial_ws);

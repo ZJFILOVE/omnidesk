@@ -1078,6 +1078,15 @@ int testMediaPlaylistV1(const fs::path& tmp) {
     music_plugin::MusicEngine engine(ctx);
     engine.initializeFast();
 
+    bool observer_reentered = false;
+    const uint64_t state_obs = engine.subscribeState([&]() {
+        (void)engine.cachedDrmStatus();
+        observer_reentered = true;
+    });
+    engine.setLosslessEnabled(true);
+    REQUIRE(observer_reentered);
+    engine.unsubscribeState(state_obs);
+
     int playlist_sync_events = 0;
     uint64_t bus_tok = bus.subscribe("entity.music.playlist_synced", "test-playlist",
         [&](const std::string&, const nlohmann::json&) {

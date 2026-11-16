@@ -796,10 +796,12 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
     enqueueTask([this, track, gen]() {
         std::string eng_err;
         if (!adam_.ensureEngineRunning(eng_err)) {
-            std::lock_guard<std::mutex> lk(state_mutex_);
-            if (gen == lyric_generation_) {
-                active_session_.ok = false;
-                active_session_.error = eng_err;
+            {
+                std::lock_guard<std::mutex> lk(state_mutex_);
+                if (gen == lyric_generation_) {
+                    active_session_.ok = false;
+                    active_session_.error = eng_err;
+                }
             }
             notifyObservers();
             return;
@@ -882,6 +884,7 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
 void MusicEngine::syncExternalTrack(const MusicTrack& track_in) {
     MusicTrack track = track_in;
     uint64_t gen = 0;
+    bool lyrics_current = false;
     {
         std::lock_guard<std::mutex> lk(state_mutex_);
         if (has_active_track_ && active_track_.id == track.id) {
@@ -894,20 +897,22 @@ void MusicEngine::syncExternalTrack(const MusicTrack& track_in) {
             if (!active_lyrics_.lines.empty() &&
                 active_lyrics_.translation_status != "loading") {
                 active_track_ = track;
-                notifyObservers();
-                return;
+                lyrics_current = true;
             }
         }
-        active_track_ = track;
-        has_active_track_ = true;
-        gen = ++lyric_generation_;
-        active_lyrics_ = LyricBundle{};
-        active_lyrics_.track = track;
-        active_lyrics_.signature = computeTrackSignature(track);
-        active_lyrics_.translation_status = "loading";
-        active_lyrics_.status_text = statusLabelFor("loading");
+        if (!lyrics_current) {
+            active_track_ = track;
+            has_active_track_ = true;
+            gen = ++lyric_generation_;
+            active_lyrics_ = LyricBundle{};
+            active_lyrics_.track = track;
+            active_lyrics_.signature = computeTrackSignature(track);
+            active_lyrics_.translation_status = "loading";
+            active_lyrics_.status_text = statusLabelFor("loading");
+        }
     }
     notifyObservers();
+    if (lyrics_current) return;
 
     enqueueTask([this, track, gen]() mutable {
         if (!alive_.load(std::memory_order_acquire)) return;

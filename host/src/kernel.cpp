@@ -7,6 +7,7 @@
 #include <thread>
 #include <unistd.h>
 #include "omnidesk/host/auth_center_dialog.hpp"
+#include "omnidesk/host/curation_scheduler_dialog.hpp"
 #include "omnidesk/image_cache.hpp"
 #include "omnidesk/mpv_core.hpp"
 #include "omnidesk/playback_coordinator.hpp"
@@ -63,7 +64,7 @@ HostKernel& HostKernel::instance() {
 }
 
 bool HostKernel::init(const char* argv0) {
-    if (initialized_) {
+    if (initialized_.load(std::memory_order_acquire)) {
         return true;
     }
 
@@ -347,7 +348,7 @@ bool HostKernel::init(const char* argv0) {
         brls::Logger::warning("[HostKernel] ControlServer failed to start: {}", ctrl_err);
     }
 
-    initialized_ = true;
+    initialized_.store(true, std::memory_order_release);
     return true;
 }
 
@@ -400,15 +401,16 @@ void HostKernel::scheduleSearchHydrate(uint32_t scopes,
 }
 
 void HostKernel::startDesktopServices() {
-    if (!initialized_) return;
+    if (!initialized_.load(std::memory_order_acquire)) return;
     if (mpris_ && !mpris_->isRunning()) {
         mpris_->start();
     }
 }
 
 void HostKernel::stopBackgroundServices() {
-    if (!initialized_ || background_services_stopped_) return;
+    if (background_services_stopped_) return;
     background_services_stopped_ = true;
+    CurationSchedulerManager::instance().stop();
     AuthCenterManager::instance().stop();
     if (control_server_) {
         control_server_->stop();
@@ -416,24 +418,32 @@ void HostKernel::stopBackgroundServices() {
     if (mpris_) {
         mpris_->stop();
     }
+    const int grace_ms = JobCenter::defaultShutdownGraceMs();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(grace_ms);
+    auto remainingMs = [&deadline]() -> int {
+        const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        return rem > 0 ? static_cast<int>(rem) : 0;
+    };
     if (ui_tasks_) {
-        ui_tasks_->shutdown(250);
+        ui_tasks_->shutdown(remainingMs());
     }
     if (search_tasks_) {
-        search_tasks_->shutdown(250);
+        search_tasks_->shutdown(remainingMs());
     }
     if (workers_) {
         workers_->stopAll();
     }
     if (jobs_) {
-        jobs_->shutdown(250);
+        jobs_->shutdown(remainingMs());
     }
 }
 
 void HostKernel::shutdown() {
-    if (!initialized_) {
-        return;
-    }
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    CurationSchedulerManager::instance().stop();
+    if (!initialized_.exchange(false, std::memory_order_acq_rel)) return;
+    stopBackgroundServices();
     AuthCenterManager::instance().stop();
     if (control_server_) {
         control_server_->stop();
@@ -508,7 +518,6 @@ void HostKernel::shutdown() {
     capabilities_.reset();
     secrets_.reset();
     config_.reset();
-    initialized_ = false;
     background_services_stopped_ = false;
 }
 
