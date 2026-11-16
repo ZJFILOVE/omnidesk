@@ -237,6 +237,12 @@ void SvgIconView::draw(NVGcontext* vg,
     const int pw = std::max(1, static_cast<int>(std::round(width * scale * 2.0f)));
     const int ph = std::max(1, static_cast<int>(std::round(height * scale * 2.0f)));
 
+    if (!dirty_ && owner_vg_ == vg && nvg_tex_ > 0 && pw == rendered_w_ && ph == rendered_h_) {
+        bool known_invalid = false;
+        const int live =
+            SvgTexturePool::instance().find(vg, TextureCacheKey{source_key_, pw, ph}, known_invalid);
+        nvg_tex_ = live > 0 ? live : 0;
+    }
     if (dirty_ || owner_vg_ != vg || nvg_tex_ == 0 || pw != rendered_w_ || ph != rendered_h_) {
         resolveTexture(vg, pw, ph);
     }

@@ -147,21 +147,60 @@ uint32_t firstCodepointOf(const std::string& s) {
     return cp;
 }
 
+bool parseFenceStart(const std::string& trimmed, char& fence_ch, size_t& fence_len, std::string& lang);
+bool isFenceClose(const std::string& trimmed, char fence_ch, size_t fence_len);
+
 std::string stripHtmlComments(const std::string& input) {
+    std::vector<std::pair<size_t, size_t>> fenced_ranges;
+    size_t offset = 0;
+    size_t fence_start = 0;
+    char fence_ch = 0;
+    size_t fence_len = 0;
+    bool in_fence = false;
+    while (offset <= input.size()) {
+        const size_t line_end = input.find('\n', offset);
+        const size_t end = line_end == std::string::npos ? input.size() : line_end;
+        const std::string trimmed = trimAscii(input.substr(offset, end - offset));
+        if (!in_fence) {
+            std::string lang;
+            if (parseFenceStart(trimmed, fence_ch, fence_len, lang)) {
+                in_fence = true;
+                fence_start = offset;
+            }
+        } else if (isFenceClose(trimmed, fence_ch, fence_len)) {
+            fenced_ranges.emplace_back(fence_start, end);
+            in_fence = false;
+        }
+        if (line_end == std::string::npos) break;
+        offset = line_end + 1;
+    }
+    if (in_fence) fenced_ranges.emplace_back(fence_start, input.size());
+
     std::string out;
     out.reserve(input.size());
     size_t pos = 0;
+    size_t range_idx = 0;
     while (pos < input.size()) {
         const size_t open = input.find("<!--", pos);
         if (open == std::string::npos) {
             out.append(input, pos, std::string::npos);
             break;
         }
-        out.append(input, pos, open - pos);
+        while (range_idx < fenced_ranges.size() && fenced_ranges[range_idx].second <= open) {
+            ++range_idx;
+        }
+        if (range_idx < fenced_ranges.size() &&
+            open >= fenced_ranges[range_idx].first && open < fenced_ranges[range_idx].second) {
+            out.append(input, pos, open + 4 - pos);
+            pos = open + 4;
+            continue;
+        }
         const size_t close = input.find("-->", open + 4);
         if (close == std::string::npos) {
+            out.append(input, pos, std::string::npos);
             break;
         }
+        out.append(input, pos, open - pos);
         pos = close + 3;
     }
     return out;
@@ -2772,36 +2811,37 @@ brls::View* buildBlockView(const MarkdownBlock& blk,
             left->addView(title_v);
             hdr->addView(left);
 
-            auto* body_wrap = new brls::Box(brls::Axis::COLUMN);
-            body_wrap->setWidthPercentage(100);
-            body_wrap->setMarginTop(8.0f);
-
-            MarkdownStyle cs = style;
-            cs.font_size = std::max(13.5f, style.font_size * 0.95f);
-            cs.max_lines = 0;
-            populateBlockChildren(body_wrap, blk.children, cs, alive);
-
-            if (blk.callout_foldable && !blk.children.empty()) {
-                const bool start_collapsed = blk.callout_default_collapsed;
-                body_wrap->setVisibility(start_collapsed ? brls::Visibility::GONE
-                                                         : brls::Visibility::VISIBLE);
-                auto state = std::make_shared<bool>(start_collapsed);
-                auto* toggle_btn = ui::makeButton(start_collapsed ? "展开" : "收起", nullptr, false, 28.0f);
-                toggle_btn->setMarginLeft(8.0f);
-                toggle_btn->setShrink(0.0f);
-                toggle_btn->registerClickAction([alive, state, body_wrap, toggle_btn](brls::View*) {
-                    if (!alive || !alive->load(std::memory_order_acquire)) return true;
-                    *state = !*state;
-                    body_wrap->setVisibility(*state ? brls::Visibility::GONE
-                                                    : brls::Visibility::VISIBLE);
-                    toggle_btn->setText(*state ? "展开" : "收起");
-                    return true;
-                });
-                hdr->addView(toggle_btn);
-            }
-
             cbox->addView(hdr);
             if (!blk.children.empty()) {
+                auto* body_wrap = new brls::Box(brls::Axis::COLUMN);
+                body_wrap->setWidthPercentage(100);
+                body_wrap->setMarginTop(8.0f);
+
+                MarkdownStyle cs = style;
+                cs.font_size = std::max(13.5f, style.font_size * 0.95f);
+                cs.max_lines = 0;
+                populateBlockChildren(body_wrap, blk.children, cs, alive);
+
+                if (blk.callout_foldable) {
+                    const bool start_collapsed = blk.callout_default_collapsed;
+                    body_wrap->setVisibility(start_collapsed ? brls::Visibility::GONE
+                                                             : brls::Visibility::VISIBLE);
+                    auto state = std::make_shared<bool>(start_collapsed);
+                    auto* toggle_btn =
+                        ui::makeButton(start_collapsed ? "展开" : "收起", nullptr, false, 28.0f);
+                    toggle_btn->setMarginLeft(8.0f);
+                    toggle_btn->setShrink(0.0f);
+                    toggle_btn->registerClickAction(
+                        [alive, state, body_wrap, toggle_btn](brls::View*) {
+                            if (!alive || !alive->load(std::memory_order_acquire)) return true;
+                            *state = !*state;
+                            body_wrap->setVisibility(*state ? brls::Visibility::GONE
+                                                            : brls::Visibility::VISIBLE);
+                            toggle_btn->setText(*state ? "展开" : "收起");
+                            return true;
+                        });
+                    hdr->addView(toggle_btn);
+                }
                 cbox->addView(body_wrap);
             }
             return cbox;

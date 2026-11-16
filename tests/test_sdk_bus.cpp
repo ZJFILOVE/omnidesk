@@ -381,6 +381,15 @@ int main() {
         omnidesk::ImageCacheConfig ic_cfg;
         ic_cfg.cache_dir = (tmp_root / "imgcache").string();
         ic_cfg.max_disk_bytes = 128;
+        TEST_CHECK(omnidesk::ImageCache::normalizeImageUrl(
+                       "images/pic.png", "/tmp/omnidesk-doc/readme.md") ==
+                   "/tmp/omnidesk-doc/images/pic.png");
+        TEST_CHECK(omnidesk::ImageCache::normalizeImageUrl(
+                       "images/pic%20one.png", "file:///tmp/omnidesk-doc/readme.md") ==
+                   "/tmp/omnidesk-doc/images/pic one.png");
+        TEST_CHECK(omnidesk::ImageCache::normalizeImageUrl(
+                       "images/pic.png", "https://example.com/notes/readme.md") ==
+                   "https://example.com/notes/images/pic.png");
         omnidesk::ImageCache cache(ic_cfg);
 
         std::vector<uint8_t> blob1(60, 0x11), blob2(60, 0x22), blob3(60, 0x33), blob3_small(24, 0x44);
@@ -2623,6 +2632,32 @@ $$
         TEST_CHECK(has_table);
         TEST_CHECK(has_code);
         TEST_CHECK(has_math_blk);
+
+        const auto comment_blocks = omnidesk::parseMarkdownBlocks(
+            "```html\n<!-- keep -->\n```\n\nafter\n");
+        bool kept_code_comment = false;
+        bool kept_tail = false;
+        for (const auto& b : comment_blocks) {
+            if (b.kind == omnidesk::MarkdownBlockKind::CodeBlock &&
+                b.text.find("<!-- keep -->") != std::string::npos) {
+                kept_code_comment = true;
+            }
+            if (b.kind == omnidesk::MarkdownBlockKind::Paragraph && b.text == "after") {
+                kept_tail = true;
+            }
+        }
+        TEST_CHECK(kept_code_comment);
+        TEST_CHECK(kept_tail);
+
+        const auto unclosed_comment_blocks =
+            omnidesk::parseMarkdownBlocks("before\n\n<!-- unclosed\n\nstill visible\n");
+        bool kept_unclosed_tail = false;
+        for (const auto& b : unclosed_comment_blocks) {
+            if (b.text.find("still visible") != std::string::npos) {
+                kept_unclosed_tail = true;
+            }
+        }
+        TEST_CHECK(kept_unclosed_tail);
 
         // Excerpt sanitizer strips # headings and [!callout] header tags while preserving clean inline *emphasis*
         const std::string ex = omnidesk::sanitizeMarkdownExcerpt(doc_md, 120);

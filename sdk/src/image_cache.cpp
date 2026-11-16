@@ -1008,6 +1008,26 @@ std::string ImageCache::normalizeImageUrl(const std::string& raw, const std::str
         replaceAllInPlace(u, " ", "%20");
         return u;
     }
+    if (!u.empty() && u.front() != '/') {
+        std::string base_path;
+        if (startsWithNoCase(base_url, "file://")) {
+            base_path = base_url.substr(7);
+            if (startsWithNoCase(base_path, "localhost/")) {
+                base_path = base_path.substr(9);
+            }
+            base_path = percentDecodeAscii(base_path);
+        } else if (!base_url.empty() && base_url.front() == '/' &&
+                   (base_url.size() == 1 || base_url[1] != '/')) {
+            base_path = base_url;
+        }
+        if (!base_path.empty()) {
+            std::error_code ec;
+            fs::path base(base_path);
+            if (!fs::is_directory(base, ec)) base = base.parent_path();
+            const fs::path resolved = (base / fs::path(percentDecodeAscii(u))).lexically_normal();
+            return resolved.generic_string();
+        }
+    }
     if (!base_url.empty() && (startsWithNoCase(base_url, "http://") || startsWithNoCase(base_url, "https://"))) {
         const size_t sep = base_url.find("://");
         const size_t host_start = sep + 3;
@@ -1296,9 +1316,12 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
             std::lock_guard lk(impl_->inflight_mutex);
             auto it = impl_->inflight_map.find(raw_key);
             if (it != impl_->inflight_map.end() && it->second) {
-                it->second->waiters.push_back(
-                    Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
-                return cancel;
+                if (!it->second->shared_cancel->isCancelled()) {
+                    it->second->waiters.push_back(
+                        Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
+                    return cancel;
+                }
+                impl_->inflight_map.erase(it);
             }
             inflight = std::make_shared<Impl::InFlightFetch>();
             inflight->waiters.push_back(
@@ -1342,9 +1365,12 @@ std::shared_ptr<CancelToken> ImageCache::fetchDecoded(
         std::lock_guard lk(impl_->inflight_mutex);
         auto it = impl_->inflight_map.find(raw_key);
         if (it != impl_->inflight_map.end() && it->second) {
-            it->second->waiters.push_back(
-                Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
-            return cancel;
+            if (!it->second->shared_cancel->isCancelled()) {
+                it->second->waiters.push_back(
+                    Impl::CoalescedWaiter{cancel, max_width, max_height, std::move(on_done)});
+                return cancel;
+            }
+            impl_->inflight_map.erase(it);
         }
         inflight = std::make_shared<Impl::InFlightFetch>();
         inflight->waiters.push_back(
