@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>万象 · OmniDesk</title>
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('omnidesk:theme');
+          var theme = saved === 'graphite' ? 'graphite' : 'paper';
+          var root = document.documentElement;
+          root.setAttribute('data-theme', theme);
+          root.style.colorScheme = theme === 'graphite' ? 'dark' : 'light';
+          root.style.backgroundColor = theme === 'graphite' ? '#181718' : '#F6F5F3';
+        } catch (_err) {
+          var fallbackRoot = document.documentElement;
+          fallbackRoot.setAttribute('data-theme', 'paper');
+          fallbackRoot.style.colorScheme = 'light';
+          fallbackRoot.style.backgroundColor = '#F6F5F3';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

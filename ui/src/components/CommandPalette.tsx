@@ -1,0 +1,333 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
+import { Command, CornerDownLeft, Search, X } from 'lucide-react';
+import { useImeGuard } from '../hooks/useImeGuard';
+import { DOMAIN_CSS_VARS, WORKBENCHES } from '../theme';
+import type { ContentDomain, ThemeMode, WorkbenchId } from '../types';
+
+export type CommandPaletteCategory =
+  | 'workbench'
+  | 'theme'
+  | 'dock'
+  | 'navigation'
+  | 'search'
+  | 'plugin';
+
+export interface CommandPaletteItem {
+  id: string;
+  title: string;
+  subtitle?: string;
+  category: CommandPaletteCategory;
+  shortcut?: string;
+  domain?: ContentDomain;
+  keywords?: string[];
+  action?: () => void;
+}
+
+export interface CommandPaletteProps {
+  open: boolean;
+  onClose: () => void;
+  onCommand?: (commandId: string) => void;
+  activeWorkbench?: WorkbenchId;
+  theme?: ThemeMode;
+  dockOpen?: boolean;
+  commands?: CommandPaletteItem[];
+  initialQuery?: string;
+}
+
+const CATEGORY_LABELS: Record<CommandPaletteCategory, string> = {
+  workbench: '工作台',
+  theme: '外观主题',
+  dock: '伴读栏',
+  navigation: '键盘导航',
+  search: '检索过滤',
+  plugin: '插件与策展',
+};
+
+const CORE_COMMANDS: readonly CommandPaletteItem[] = [
+  { id: 'dock:toggle', title: '开关 F8 无遮罩 AI 伴读栏', subtitle: '随宽高比 (>= 1.45) 在右侧与底部之间自适应停靠', category: 'dock', shortcut: 'F8', domain: 'core', keywords: ['companion', 'dock', 'ai', 'f8', '伴读'] },
+  { id: 'hints:open', title: '触发全屏字母闪跳 (Hint Overlay)', subtitle: '显示可聚焦卡片字母角标，按对应字母立即跳转', category: 'navigation', shortcut: 'f', domain: 'core', keywords: ['hint', 'jump', 'focus', '闪跳', '定位'] },
+  { id: 'help:open', title: '查看键盘导航与快捷键帮助', subtitle: '包含工作台快捷键、2D 空间焦点与 IME 隔离说明', category: 'navigation', shortcut: '?', domain: 'core', keywords: ['help', 'keyboard', 'shortcuts', '帮助', '快捷键'] },
+  { id: 'search:focus', title: '聚焦当前工作台搜索框', subtitle: '按标题、来源或关键词即时过滤当前列表', category: 'search', shortcut: '/', domain: 'core', keywords: ['search', 'filter', '搜索', '过滤'] },
+  { id: 'focus:cycle-zone', title: '在主舞台与 F8 伴读栏间切换焦点区', subtitle: '切换主内容区域与伴读输入区域', category: 'navigation', shortcut: 'Ctrl+Tab', domain: 'core', keywords: ['zone', 'focus', 'tab', '焦点'] },
+  { id: 'theme:toggle', title: '切换 Paper / Graphite 主题', subtitle: 'Paper #F6F5F3 纸感亮色 ↔ Graphite #181718 石墨深色', category: 'theme', shortcut: 't', domain: 'core', keywords: ['theme', 'paper', 'graphite', 'dark', 'light', '主题'] },
+  { id: 'theme:paper', title: '切换至 Paper 纸感亮色 (#F6F5F3)', subtitle: '暖纸底色与 1px 细线高对比阅读画布', category: 'theme', domain: 'core', keywords: ['paper', 'light', '亮色'] },
+  { id: 'theme:graphite', title: '切换至 Graphite 石墨深色 (#181718)', subtitle: '低眩光石墨深色护眼模式', category: 'theme', domain: 'core', keywords: ['graphite', 'dark', '深色'] },
+  { id: 'curate:sync-archive', title: '同步 obsidian-vault & music-daily 历史归档', subtitle: '本地快进拉取双仓并回灌历史推荐记录', category: 'plugin', domain: 'core', keywords: ['obsidian', 'music-daily', 'rehydrate', '同步', '归档'] },
+  { id: 'curate:run-daily', title: '执行今日不重复策展管线 (daily_immutable)', subtitle: '生成每日早报、科学期刊、每日 5 首与英语精读', category: 'plugin', domain: 'core', keywords: ['daily', 'curation', '策展', '精选'] },
+  { id: 'plugin:verify-all', title: '巡检零 ABI Python 插件健康状态', subtitle: '检查已启用插件能力契约与热重载状态', category: 'plugin', domain: 'core', keywords: ['plugin', 'health', 'verify', '插件', '巡检'] },
+];
+
+export function buildDefaultPaletteCommands(): CommandPaletteItem[] {
+  const workbenchCommands: CommandPaletteItem[] = WORKBENCHES.map((wb) => ({
+    id: `workbench:${wb.id}`,
+    title: `切换到 ${wb.label} (${wb.shortLabel})`,
+    subtitle: wb.description,
+    category: 'workbench',
+    shortcut: wb.shortcut,
+    domain: wb.domain,
+    keywords: [wb.id, wb.shortLabel, wb.label, 'workbench', '切换'],
+  }));
+  return [...workbenchCommands, ...CORE_COMMANDS];
+}
+
+export const DEFAULT_PALETTE_COMMANDS: readonly CommandPaletteItem[] = buildDefaultPaletteCommands();
+
+function matchesQuery(cmd: CommandPaletteItem, normalizedQuery: string): boolean {
+  if (!normalizedQuery) {
+    return true;
+  }
+  const haystack = [
+    cmd.id,
+    cmd.title,
+    cmd.subtitle ?? '',
+    cmd.category,
+    CATEGORY_LABELS[cmd.category],
+    cmd.shortcut ?? '',
+    ...(cmd.keywords ?? []),
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  return normalizedQuery
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((token) => haystack.includes(token));
+}
+
+export function CommandPalette({
+  open,
+  onClose,
+  onCommand,
+  activeWorkbench,
+  theme,
+  dockOpen,
+  commands,
+  initialQuery = '',
+}: CommandPaletteProps) {
+  const [query, setQuery] = useState(initialQuery);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const ime = useImeGuard();
+
+  const resolvedCommands = useMemo<readonly CommandPaletteItem[]>(
+    () => (commands && commands.length > 0 ? commands : DEFAULT_PALETTE_COMMANDS),
+    [commands],
+  );
+
+  const filteredCommands = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return resolvedCommands.filter((cmd) => matchesQuery(cmd, normalized));
+  }, [resolvedCommands, query]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setQuery(initialQuery);
+    setActiveIndex(0);
+    inputRef.current?.focus();
+  }, [open, initialQuery]);
+
+  useEffect(() => {
+    if (filteredCommands.length === 0) {
+      setActiveIndex(0);
+    } else if (activeIndex >= filteredCommands.length) {
+      setActiveIndex(filteredCommands.length - 1);
+    }
+  }, [filteredCommands.length, activeIndex]);
+
+  if (!open) {
+    return null;
+  }
+
+  const executeCommand = (cmd: CommandPaletteItem) => {
+    cmd.action?.();
+    onCommand?.(cmd.id);
+    onClose();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (ime.shouldIgnoreShortcut(event)) {
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key === 'ArrowDown' || (event.ctrlKey && event.key.toLowerCase() === 'n')) {
+      event.preventDefault();
+      if (filteredCommands.length > 0) {
+        setActiveIndex((prev) => (prev + 1) % filteredCommands.length);
+      }
+      return;
+    }
+    if (event.key === 'ArrowUp' || (event.ctrlKey && event.key.toLowerCase() === 'p')) {
+      event.preventDefault();
+      if (filteredCommands.length > 0) {
+        setActiveIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length);
+      }
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setActiveIndex(0);
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      if (filteredCommands.length > 0) {
+        setActiveIndex(filteredCommands.length - 1);
+      }
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const target = filteredCommands[activeIndex] ?? filteredCommands[0];
+      if (target) {
+        executeCommand(target);
+      }
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--backdrop-scrim)] px-4 pt-[12vh]"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+      onKeyDown={handleKeyDown}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="全局命令面板"
+        data-testid="command-palette-dialog"
+        className="omni-theme-surface w-full max-w-2xl overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
+      >
+        <div className="flex items-center gap-2.5 border-b border-[var(--border-line)] bg-[var(--bg-canvas)] px-4 py-3">
+          <Search className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setActiveIndex(0);
+            }}
+            {...ime.compositionProps}
+            placeholder="输入命令、工作台名称或快捷键 (Ctrl+K)..."
+            aria-label="命令搜索"
+            aria-activedescendant={
+              filteredCommands[activeIndex]
+                ? `omni-cmd-${filteredCommands[activeIndex].id}`
+                : undefined
+            }
+            className="w-full bg-transparent text-sm text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
+          />
+          {ime.isComposing && (
+            <span className="shrink-0 rounded border border-[var(--border-line)] bg-[var(--status-info-bg)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--status-info-fg)]">
+              IME
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭命令面板"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-[var(--text-muted)] hover:border-[var(--border-line)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        {(activeWorkbench || theme || typeof dockOpen === 'boolean') && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-line)] bg-[var(--bg-soft)] px-4 py-1.5 text-[11px] text-[var(--text-muted)]">
+            {activeWorkbench && <span>当前工作台：{activeWorkbench}</span>}
+            {theme && <span>主题：{theme}</span>}
+            {typeof dockOpen === 'boolean' && (
+              <span>伴读栏：{dockOpen ? '已展开' : '已收起'}</span>
+            )}
+          </div>
+        )}
+
+        <div role="listbox" aria-label="可用命令列表" className="max-h-[54vh] overflow-y-auto p-1.5">
+          {filteredCommands.length === 0 ? (
+            <div className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">
+              未找到匹配“{query}”的命令
+            </div>
+          ) : (
+            filteredCommands.map((cmd, idx) => {
+              const selected = idx === activeIndex;
+              const domainColor = cmd.domain ? DOMAIN_CSS_VARS[cmd.domain] : 'var(--domain-core)';
+              return (
+                <button
+                  key={cmd.id}
+                  id={`omni-cmd-${cmd.id}`}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  onMouseEnter={() => setActiveIndex(idx)}
+                  onClick={() => executeCommand(cmd)}
+                  className={[
+                    'flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
+                    selected
+                      ? 'bg-[var(--bg-active)] ring-1 ring-inset ring-[var(--focus-ring)]'
+                      : 'hover:bg-[var(--hover-fill)]',
+                  ].join(' ')}
+                >
+                  <div className="flex min-w-0 items-start gap-2.5">
+                    <span
+                      aria-hidden="true"
+                      className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+                      style={{ backgroundColor: domainColor }}
+                    />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium text-[var(--text-primary)]">
+                          {cmd.title}
+                        </span>
+                        <span className="shrink-0 rounded border border-[var(--border-line)] bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                          {CATEGORY_LABELS[cmd.category]}
+                        </span>
+                      </div>
+                      {cmd.subtitle && (
+                        <p className="mt-0.5 truncate text-xs text-[var(--text-muted)]">
+                          {cmd.subtitle}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {cmd.shortcut && (
+                      <kbd className="rounded border border-[var(--keycap-border)] bg-[var(--keycap-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--keycap-fg)] shadow-[0_1px_0_var(--keycap-shadow)]">
+                        {cmd.shortcut}
+                      </kbd>
+                    )}
+                    {selected && (
+                      <CornerDownLeft className="h-3.5 w-3.5 text-[var(--focus-ring)]" aria-hidden="true" />
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <div className="flex items-center justify-between border-t border-[var(--border-line)] bg-[var(--bg-soft)] px-4 py-2 text-[11px] text-[var(--text-muted)]">
+          <span className="inline-flex items-center gap-1">
+            <Command className="h-3 w-3" aria-hidden="true" />
+            <span>↑↓ 导航 · Enter 执行 · Esc 关闭</span>
+          </span>
+          <span>共 {filteredCommands.length} 项</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default CommandPalette;

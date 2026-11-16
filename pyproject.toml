@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omnidesk"
+version = "0.2.0"
+description = "OmniDesk v2 zero-ABI pure Python microkernel, plugin SDK, and CLI"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2",
+]
+
+[project.scripts]
+omnidesk-pm = "omnidesk_core.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.setuptools]
+packages = ["omnidesk_core", "omnidesk_sdk", "omnidesk_sdk.engines"]
+
+[tool.setuptools.package-dir]
+omnidesk_core = "core/omnidesk_core"
+omnidesk_sdk = "omnidesk_sdk"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "core"]
+asyncio_default_fixture_loop_scope = "function"

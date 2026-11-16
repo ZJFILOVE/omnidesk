@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "id": "plugin-demo",
+  "name": "OmniDesk Demo Plugin",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "core",
+  "author": "OmniDesk",
+  "description": "Minimal Protocol v2 reference plugin providing demo.echo.v1 and a declarative workspace tab descriptor.",
+  "provides": [
+    "demo.echo.v1"
+  ],
+  "consumes": [],
+  "permissions": [
+    "config:read",
+    "config:write"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "prefix",
+      "label": "回显前缀",
+      "type": "string",
+      "default": "echo",
+      "description": "Prefix prepended to echoed messages returned by demo.echo.v1"
+    },
+    {
+      "key": "uppercase",
+      "label": "转为大写",
+      "type": "bool",
+      "default": false,
+      "description": "Convert echoed text to uppercase before returning"
+    }
+  ]
+}

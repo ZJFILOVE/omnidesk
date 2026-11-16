@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "id": "plugin-magpie-agent",
+  "name": "Magpie AI Agent Router",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "provider",
+  "domain": "core",
+  "author": "OmniDesk",
+  "description": "Reads local magpie harnesses/models/quotas and routes requests through group/omnidesk-active.",
+  "provides": [
+    "llm.router.v1",
+    "ai.agent.v1",
+    "ai.curation.v1",
+    "llm.chat.v1",
+    "llm.translate.v1"
+  ],
+  "consumes": [],
+  "permissions": [
+    "process:magpie",
+    "network:loopback",
+    "config:read",
+    "config:write",
+    "secret:vault"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "magpie_bin",
+      "label": "Magpie CLI 路径",
+      "type": "string",
+      "default": "magpie",
+      "description": "Executable name on PATH or absolute path to magpie"
+    },
+    {
+      "key": "routing_strategy",
+      "label": "路由调度策略",
+      "type": "select",
+      "default": "order",
+      "options": [
+        "manual",
+        "order",
+        "smart",
+        "usage",
+        "pace"
+      ],
+      "description": "Magpie group routing policy for group/omnidesk-active"
+    },
+    {
+      "key": "gateway_key",
+      "label": "Magpie Gateway Key（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault (never written to plain config or logs)"
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-surface: var(--bg-surface);
+  --color-soft: var(--bg-soft);
+  --color-active: var(--bg-active);
+  --color-line: var(--border-line);
+  --color-ink: var(--text-primary);
+  --color-muted: var(--text-muted);
+  --color-focus: var(--focus-ring);
+  --color-domain-media: var(--domain-media);
+  --color-domain-text: var(--domain-text);
+  --color-domain-book: var(--domain-book);
+  --color-domain-core: var(--domain-core);
+  --font-sans: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root,
+[data-theme="paper"] {
+  --bg-canvas: #F6F5F3;
+  --bg-surface: #FCFBF9;
+  --bg-soft: #F1EFEC;
+  --bg-active: #F9E7ED;
+  --border-line: rgba(36, 33, 29, 0.12);
+  --border-strong: rgba(36, 33, 29, 0.22);
+
+  --text-primary: #222120;
+  --text-muted: #66625D;
+  --text-subtle: #8A847D;
+
+  --hover-fill: rgba(28, 26, 23, 0.045);
+  --backdrop-scrim: rgba(24, 23, 22, 0.44);
+
+  --focus-ring: #2563EB;
+  --focus-halo: rgba(255, 255, 255, 0.94);
+  --focus-glow: rgba(37, 99, 235, 0.22);
+  --focus-fill: rgba(37, 99, 235, 0.06);
+
+  --domain-media: #BA345A;
+  --domain-text: #2260AA;
+  --domain-book: #1E7244;
+  --domain-core: #AC5F0C;
+
+  --status-ok-bg: #E7F5ED;
+  --status-ok-fg: #1E7244;
+  --status-warn-bg: #FCF2DF;
+  --status-warn-fg: #AC5F0C;
+  --status-err-bg: #FCEAEE;
+  --status-err-fg: #B6263A;
+  --status-info-bg: #E8F2FD;
+  --status-info-fg: #2260AA;
+
+  --keycap-bg: #F8F7F4;
+  --keycap-border: #D6D1C8;
+  --keycap-shadow: #C7C1B6;
+  --keycap-fg: #44403C;
+
+  --scrollbar-thumb: rgba(92, 88, 82, 0.34);
+  --scrollbar-track: rgba(36, 33, 29, 0.04);
+}
+
+[data-theme="graphite"] {
+  --bg-canvas: #181718;
+  --bg-surface: #232122;
+  --bg-soft: #2B2729;
+  --bg-active: #422630;
+  --border-line: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.19);
+
+  --text-primary: #ECEEF2;
+  --text-muted: #9EA4B0;
+  --text-subtle: #787E8A;
+
+  --hover-fill: rgba(255, 255, 255, 0.055);
+  --backdrop-scrim: rgba(9, 10, 14, 0.68);
+
+  --focus-ring: #60A5FA;
+  --focus-halo: rgba(24, 23, 24, 0.94);
+  --focus-glow: rgba(96, 165, 250, 0.28);
+  --focus-fill: rgba(96, 165, 250, 0.10);
+
+  --domain-media: #F486A8;
+  --domain-text: #7DB8FA;
+  --domain-book: #6ED69C;
+  --domain-core: #F2B862;
+
+  --status-ok-bg: #183025;
+  --status-ok-fg: #6ED69C;
+  --status-warn-bg: #362916;
+  --status-warn-fg: #F5BA62;
+  --status-err-bg: #3A1D23;
+  --status-err-fg: #F88696;
+  --status-info-bg: #1B2A3E;
+  --status-info-fg: #82BAF8;
+
+  --keycap-bg: #272527;
+  --keycap-border: #3F3B40;
+  --keycap-shadow: #100F10;
+  --keycap-fg: #D5D8DF;
+
+  --scrollbar-thumb: rgba(186, 194, 210, 0.34);
+  --scrollbar-track: rgba(255, 255, 255, 0.04);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html,
+  body,
+  .omni-theme-surface {
+    transition:
+      background-color 140ms ease,
+      color 140ms ease,
+      border-color 140ms ease;
+  }
+}
+
+[data-focus-id] {
+  outline: none;
+  position: relative;
+}
+
+.omni-focus-ring,
+[data-focus-id][data-focused="true"],
+[data-focus-id][data-spatial-focused="true"] {
+  box-shadow:
+    0 0 0 1.5px var(--focus-halo),
+    0 0 0 3.5px var(--focus-ring),
+    0 0 0 6px var(--focus-glow);
+  background-color: color-mix(in srgb, var(--focus-fill) 100%, transparent);
+}
+
+.omni-keycap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  background-color: var(--keycap-bg);
+  color: var(--keycap-fg);
+  border: 1px solid var(--keycap-border);
+  box-shadow: 0 1px 0 var(--keycap-shadow);
+  user-select: none;
+  white-space: nowrap;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 9999px;
+}
