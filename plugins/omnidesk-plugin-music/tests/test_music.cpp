@@ -27,6 +27,7 @@
 #include <omnidesk/domain_registry.hpp>
 #include <omnidesk/entity_bus.hpp>
 #include <omnidesk/image_cache.hpp>
+#include <omnidesk/mpv_core.hpp>
 #include <omnidesk/plugin.hpp>
 #include <omnidesk/plugin_abi.h>
 #include <poll.h>
@@ -51,6 +52,22 @@ namespace fs = std::filesystem;
     } while (0)
 
 namespace {
+
+int testAudioOnlyLoadfileOptions() {
+    omnidesk::MediaRequestOptions music;
+    music.url = "https://127.0.0.1:20025/api/v1/playback/sess-test/audio";
+    music.hwdec = false;
+    const std::string music_opts = omnidesk::MPVCore::buildLoadfileOptions(music);
+    REQUIRE(music_opts.find("vid=no") != std::string::npos);
+    REQUIRE(music_opts.find("audio-display=no") != std::string::npos);
+
+    omnidesk::MediaRequestOptions video = music;
+    video.hwdec = true;
+    const std::string video_opts = omnidesk::MPVCore::buildLoadfileOptions(video);
+    REQUIRE(video_opts.find("vid=no") == std::string::npos);
+    REQUIRE(video_opts.find("audio-display=no") == std::string::npos);
+    return 0;
+}
 
 class MockAdamTlsServer {
 public:
@@ -1540,6 +1557,7 @@ int main(int argc, char** argv) {
     fs::create_directories(tmp);
 
     int rc = 0;
+    if (rc == 0) rc = testAudioOnlyLoadfileOptions();
     if (rc == 0) rc = testLrcAndBilingualParser();
     if (rc == 0) rc = testLrclibExactMatch();
     if (rc == 0) rc = testMockAdamAndLlmPipeline(tmp);

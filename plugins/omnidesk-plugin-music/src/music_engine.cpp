@@ -792,20 +792,6 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
     }
     notifyObservers();
 
-    // Start async lyrics loading
-    enqueueTask([this, track, gen]() {
-        LyricBundle b = getLyricsForTrack(track, false, false, gen);
-        bool notify = false;
-        {
-            std::lock_guard<std::mutex> lk(state_mutex_);
-            if (gen == lyric_generation_ && alive_.load(std::memory_order_acquire)) {
-                active_lyrics_ = std::move(b);
-                notify = true;
-            }
-        }
-        if (notify) notifyObservers();
-    });
-
     // Start async FairPlay playback session + MPVCore load
     enqueueTask([this, track, gen]() {
         std::string eng_err;
@@ -876,6 +862,20 @@ void MusicEngine::playTrack(const MusicTrack& track_in) {
             });
         }
         notifyObservers();
+    });
+
+    // Lyrics can perform slow network lookups; never let them delay audio startup.
+    enqueueTask([this, track, gen]() {
+        LyricBundle b = getLyricsForTrack(track, false, false, gen);
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            if (gen == lyric_generation_ && alive_.load(std::memory_order_acquire)) {
+                active_lyrics_ = std::move(b);
+                notify = true;
+            }
+        }
+        if (notify) notifyObservers();
     });
 }
 

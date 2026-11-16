@@ -826,6 +826,10 @@ std::string MPVCore::buildLoadfileOptions(const MediaRequestOptions& opts) {
         parts.push_back("network-timeout=10");
     }
     parts.push_back(std::string("hwdec=") + (opts.hwdec ? "\"auto-safe\"" : "\"no\""));
+    if (!opts.hwdec && opts.audio_url.empty()) {
+        parts.push_back("vid=no");
+        parts.push_back("audio-display=no");
+    }
     if (opts.start_seconds > 0.0) {
         std::ostringstream ss;
         ss << "start=" << opts.start_seconds;
