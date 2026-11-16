@@ -31,6 +31,24 @@ namespace fs = std::filesystem;
 namespace omnidesk::host {
 namespace {
 
+class ScopedLifetimeDialog : public brls::Dialog {
+  public:
+    ScopedLifetimeDialog(brls::Box* content, std::shared_ptr<std::atomic<bool>> alive)
+        : brls::Dialog(content), alive_(std::move(alive)) {}
+
+    ~ScopedLifetimeDialog() override {
+        if (alive_) alive_->store(false, std::memory_order_release);
+    }
+
+    void dismiss(std::function<void(void)> cb = [] {}) override {
+        if (alive_) alive_->store(false, std::memory_order_release);
+        brls::Dialog::dismiss(std::move(cb));
+    }
+
+  private:
+    std::shared_ptr<std::atomic<bool>> alive_;
+};
+
 int64_t nowEpochMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -1612,6 +1630,7 @@ void openWeReadImportDialog(const std::string& current_group_id,
     if (!brls::Application::getPlatform()) return;
 
     struct ImportState {
+        std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
         std::string active_dir;
         std::string filter_ext;
         std::vector<LocalCandidateBook> candidates;
@@ -1651,6 +1670,7 @@ void openWeReadImportDialog(const std::string& current_group_id,
     root->addView(st->dir_label);
 
     auto rebuildList = std::make_shared<std::function<void(bool)>>();
+    std::weak_ptr<std::function<void(bool)>> rebuild_ref = rebuildList;
 
     // Preset directory bar
     auto* preset_row = new brls::Box(brls::Axis::ROW);
@@ -1680,6 +1700,7 @@ void openWeReadImportDialog(const std::string& current_group_id,
             plat->getImeManager()->openForText(
                 [st, current_group_id, on_imported, rebuildList](std::string raw) {
                     brls::sync([st, current_group_id, on_imported, rebuildList, raw]() {
+                        if (!st->alive->load(std::memory_order_acquire)) return;
                         std::string p = canonicalOrNormalized(raw);
                         if (p.empty()) return;
                         std::error_code ec2;
@@ -1780,7 +1801,11 @@ void openWeReadImportDialog(const std::string& current_group_id,
     scroll->setContentView(st->list_box);
     root->addView(scroll);
 
-    *rebuildList = [st, current_group_id, on_imported, rebuildList](bool rescan) {
+    *rebuildList = [st, current_group_id, on_imported, rebuild_ref](bool rescan) {
+        if (!st->alive->load(std::memory_order_acquire)) return;
+        auto refresh = [rebuild_ref](bool force_rescan) {
+            if (auto fn = rebuild_ref.lock()) (*fn)(force_rescan);
+        };
         if (rescan) {
             st->candidates = BookLibraryStore::scanCandidateBooksInDir(st->active_dir, 1);
         }
@@ -1821,10 +1846,10 @@ void openWeReadImportDialog(const std::string& current_group_id,
             auto* btns = new brls::Box(brls::Axis::ROW);
             btns->setShrink(0.0f);
             auto* tog_btn = ui::makeButton(checked ? "取消勾选" : "勾选入架",
-                [st, fp = cand.file_path, rebuildList]() {
+                [st, fp = cand.file_path, refresh]() {
                     if (st->selected_paths.count(fp)) st->selected_paths.erase(fp);
                     else st->selected_paths.insert(fp);
-                    (*rebuildList)(false);
+                    refresh(false);
                 }, checked, 30.0f);
             tog_btn->setMarginRight(6);
             btns->addView(tog_btn);
@@ -1851,7 +1876,7 @@ void openWeReadImportDialog(const std::string& current_group_id,
 
     (*rebuildList)(true);
 
-    auto* dialog = new brls::Dialog(root);
+    auto* dialog = new ScopedLifetimeDialog(root, st->alive);
     st->dialog = dialog;
     if (auto* applet = dynamic_cast<brls::Box*>(dialog->getView("brls/dialog/applet"))) {
         applet->setWidth(dlg_w);
@@ -1873,6 +1898,7 @@ void openWeReadBookDetailDialog(const BookItem& book,
     if (!brls::Application::getPlatform()) return;
 
     struct DetailState {
+        std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
         brls::Dialog* dialog = nullptr;
         brls::Box* body = nullptr;
     };
@@ -1890,7 +1916,12 @@ void openWeReadBookDetailDialog(const BookItem& book,
     root->addView(st->body);
 
     auto rebuild = std::make_shared<std::function<void()>>();
-    *rebuild = [st, book, all_vocab, on_open_reader, on_open_notebook, on_changed, rebuild]() {
+    std::weak_ptr<std::function<void()>> rebuild_ref = rebuild;
+    *rebuild = [st, book, all_vocab, on_open_reader, on_open_notebook, on_changed, rebuild_ref]() {
+        if (!st->alive->load(std::memory_order_acquire)) return;
+        auto refresh = [rebuild_ref]() {
+            if (auto fn = rebuild_ref.lock()) (*fn)();
+        };
         st->body->clearViews();
         auto& lib = BookLibraryStore::instance();
         const BookShelfEntry entry = lib.entryForBook(book);
@@ -1953,10 +1984,10 @@ void openWeReadBookDetailDialog(const BookItem& book,
         primary_btns->addView(note_btn);
 
         auto* pin_btn = ui::makeButton(entry.pinned ? "取消置顶" : "置顶到书架",
-            [book, next_pin = !entry.pinned, on_changed, rebuild]() {
+            [book, next_pin = !entry.pinned, on_changed, refresh]() {
                 BookLibraryStore::instance().setBookPinned(book, next_pin);
                 if (on_changed) on_changed();
-                (*rebuild)();
+                refresh();
             }, false, 36.0f);
         pin_btn->setMarginRight(8);
         primary_btns->addView(pin_btn);
@@ -1987,10 +2018,10 @@ void openWeReadBookDetailDialog(const BookItem& book,
                                 (code == "unread" && eff_st == BookReadingStatus::Unread && entry.status_override == "unread") ||
                                 (code == "reading" && eff_st == BookReadingStatus::Reading && entry.status_override == "reading") ||
                                 (code == "finished" && eff_st == BookReadingStatus::Finished && entry.status_override == "finished");
-            auto* sb = ui::makeButton(lbl, [book, code, on_changed, rebuild]() {
+            auto* sb = ui::makeButton(lbl, [book, code, on_changed, refresh]() {
                 BookLibraryStore::instance().setBookStatus(book, code);
                 if (on_changed) on_changed();
-                (*rebuild)();
+                refresh();
             }, active, 32.0f);
             sb->setMarginRight(8);
             st_row->addView(sb);
@@ -2006,37 +2037,38 @@ void openWeReadBookDetailDialog(const BookItem& book,
         YGNodeStyleSetFlexWrap(grp_row->getYGNode(), YGWrapWrap);
         grp_row->setMarginTop(8);
 
-        auto* ungrp = ui::makeButton("未分组", [book, on_changed, rebuild]() {
+        auto* ungrp = ui::makeButton("未分组", [book, on_changed, refresh]() {
             BookLibraryStore::instance().setBookGroup(book, "");
             if (on_changed) on_changed();
-            (*rebuild)();
+            refresh();
         }, entry.group_id.empty(), 32.0f);
         ungrp->setMarginRight(6);
         ungrp->setMarginBottom(6);
         grp_row->addView(ungrp);
 
         for (const auto& g : groups) {
-            auto* gb = ui::makeButton(g.name, [book, gid = g.id, on_changed, rebuild]() {
+            auto* gb = ui::makeButton(g.name, [book, gid = g.id, on_changed, refresh]() {
                 BookLibraryStore::instance().setBookGroup(book, gid);
                 if (on_changed) on_changed();
-                (*rebuild)();
+                refresh();
             }, entry.group_id == g.id, 32.0f);
             gb->setMarginRight(6);
             gb->setMarginBottom(6);
             grp_row->addView(gb);
         }
 
-        auto* new_grp_btn = ui::makeButton("+ 新建分组并移入", [book, on_changed, rebuild]() {
+        auto* new_grp_btn = ui::makeButton("+ 新建分组并移入", [st, book, on_changed, refresh]() {
             if (auto* plat = brls::Application::getPlatform()) {
                 plat->getImeManager()->openForText(
-                    [book, on_changed, rebuild](std::string gname) {
-                        brls::sync([book, gname, on_changed, rebuild]() {
+                    [st, book, on_changed, refresh](std::string gname) {
+                        brls::sync([st, book, gname, on_changed, refresh]() {
+                            if (!st->alive->load(std::memory_order_acquire)) return;
                             if (trimWs(gname).empty()) return;
                             auto g = BookLibraryStore::instance().createGroup(gname);
                             if (!g.id.empty()) {
                                 BookLibraryStore::instance().setBookGroup(book, g.id);
                                 if (on_changed) on_changed();
-                                (*rebuild)();
+                                refresh();
                             }
                         });
                     },
@@ -2067,7 +2099,7 @@ void openWeReadBookDetailDialog(const BookItem& book,
 
     (*rebuild)();
 
-    auto* dialog = new brls::Dialog(root);
+    auto* dialog = new ScopedLifetimeDialog(root, st->alive);
     st->dialog = dialog;
     if (auto* applet = dynamic_cast<brls::Box*>(dialog->getView("brls/dialog/applet"))) {
         applet->setWidth(dlg_w);

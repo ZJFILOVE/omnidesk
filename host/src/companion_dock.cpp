@@ -987,6 +987,8 @@ AiChatSession& AiCompanionDock::currentSession() {
 }
 
 const AiChatSession& AiCompanionDock::currentSession() const {
+    static const AiChatSession empty;
+    if (sessions_.empty()) return empty;
     return sessions_[std::min(active_session_idx_, sessions_.size() - 1)];
 }
 
@@ -1046,7 +1048,11 @@ void AiCompanionDock::clearConversation() {
 
 void AiCompanionDock::selectSession(size_t index) {
     if (index >= sessions_.size()) return;
-    if (active_cancel_ && streaming_session_idx_ != index) {
+    const bool streams_selected =
+        active_cancel_ &&
+        ((!streaming_session_id_.empty() && sessions_[index].id == streaming_session_id_) ||
+         (streaming_session_id_.empty() && streaming_session_idx_ == index));
+    if (active_cancel_ && !streams_selected) {
         cancelActiveStream();
     }
     active_session_idx_ = index;
@@ -1064,7 +1070,11 @@ void AiCompanionDock::selectSession(size_t index) {
 
 void AiCompanionDock::deleteSession(size_t index) {
     if (index >= sessions_.size()) return;
-    if (active_cancel_ && streaming_session_idx_ == index) {
+    const bool deleting_stream =
+        active_cancel_ &&
+        ((!streaming_session_id_.empty() && sessions_[index].id == streaming_session_id_) ||
+         (streaming_session_id_.empty() && streaming_session_idx_ == index));
+    if (deleting_stream) {
         cancelActiveStream();
     } else if (active_cancel_ && index < streaming_session_idx_) {
         --streaming_session_idx_;
@@ -2246,6 +2256,7 @@ void AiCompanionDock::submitPrompt(const std::string& prompt, bool deep_thinking
     auto cancel = CancelToken::create();
     active_cancel_ = cancel;
     streaming_session_idx_ = active_session_idx_;
+    streaming_session_id_ = sess.id;
     stream_start_ms_ = nowSteadyMs();
     reasoning_end_ms_ = 0;
     live_raw_content_.clear();
@@ -2254,7 +2265,7 @@ void AiCompanionDock::submitPrompt(const std::string& prompt, bool deep_thinking
         std::lock_guard<std::mutex> lk(stream_mu_);
         pending_content_delta_.clear();
         pending_reasoning_delta_.clear();
-        flush_scheduled_ = false;
+        stream_flush_seq_ = 0;
         last_stream_flush_ms_ = 0;
     }
     if (composer_) {
@@ -2289,7 +2300,7 @@ void AiCompanionDock::submitPrompt(const std::string& prompt, bool deep_thinking
                     std::lock_guard<std::mutex> lk(stream_mu_);
                     c_delta.swap(pending_content_delta_);
                     r_delta.swap(pending_reasoning_delta_);
-                    flush_scheduled_ = false;
+                    stream_flush_seq_ = 0;
                 }
                 live_reasoning_ += r_delta;
                 live_raw_content_ += c_delta;
@@ -2450,6 +2461,7 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
     auto cancel = CancelToken::create();
     active_cancel_ = cancel;
     streaming_session_idx_ = active_session_idx_;
+    streaming_session_id_ = sess.id;
     stream_start_ms_ = nowSteadyMs();
     reasoning_end_ms_ = 0;
     live_raw_content_.clear();
@@ -2458,7 +2470,7 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
         std::lock_guard<std::mutex> lk(stream_mu_);
         pending_content_delta_.clear();
         pending_reasoning_delta_.clear();
-        flush_scheduled_ = false;
+        stream_flush_seq_ = 0;
         last_stream_flush_ms_ = 0;
     }
     if (composer_) {
@@ -2497,7 +2509,7 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
                     {
                         std::lock_guard<std::mutex> lk(stream_mu_);
                         delta.swap(pending_content_delta_);
-                        flush_scheduled_ = false;
+                        stream_flush_seq_ = 0;
                     }
                     live_raw_content_ += delta;
 
@@ -2604,10 +2616,10 @@ void AiCompanionDock::scheduleStreamUiFlush(uint64_t seq, bool curation_only) {
     uint64_t delay_ms = 0;
     {
         std::lock_guard<std::mutex> lk(stream_mu_);
-        if (flush_scheduled_) {
+        if (stream_flush_seq_ == seq) {
             return;
         }
-        flush_scheduled_ = true;
+        stream_flush_seq_ = seq;
         const uint64_t now_ms = nowSteadyMs();
         if (last_stream_flush_ms_ > 0 && now_ms > last_stream_flush_ms_ &&
             (now_ms - last_stream_flush_ms_) < kStreamUiFlushIntervalMs) {
@@ -2632,17 +2644,14 @@ void AiCompanionDock::scheduleStreamUiFlush(uint64_t seq, bool curation_only) {
 }
 
 void AiCompanionDock::flushStreamUiNow(uint64_t seq, bool curation_only) {
-    if (seq != active_req_seq_) {
-        return;
-    }
-
     std::string c_delta;
     std::string r_delta;
     {
         std::lock_guard<std::mutex> lk(stream_mu_);
+        if (stream_flush_seq_ == seq) stream_flush_seq_ = 0;
+        if (seq != active_req_seq_ || !active_cancel_) return;
         c_delta.swap(pending_content_delta_);
         r_delta.swap(pending_reasoning_delta_);
-        flush_scheduled_ = false;
         last_stream_flush_ms_ = nowSteadyMs();
     }
 
@@ -2711,7 +2720,7 @@ bool AiCompanionDock::cancelActiveStream() {
         std::lock_guard<std::mutex> lk(stream_mu_);
         c_delta.swap(pending_content_delta_);
         r_delta.swap(pending_reasoning_delta_);
-        flush_scheduled_ = false;
+        stream_flush_seq_ = 0;
     }
     live_reasoning_ += r_delta;
     live_raw_content_ += c_delta;
@@ -2740,7 +2749,20 @@ void AiCompanionDock::finalizeActiveStream(const std::string& display_role,
             ? static_cast<double>(end_ms - stream_start_ms_) / 1000.0
             : 0.0;
 
-    const size_t target_idx = std::min(streaming_session_idx_, sessions_.size() - 1);
+    if (sessions_.empty()) {
+        active_cancel_.reset();
+        streaming_session_id_.clear();
+        return;
+    }
+    size_t target_idx = std::min(streaming_session_idx_, sessions_.size() - 1);
+    if (!streaming_session_id_.empty()) {
+        for (size_t i = 0; i < sessions_.size(); ++i) {
+            if (sessions_[i].id == streaming_session_id_) {
+                target_idx = i;
+                break;
+            }
+        }
+    }
     auto& sess = sessions_[target_idx];
 
     AiChatMessage msg;
@@ -2756,6 +2778,7 @@ void AiCompanionDock::finalizeActiveStream(const std::string& display_role,
     sess.updated_at = nowUnixSec();
 
     active_cancel_.reset();
+    streaming_session_id_.clear();
     live_raw_content_.clear();
     live_reasoning_.clear();
     if (composer_) {

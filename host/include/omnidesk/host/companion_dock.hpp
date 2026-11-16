@@ -138,13 +138,14 @@ private:
     uint64_t active_req_seq_ = 0;
     uint64_t route_req_seq_ = 0;
     size_t streaming_session_idx_ = 0;
+    std::string streaming_session_id_;
     uint64_t stream_start_ms_ = 0;
     uint64_t reasoning_end_ms_ = 0;
     uint64_t last_stream_flush_ms_ = 0;
     std::mutex stream_mu_;
     std::string pending_content_delta_;
     std::string pending_reasoning_delta_;
-    bool flush_scheduled_ = false;
+    uint64_t stream_flush_seq_ = 0;
     std::string live_raw_content_;
     std::string live_reasoning_;
 
