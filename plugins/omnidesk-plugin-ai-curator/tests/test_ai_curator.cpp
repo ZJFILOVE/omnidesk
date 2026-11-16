@@ -526,6 +526,16 @@ int main() {
                     fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
                     fs::perm_options::replace, perm_ec);
 
+    auto untrusted_cfg = caps.call("recommend.feed.v1", {
+        {"action", "configure_daily_scheduler"},
+        {"agent_runner", "custom"},
+        {"custom_agent_command", "touch /tmp/omnidesk-untrusted-agent"},
+        {"obsidian_vault_dir", git_obs.string()},
+        {"music_daily_dir", git_mus.string()},
+    });
+    CHECK(!untrusted_cfg.ok);
+    CHECK(untrusted_cfg.data.value("error_code", "") == "untrusted_custom_agent");
+
     auto agy_cfg_res = caps.call("recommend.feed.v1", {
         {"action", "configure_daily_scheduler"},
         {"auto_run_enabled", false},
@@ -541,6 +551,7 @@ int main() {
         {"auto_run_enabled", false},
         {"agent_runner", "custom"},
         {"custom_agent_command", mock_script.string()},
+        {"_omnidesk_local_ui_token", omnidesk::localUiCallToken()},
         {"obsidian_vault_dir", git_obs.string()},
         {"music_daily_dir", git_mus.string()},
     });
@@ -676,6 +687,7 @@ int main() {
             {"git_sync_enabled", true},
             {"agent_runner", "custom"},
             {"custom_agent_command", commit_only_agent.string()},
+            {"_omnidesk_local_ui_token", omnidesk::localUiCallToken()},
             {"obsidian_vault_dir", clone_obs.string()},
             {"music_daily_dir", clone_mus.string()},
         }).ok);
@@ -728,6 +740,7 @@ int main() {
     CHECK(caps.call("recommend.feed.v1", {
         {"action", "configure_daily_scheduler"},
         {"custom_agent_command", "sleep 30"},
+        {"_omnidesk_local_ui_token", omnidesk::localUiCallToken()},
         {"obsidian_vault_dir", git_obs.string()},
         {"music_daily_dir", git_mus.string()},
     }).ok);

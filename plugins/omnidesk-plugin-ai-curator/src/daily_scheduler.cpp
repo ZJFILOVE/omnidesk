@@ -838,6 +838,11 @@ nlohmann::json DailyWorkflowScheduler::inspectStatus(const RepoPaths& paths) {
 
 omnidesk::CapabilityResult DailyWorkflowScheduler::configure(const RepoPaths& paths,
                                                              const nlohmann::json& req) {
+    if (req.contains("custom_agent_command") &&
+        req.value("_omnidesk_local_ui_token", std::string("")) != omnidesk::localUiCallToken()) {
+        return makeSchedError("untrusted_custom_agent",
+                              "custom_agent_command can only be changed by the local OmniDesk UI");
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         loadConfigAndStateLocked(paths.curation_dir);

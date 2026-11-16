@@ -1071,6 +1071,8 @@ int testMediaPlaylistV1(const fs::path& tmp) {
         {"auto_launch_engine", false},
         {"engine_port", 29997},
         {"storefront", "cn"},
+        {"music_daily_dir", (pl_tmp / "fixture_music_daily").string()},
+        {"obsidian_vault_dir", (pl_tmp / "fixture_obsidian_vault").string()},
     });
 
     omnidesk::PluginContext ctx("plugin-music", pl_tmp.string(), (pl_tmp / "data").string(),
@@ -1325,8 +1327,8 @@ int testMediaPlaylistV1(const fs::path& tmp) {
         {"dry_run", true},
         {"business_date", "2026-11-13"},
         {"operation_id", "music:2026-11-13"},
-        {"music_daily_dir", fixture_repo.string()},
-        {"obsidian_vault_dir", fixture_vault.string()},
+        {"music_daily_dir", (pl_tmp / "untrusted_music_daily").string()},
+        {"obsidian_vault_dir", (pl_tmp / "untrusted_obsidian_vault").string()},
         {"track_ids", {"1643009587", "1607100336", "1833283533", "3735675", "1032611724"}},
     });
     REQUIRE(dry.ok);

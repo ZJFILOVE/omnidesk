@@ -520,6 +520,8 @@ bool PluginManager::unloadPlugin(const std::string& plugin_id) {
     if (jobs_) jobs_->cancelByPlugin(plugin_id, true);
     if (workers_) workers_->stopByPlugin(plugin_id);
     bus_.unsubscribeOwner(plugin_id);
+    const bool bus_callbacks_still_running = !bus_.waitForOwnerIdle(
+        plugin_id, JobCenter::defaultShutdownGraceMs());
     domains_.unregisterPlugin(plugin_id);
     DsoViewLeaseRegistry::instance().revokePlugin(plugin_id, 120);
 
@@ -543,6 +545,8 @@ bool PluginManager::unloadPlugin(const std::string& plugin_id) {
 
     const bool still_busy =
         self_reentrant_check ||
+        bus_callbacks_still_running ||
+        bus_.hasInFlightOwner(plugin_id) ||
         capabilities_.hasInFlight(plugin_id) ||
         domains_.hasInFlight(plugin_id) ||
         DsoViewLeaseRegistry::instance().hasActiveLeases(plugin_id) ||

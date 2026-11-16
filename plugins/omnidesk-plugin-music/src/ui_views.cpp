@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <omnidesk/dso_view_lease.hpp>
 #include <omnidesk/image_cache.hpp>
 #include <omnidesk/ui_theme.hpp>
 #include <thread>
@@ -14,6 +16,36 @@ namespace fs = std::filesystem;
 
 namespace music_plugin {
 namespace {
+
+using UiLease = std::shared_ptr<omnidesk::DsoViewLeaseRegistry::LeaseToken>;
+constexpr const char* kUiPluginId = "plugin-music";
+thread_local UiLease g_thread_ui_lease;
+
+UiLease acquireUiLease() {
+    return omnidesk::DsoViewLeaseRegistry::instance().acquireLease(kUiPluginId);
+}
+
+void musicSync(std::function<void()> fn) {
+    UiLease lease = g_thread_ui_lease;
+    if (!lease) lease = acquireUiLease();
+    if (!lease || !fn) return;
+    brls::sync([lease = std::move(lease), fn = std::move(fn)]() mutable {
+        if (fn) fn();
+    });
+}
+
+void spawnMusicWorker(std::function<void()> fn) {
+    UiLease lease = acquireUiLease();
+    if (!lease || !fn) return;
+    try {
+        std::thread([lease = std::move(lease), fn = std::move(fn)]() mutable {
+            g_thread_ui_lease = lease;
+            if (fn) fn();
+            g_thread_ui_lease.reset();
+        }).detach();
+    } catch (...) {
+    }
+}
 
 std::string formatDuration(double sec) {
     if (sec <= 0.0) return "00:00";
@@ -80,7 +112,7 @@ MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
     if (engine_) {
         std::weak_ptr<std::atomic<bool>> alive_w = alive_;
         engine_sub_ = engine_->subscribeState([this, alive_w]() {
-            brls::sync([this, alive_w]() {
+            musicSync([this, alive_w]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 refreshHeader();
@@ -95,7 +127,7 @@ MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
 
         mpv_sub_ = omnidesk::MPVCore::instance().subscribeState(
             [this, alive_w](const omnidesk::MpvPlaybackState& st) {
-                brls::sync([this, alive_w, pos = st.position_sec]() {
+                musicSync([this, alive_w, pos = st.position_sec]() {
                     auto a = alive_w.lock();
                     if (!a || !a->load(std::memory_order_acquire)) return;
                     refreshIslandBar();
@@ -108,11 +140,11 @@ MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
         // Initial async load: DRM status + personalized recommendations + AI Curation snapshot
         const uint64_t seq = ++feed_req_seq_;
         const uint64_t cseq = ++curation_req_seq_;
-        std::thread([eng = engine_, this, alive_w, seq, cseq]() {
+        spawnMusicWorker([eng = engine_, this, alive_w, seq, cseq]() {
             if (!eng || !eng->isAlive()) return;
             eng->refreshDrmStatus(true);
             CurationWorkspaceSnapshot cur = eng->loadCurationSnapshot("", true);
-            brls::sync([this, alive_w, cseq, cur]() {
+            musicSync([this, alive_w, cseq, cur]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 refreshHeader();
@@ -128,7 +160,7 @@ MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
 
             if (!eng->isAlive()) return;
             FeedOutcome rec = eng->loadFeed("recommendations", "", false);
-            brls::sync([this, alive_w, seq, rec]() {
+            musicSync([this, alive_w, seq, rec]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 refreshHeader();
@@ -138,7 +170,7 @@ MusicWorkspaceView::MusicWorkspaceView(std::shared_ptr<MusicEngine> engine)
                     renderActiveTab();
                 }
             });
-        }).detach();
+        });
     }
 }
 
@@ -295,7 +327,7 @@ void MusicWorkspaceView::buildUi() {
     island_lyric_label_->setShrink(1.0f);
     island_left->addView(island_lyric_label_);
     island_left->registerClickAction([this](brls::View*) {
-        brls::sync([this]() { setSubTab(SubTab::NowPlaying); });
+        musicSync([this]() { setSubTab(SubTab::NowPlaying); });
         return true;
     });
     island_bar_box_->addView(island_left);
@@ -423,7 +455,7 @@ void MusicWorkspaceView::refreshHeader() {
         };
         for (const auto& td : tabs) {
             auto* b = omnidesk::ui::makeButton(td.label, [this, tab = td.t]() {
-                brls::sync([this, tab]() { setSubTab(tab); });
+                musicSync([this, tab]() { setSubTab(tab); });
             }, active_tab_ == td.t, 33.0f);
             b->setShrink(0.0f);
             b->setMarginRight(8);
@@ -467,32 +499,32 @@ void MusicWorkspaceView::refreshHeader() {
 
             auto* resend_btn = omnidesk::ui::makeButton("重发验证码", [this]() {
                 std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                std::thread([eng = engine_, alive_w]() {
+                spawnMusicWorker([eng = engine_, alive_w]() {
                     DrmStatus st;
                     std::string err;
                     bool ok = eng->resendTwoFactorCode(st, err);
-                    brls::sync([alive_w, ok, err]() {
+                    musicSync([alive_w, ok, err]() {
                         auto a = alive_w.lock();
                         if (!a || !a->load(std::memory_order_acquire)) return;
                         brls::Application::notify(ok ? "已请求重发 2FA 验证码" : ("重发失败: " + err));
                     });
-                }).detach();
+                });
             }, false, 32.0f);
             resend_btn->setMarginRight(8);
             row1->addView(resend_btn);
 
             auto* chrome_btn = omnidesk::ui::makeButton("从 Chrome 导入 Token", [this]() {
                 std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                std::thread([this, eng = engine_, alive_w]() {
+                spawnMusicWorker([this, eng = engine_, alive_w]() {
                     std::string err;
                     bool ok = eng->tryImportMutFromChromeCookies(err);
-                    brls::sync([this, alive_w, ok, err]() {
+                    musicSync([this, alive_w, ok, err]() {
                         auto a = alive_w.lock();
                         if (!a || !a->load(std::memory_order_acquire)) return;
                         refreshHeader();
                         brls::Application::notify(ok ? "已导入 media-user-token，云端歌单反写已激活" : err);
                     });
-                }).detach();
+                });
             }, false, 32.0f);
             chrome_btn->setMarginRight(8);
             row1->addView(chrome_btn);
@@ -505,15 +537,15 @@ void MusicWorkspaceView::refreshHeader() {
 
             auto* logout_btn = omnidesk::ui::makeButton("退出 DRM", [this]() {
                 std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                std::thread([eng = engine_, alive_w]() {
+                spawnMusicWorker([eng = engine_, alive_w]() {
                     std::string err;
                     bool ok = eng->logoutAppleId(err);
-                    brls::sync([alive_w, ok, err]() {
+                    musicSync([alive_w, ok, err]() {
                         auto a = alive_w.lock();
                         if (!a || !a->load(std::memory_order_acquire)) return;
                         brls::Application::notify(ok ? "已退出 Apple ID DRM 会话" : err);
                     });
-                }).detach();
+                });
             }, false, 32.0f);
             row1->addView(logout_btn);
 
@@ -581,27 +613,27 @@ void MusicWorkspaceView::renderDownloadsPanel() {
             if (jb.phase == "failed" || jb.phase == "cancelled") {
                 row->addView(omnidesk::ui::makeButton("重试", [this, jid = jb.job_id]() {
                     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                    std::thread([this, eng = engine_, alive_w, jid]() {
+                    spawnMusicWorker([this, eng = engine_, alive_w, jid]() {
                         ExportJobInfo dummy;
                         std::string err;
                         eng->retryExportJob(jid, dummy, err);
-                        brls::sync([this, alive_w]() {
+                        musicSync([this, alive_w]() {
                             auto a = alive_w.lock();
                             if (a && a->load(std::memory_order_acquire)) triggerExportsRefresh();
                         });
-                    }).detach();
+                    });
                 }, false, 26.0f));
             } else if (jb.phase != "done") {
                 row->addView(omnidesk::ui::makeButton("取消", [this, jid = jb.job_id]() {
                     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                    std::thread([this, eng = engine_, alive_w, jid]() {
+                    spawnMusicWorker([this, eng = engine_, alive_w, jid]() {
                         std::string err;
                         eng->cancelExportJob(jid, err);
-                        brls::sync([this, alive_w]() {
+                        musicSync([this, alive_w]() {
                             auto a = alive_w.lock();
                             if (a && a->load(std::memory_order_acquire)) triggerExportsRefresh();
                         });
-                    }).detach();
+                    });
                 }, false, 26.0f));
             }
             card->addView(row);
@@ -639,12 +671,12 @@ void MusicWorkspaceView::triggerFeedLoad(const std::string& feed_id, const std::
     renderActiveTab();
 
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, seq, feed_id, query, force]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, seq, feed_id, query, force]() {
         FeedOutcome out = eng->loadFeed(feed_id, query, force);
         if (feed_id == "heavy-rotation" && (!out.ok || (out.containers.empty() && out.tracks.empty()))) {
             out = eng->loadFeed("recently-played", "", force);
         }
-        brls::sync([this, alive_w, seq, feed_id, out]() {
+        musicSync([this, alive_w, seq, feed_id, out]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             if (feed_id == "library-playlists" && out.ok) {
@@ -655,7 +687,7 @@ void MusicWorkspaceView::triggerFeedLoad(const std::string& feed_id, const std::
             current_feed_ = out;
             renderActiveTab();
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::triggerCurationLoad(const std::string& requested_date, bool silent) {
@@ -666,9 +698,9 @@ void MusicWorkspaceView::triggerCurationLoad(const std::string& requested_date, 
     }
     const uint64_t seq = ++curation_req_seq_;
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, seq, requested_date]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, seq, requested_date]() {
         CurationWorkspaceSnapshot snap = eng->loadCurationSnapshot(requested_date, true);
-        brls::sync([this, alive_w, seq, snap]() {
+        musicSync([this, alive_w, seq, snap]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             if (seq != curation_req_seq_) return;
@@ -679,32 +711,32 @@ void MusicWorkspaceView::triggerCurationLoad(const std::string& requested_date, 
                 renderActiveTab();
             }
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::triggerExportsRefresh() {
     if (!engine_) return;
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w]() {
+    spawnMusicWorker([this, eng = engine_, alive_w]() {
         std::string err;
         auto jobs = eng->listExportJobs(err);
-        brls::sync([this, alive_w, jobs = std::move(jobs)]() mutable {
+        musicSync([this, alive_w, jobs = std::move(jobs)]() mutable {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             export_jobs_ = std::move(jobs);
             renderDownloadsPanel();
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::triggerTrackExport(const MusicTrack& track, bool convert_to_flac) {
     if (!engine_) return;
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, track, convert_to_flac]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, track, convert_to_flac]() {
         ExportJobInfo job;
         std::string err;
         bool ok = eng->exportTrack(track, convert_to_flac, job, err);
-        brls::sync([this, alive_w, ok, track, convert_to_flac, err]() {
+        musicSync([this, alive_w, ok, track, convert_to_flac, err]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             if (ok) {
@@ -716,17 +748,17 @@ void MusicWorkspaceView::triggerTrackExport(const MusicTrack& track, bool conver
                 brls::Application::notify("无损导出失败: " + err);
             }
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::triggerContainerExport(const ContainerItem& container, bool convert_to_flac) {
     if (!engine_) return;
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, container, convert_to_flac]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, container, convert_to_flac]() {
         ExportJobInfo job;
         std::string err;
         bool ok = eng->exportContainer(container, convert_to_flac, job, err);
-        brls::sync([this, alive_w, ok, container, err]() {
+        musicSync([this, alive_w, ok, container, err]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             if (ok) {
@@ -737,7 +769,7 @@ void MusicWorkspaceView::triggerContainerExport(const ContainerItem& container, 
                 brls::Application::notify("整单导出失败: " + err);
             }
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::triggerInteractiveWriteback(const std::string& prompt) {
@@ -756,11 +788,11 @@ void MusicWorkspaceView::triggerInteractiveWriteback(const std::string& prompt) 
     const bool sync_pl = ai_sync_playlist_;
     const bool autoplay = ai_autoplay_;
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, prompt, target_pl, sync_pl, autoplay]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, prompt, target_pl, sync_pl, autoplay]() {
         InteractiveWritebackOutcome out = eng->curateAndWriteBackInteractive(
             prompt, target_pl, sync_pl, autoplay);
         CurationWorkspaceSnapshot snap = eng->loadCurationSnapshot(selected_archive_date_, true);
-        brls::sync([this, alive_w, out, snap]() {
+        musicSync([this, alive_w, out, snap]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             ai_curating_ = false;
@@ -786,7 +818,7 @@ void MusicWorkspaceView::triggerInteractiveWriteback(const std::string& prompt) 
             }
             renderActiveTab();
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::openContainerView(const ContainerItem& container) {
@@ -799,11 +831,11 @@ void MusicWorkspaceView::openContainerView(const ContainerItem& container) {
     renderActiveTab();
 
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, seq, container]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, seq, container]() {
         std::vector<MusicTrack> tracks;
         std::string err;
         bool ok = eng->openContainer(container, tracks, err);
-        brls::sync([this, alive_w, seq, ok, tracks = std::move(tracks), err]() mutable {
+        musicSync([this, alive_w, seq, ok, tracks = std::move(tracks), err]() mutable {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             if (seq != feed_req_seq_) return;
@@ -819,7 +851,7 @@ void MusicWorkspaceView::openContainerView(const ContainerItem& container) {
             }
             renderActiveTab();
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::addTrackRowCard(brls::Box* parent,
@@ -873,7 +905,7 @@ void MusicWorkspaceView::addTrackRowCard(brls::Box* parent,
     left->addView(meta);
     left->registerClickAction([this, queue_context, index](brls::View*) {
         engine_->setQueueAndPlay(queue_context, index);
-        brls::sync([this]() { setSubTab(SubTab::NowPlaying); });
+        musicSync([this]() { setSubTab(SubTab::NowPlaying); });
         return true;
     });
     row->addView(left);
@@ -999,7 +1031,7 @@ void MusicWorkspaceView::renderForYouHeroCard() {
 
         tile->registerClickAction([this, daily_q, i](brls::View*) {
             engine_->setQueueAndPlay(daily_q, i);
-            brls::sync([this]() { setSubTab(SubTab::NowPlaying); });
+            musicSync([this]() { setSubTab(SubTab::NowPlaying); });
             return true;
         });
         strip->addView(tile);
@@ -1109,16 +1141,16 @@ void MusicWorkspaceView::renderAiCurationBody() {
     if (!curation_snap_.interactive_sessions.empty()) {
         ix_hdr->addView(omnidesk::ui::makeButton("清空全部灵感会话", [this]() {
             std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-            std::thread([this, eng = engine_, alive_w]() {
+            spawnMusicWorker([this, eng = engine_, alive_w]() {
                 std::string err;
                 eng->clearInteractiveSessions("", err);
-                brls::sync([this, alive_w]() {
+                musicSync([this, alive_w]() {
                     auto a = alive_w.lock();
                     if (a && a->load(std::memory_order_acquire)) {
                         triggerCurationLoad(selected_archive_date_, false);
                     }
                 });
-            }).detach();
+            });
         }, false, 28.0f));
     }
     stage_box_->addView(ix_hdr);
@@ -1163,11 +1195,11 @@ void MusicWorkspaceView::renderAiCurationBody() {
             auto* sw_b = omnidesk::ui::makeButton("♫ 写回灵感歌单", [this, items = sess.tracks]() {
                 const std::string target = ai_target_playlist_;
                 std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                std::thread([this, eng = engine_, alive_w, items, target]() {
+                spawnMusicWorker([this, eng = engine_, alive_w, items, target]() {
                     nlohmann::json res;
                     std::string err;
                     bool ok = eng->syncInteractiveTracksToPlaylist(items, target, false, res, err);
-                    brls::sync([this, alive_w, ok, res, target, err]() {
+                    musicSync([this, alive_w, ok, res, target, err]() {
                         auto a = alive_w.lock();
                         if (!a || !a->load(std::memory_order_acquire)) return;
                         if (ok) {
@@ -1181,23 +1213,23 @@ void MusicWorkspaceView::renderAiCurationBody() {
                             brls::Application::notify("歌单写回失败: " + err);
                         }
                     });
-                }).detach();
+                });
             }, false, 30.0f);
             sw_b->setMarginRight(6);
             sbtns->addView(sw_b);
 
             sbtns->addView(omnidesk::ui::makeButton("移除", [this, sid = sess.session_id]() {
                 std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                std::thread([this, eng = engine_, alive_w, sid]() {
+                spawnMusicWorker([this, eng = engine_, alive_w, sid]() {
                     std::string err;
                     eng->clearInteractiveSessions(sid, err);
-                    brls::sync([this, alive_w]() {
+                    musicSync([this, alive_w]() {
                         auto a = alive_w.lock();
                         if (a && a->load(std::memory_order_acquire)) {
                             triggerCurationLoad(selected_archive_date_, false);
                         }
                     });
-                }).detach();
+                });
             }, false, 30.0f));
             srow->addView(sbtns);
             scard->addView(srow);
@@ -1239,7 +1271,7 @@ void MusicWorkspaceView::renderAiCurationBody() {
                 tl_left->addView(tmeta);
                 tl_left->registerClickAction([this, sq, i](brls::View*) {
                     engine_->setQueueAndPlay(sq, i);
-                    brls::sync([this]() { setSubTab(SubTab::NowPlaying); });
+                    musicSync([this]() { setSubTab(SubTab::NowPlaying); });
                     return true;
                 });
                 top_line->addView(tl_left);
@@ -1325,11 +1357,11 @@ void MusicWorkspaceView::renderAiCurationBody() {
 
     nav->addView(omnidesk::ui::makeButton("☁ 账本预检", [this, d = curation_snap_.selected_date]() {
         std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-        std::thread([eng = engine_, alive_w, d]() {
+        spawnMusicWorker([eng = engine_, alive_w, d]() {
             nlohmann::json out;
             std::string err;
             bool ok = eng->checkDailyPlaylistSyncDryRun(d, out, err);
-            brls::sync([alive_w, ok, out, err]() {
+            musicSync([alive_w, ok, out, err]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 if (ok) {
@@ -1340,7 +1372,7 @@ void MusicWorkspaceView::renderAiCurationBody() {
                     brls::Application::notify("每日账本门禁提示: " + err);
                 }
             });
-        }).detach();
+        });
     }, false, 30.0f));
 
     d_hdr->addView(nav);
@@ -1391,7 +1423,7 @@ void MusicWorkspaceView::renderAiCurationBody() {
         left->addView(meta);
         left->registerClickAction([this, dq, i](brls::View*) {
             engine_->setQueueAndPlay(dq, i);
-            brls::sync([this]() { setSubTab(SubTab::NowPlaying); });
+            musicSync([this]() { setSubTab(SubTab::NowPlaying); });
             return true;
         });
         r1->addView(left);
@@ -1615,11 +1647,11 @@ void MusicWorkspaceView::renderLibraryBody() {
     bar->setMarginBottom(12);
     auto* sync_b = omnidesk::ui::makeButton("同步 Apple Music 云端资料库", [this]() {
         std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-        std::thread([this, eng = engine_, alive_w]() {
+        spawnMusicWorker([this, eng = engine_, alive_w]() {
             nlohmann::json st;
             std::string err;
             bool ok = eng->syncLibrary(st, err);
-            brls::sync([this, alive_w, ok, err]() {
+            musicSync([this, alive_w, ok, err]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 if (ok) {
@@ -1629,7 +1661,7 @@ void MusicWorkspaceView::renderLibraryBody() {
                     brls::Application::notify("同步失败: " + err);
                 }
             });
-        }).detach();
+        });
     }, true, 34.0f);
     sync_b->setMarginRight(10);
     bar->addView(sync_b);
@@ -1755,7 +1787,7 @@ void MusicWorkspaceView::renderFeedBody(const FeedOutcome& outcome) {
             card->addView(sl);
 
             card->registerClickAction([this, c](brls::View*) {
-                brls::sync([this, c]() { openContainerView(c); });
+                musicSync([this, c]() { openContainerView(c); });
                 return true;
             });
             row->addView(card);
@@ -2132,25 +2164,27 @@ void MusicWorkspaceView::updateActiveLyricHighlight(double position_sec) {
 void MusicWorkspaceView::explainLyricAtIndex(size_t index, const std::string& focus_phrase) {
     if (!engine_) return;
     std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-    std::thread([this, eng = engine_, alive_w, index, focus_phrase]() {
+    spawnMusicWorker([this, eng = engine_, alive_w, index, focus_phrase]() {
         PhraseExplanation note = eng->explainLine(index, focus_phrase);
-        brls::sync([this, alive_w, note]() {
+        musicSync([this, alive_w, note]() {
             auto a = alive_w.lock();
             if (!a || !a->load(std::memory_order_acquire)) return;
             last_explanation_ = note;
             has_explanation_ = true;
             renderNowPlayingBody();
         });
-    }).detach();
+    });
 }
 
 void MusicWorkspaceView::promptAiWriteback() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string prompt) {
+        [this, lease](std::string prompt) {
             if (prompt.empty()) return;
-            brls::sync([this, prompt]() { triggerInteractiveWriteback(prompt); });
+            musicSync([this, prompt]() { triggerInteractiveWriteback(prompt); });
         },
         "AI 音乐策展与歌单反写",
         "描述你想听的场景、情绪或艺人（可重复推荐，自动预检中国区曲库并写回 OmniDesk 与灵感歌单）",
@@ -2161,10 +2195,12 @@ void MusicWorkspaceView::promptAiWriteback() {
 void MusicWorkspaceView::promptTargetPlaylistName() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string name) {
+        [this, lease](std::string name) {
             if (name.empty()) return;
-            brls::sync([this, name]() {
+            musicSync([this, name]() {
                 ai_target_playlist_ = name;
                 renderActiveTab();
             });
@@ -2178,10 +2214,12 @@ void MusicWorkspaceView::promptTargetPlaylistName() {
 void MusicWorkspaceView::promptSelectArchiveDate() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string date) {
+        [this, lease](std::string date) {
             if (date.empty()) return;
-            brls::sync([this, date]() { triggerCurationLoad(date, false); });
+            musicSync([this, date]() { triggerCurationLoad(date, false); });
         },
         "跳转至归档日期 (YYYY-MM-DD)",
         "输入历史精选日期，例如 2026-11-16",
@@ -2192,29 +2230,31 @@ void MusicWorkspaceView::promptSelectArchiveDate() {
 void MusicWorkspaceView::promptAppleIdLogin() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string email) {
+        [this, lease](std::string email) {
             if (email.empty()) return;
             pending_email_ = email;
-            brls::sync([this, email]() {
+            musicSync([this, email, lease]() {
                 auto* plat2 = brls::Application::getPlatform();
                 if (!plat2) return;
                 plat2->getImeManager()->openForText(
-                    [this, email](std::string password) {
+                    [this, email, lease](std::string password) {
                         if (password.empty()) return;
                         std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-                        std::thread([this, eng = engine_, alive_w, email, password]() {
+                        spawnMusicWorker([this, eng = engine_, alive_w, email, password]() {
                             DrmStatus st;
                             std::string err;
                             bool ok = eng->authenticateAppleId(email, password, st, err);
-                            brls::sync([this, alive_w, ok, err]() {
+                            musicSync([this, alive_w, ok, err]() {
                                 auto a = alive_w.lock();
                                 if (!a || !a->load(std::memory_order_acquire)) return;
                                 refreshHeader();
                                 brls::Application::notify(ok ? "已提交 Apple ID 登录，若弹出受信任设备请填写 2FA 验证码"
                                                              : ("登录失败: " + err));
                             });
-                        }).detach();
+                        });
                     },
                     "输入 Apple ID 密码",
                     "仅提交至本机 127.0.0.1 Adam FairPlay 引擎，不经过任何第三方服务器",
@@ -2231,22 +2271,24 @@ void MusicWorkspaceView::promptAppleIdLogin() {
 void MusicWorkspaceView::promptTwoFactorCode() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string code) {
+        [this, lease](std::string code) {
             if (code.empty()) return;
             std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-            std::thread([this, eng = engine_, alive_w, code]() {
+            spawnMusicWorker([this, eng = engine_, alive_w, code]() {
                 DrmStatus st;
                 std::string err;
                 bool ok = eng->submitTwoFactorCode(code, st, err);
-                brls::sync([this, alive_w, ok, err]() {
+                musicSync([this, alive_w, ok, err]() {
                     auto a = alive_w.lock();
                     if (!a || !a->load(std::memory_order_acquire)) return;
                     refreshHeader();
                     brls::Application::notify(ok ? "2FA 验证码已提交，正在初始化 FairPlay 会话"
                                                  : ("2FA 验证失败: " + err));
                 });
-            }).detach();
+            });
         },
         "输入 6 位 Apple ID 验证码",
         "受信任设备或短信收到的 6 位验证码",
@@ -2257,10 +2299,12 @@ void MusicWorkspaceView::promptTwoFactorCode() {
 void MusicWorkspaceView::promptSearch() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string q) {
+        [this, lease](std::string q) {
             if (q.empty()) return;
-            brls::sync([this, q]() {
+            musicSync([this, q]() {
                 search_query_ = q;
                 active_tab_ = SubTab::Search;
                 showing_container_detail_ = false;
@@ -2277,12 +2321,14 @@ void MusicWorkspaceView::promptSearch() {
 void MusicWorkspaceView::promptImportLyrics() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string raw) {
+        [this, lease](std::string raw) {
             if (raw.empty()) return;
             std::string err;
             engine_->importLyricsForActiveOrTrack(nullptr, raw, err);
-            brls::sync([err]() {
+            musicSync([err]() {
                 brls::Application::notify(err.empty() ? "已导入歌词并保存至本地缓存" : err);
             });
         },
@@ -2295,12 +2341,14 @@ void MusicWorkspaceView::promptImportLyrics() {
 void MusicWorkspaceView::promptMediaUserToken() {
     auto* plat = brls::Application::getPlatform();
     if (!plat) return;
+    UiLease lease = acquireUiLease();
+    if (!lease) return;
     plat->getImeManager()->openForText(
-        [this](std::string mut) {
+        [this, lease](std::string mut) {
             if (mut.empty()) return;
             std::string err;
             bool ok = engine_->importMediaUserToken(mut, err);
-            brls::sync([this, ok, err]() {
+            musicSync([this, ok, err]() {
                 refreshHeader();
                 brls::Application::notify(ok ? "media-user-token 已保存至 0600 SecretVault 并推送引擎" : err);
             });
@@ -2352,7 +2400,7 @@ MusicCompanionDockView::MusicCompanionDockView(std::shared_ptr<MusicEngine> engi
     auto* exp_b = omnidesk::ui::makeButton("精讲当前句", [this]() {
         if (!engine_) return;
         std::weak_ptr<std::atomic<bool>> alive_w = alive_;
-        std::thread([this, eng = engine_, alive_w]() {
+        spawnMusicWorker([this, eng = engine_, alive_w]() {
             MusicTrack tr; PlaybackSessionInfo s; LyricBundle lyr; std::vector<MusicTrack> q; size_t qi = 0;
             eng->getActivePlaybackState(tr, s, lyr, q, qi);
             double pos = omnidesk::MPVCore::instance().state().position_sec;
@@ -2361,12 +2409,12 @@ MusicCompanionDockView::MusicCompanionDockView(std::shared_ptr<MusicEngine> engi
                 if (lyr.lines[i].has_time && pos >= lyr.lines[i].time_sec) idx = i;
             }
             PhraseExplanation note = eng->explainLine(idx);
-            brls::sync([this, alive_w, note]() {
+            musicSync([this, alive_w, note]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 if (note_label_) note_label_->setText(clipText(note.explanation, 360));
             });
-        }).detach();
+        });
     }, true, 28.0f);
     exp_b->setMarginRight(6);
     btns->addView(exp_b);
@@ -2383,7 +2431,7 @@ MusicCompanionDockView::MusicCompanionDockView(std::shared_ptr<MusicEngine> engi
     if (engine_) {
         std::weak_ptr<std::atomic<bool>> alive_w = alive_;
         engine_sub_ = engine_->subscribeState([this, alive_w]() {
-            brls::sync([this, alive_w]() {
+            musicSync([this, alive_w]() {
                 auto a = alive_w.lock();
                 if (!a || !a->load(std::memory_order_acquire)) return;
                 refreshSummary();
@@ -2391,7 +2439,7 @@ MusicCompanionDockView::MusicCompanionDockView(std::shared_ptr<MusicEngine> engi
         });
         mpv_sub_ = omnidesk::MPVCore::instance().subscribeState(
             [this, alive_w](const omnidesk::MpvPlaybackState&) {
-                brls::sync([this, alive_w]() {
+                musicSync([this, alive_w]() {
                     auto a = alive_w.lock();
                     if (!a || !a->load(std::memory_order_acquire)) return;
                     refreshSummary();

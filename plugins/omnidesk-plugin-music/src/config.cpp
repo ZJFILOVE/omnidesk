@@ -143,6 +143,8 @@ MusicConfig loadConfigFromContext(const omnidesk::PluginContext& ctx) {
     }
     cfg.proxy = getStr("proxy", "");
     cfg.data_dir = ctx.dataDir();
+    cfg.music_daily_dir = getStr("music_daily_dir", "");
+    cfg.obsidian_vault_dir = getStr("obsidian_vault_dir", "");
     return cfg;
 }
 

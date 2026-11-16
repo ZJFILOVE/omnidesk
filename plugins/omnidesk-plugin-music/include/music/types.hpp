@@ -27,6 +27,8 @@ struct MusicConfig {
     std::string media_user_token;
     std::string proxy;
     std::string data_dir;
+    std::string music_daily_dir;
+    std::string obsidian_vault_dir;
 };
 
 struct DrmStatus {

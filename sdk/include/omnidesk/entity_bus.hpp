@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -54,6 +55,8 @@ public:
                                  const std::string& exclude_owner_id) const;
 
     std::vector<std::string> activeTopics() const;
+    bool hasInFlightOwner(const std::string& owner_id) const;
+    bool waitForOwnerIdle(const std::string& owner_id, int timeout_ms) const;
 
 private:
     struct Subscription {
@@ -66,6 +69,8 @@ private:
     mutable std::mutex mutex_;
     std::vector<Subscription> subs_;
     std::unordered_map<std::string, size_t> topic_refcounts_;
+    mutable std::unordered_map<std::string, size_t> in_flight_by_owner_;
+    mutable std::condition_variable owner_idle_cv_;
     std::shared_ptr<RemoteBridge> remote_bridge_;
     mutable std::mutex fault_mutex_;
     FaultHandler fault_handler_;

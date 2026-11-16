@@ -50,8 +50,18 @@ bool AiCuratorPlugin::onLoad(omnidesk::PluginContext& ctx) {
 void AiCuratorPlugin::onUnload() {
     if (engine_) {
         engine_->shutdown();
-        engine_.reset();
     }
+    if (ctx_) {
+        const std::string pid = ctx_->pluginId();
+        ctx_->logInfo("Unloading plugin-ai-curator");
+        ctx_->bus().unsubscribeOwner(pid);
+        ctx_->domains().unregisterPlugin(pid);
+        ctx_->capabilities().unregisterPlugin(pid);
+        if (ctx_->workers()) {
+            ctx_->workers()->stopByPlugin(pid);
+        }
+    }
+    engine_.reset();
     ctx_ = nullptr;
 }
 

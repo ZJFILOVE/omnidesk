@@ -75,7 +75,7 @@ private:
     std::string selected_plugin_id_;
     uint64_t bus_sub_token_ = 0;
     uint64_t auth_sub_token_ = 0;
-    bool suppress_bus_refresh_ = false;
+    std::atomic<bool> suppress_bus_refresh_{false};
 
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     std::unordered_map<std::string, pm::UpdateCheckResult> radar_results_;

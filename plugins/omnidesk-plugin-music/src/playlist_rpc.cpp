@@ -119,12 +119,12 @@ fs::path resolveDataRoot(const std::string& data_dir) {
                : path;
 }
 
-fs::path resolveRepoDir(const nlohmann::json& req, const char* key, const fs::path& data_root, const char* name) {
+fs::path resolveRepoDir(const std::string& configured_dir,
+                        const fs::path& data_root,
+                        const char* name) {
     std::error_code ec;
-    if (req.contains(key)) {
-        if (!req[key].is_string()) return {};
-        std::string explicit_dir = trim(req[key].get<std::string>());
-        return explicit_dir.empty() ? fs::path{} : fs::path(expandUserPath(explicit_dir));
+    if (!configured_dir.empty()) {
+        return fs::path(expandUserPath(configured_dir));
     }
     for (const fs::path& candidate : {
              data_root / "curation" / "repos" / name,
@@ -977,11 +977,12 @@ omnidesk::CapabilityResult MusicEngine::handlePlaylistRpc(
     if (!req.is_object()) return fail("invalid_argument", "media.playlist.v1 request must be a JSON object");
 
     const std::string action = req.value("action", "status");
-    const fs::path data_root = resolveDataRoot(currentConfig().data_dir);
+    const MusicConfig music_config = currentConfig();
+    const fs::path data_root = resolveDataRoot(music_config.data_dir);
     const fs::path daily_state_file = data_root / "curation" / "apple-music-playlist-state.json";
     const fs::path interactive_file = data_root / "curation" / "interactive" / "playlists.json";
-    const fs::path music_repo = resolveRepoDir(req, "music_daily_dir", data_root, "music-daily");
-    const fs::path vault_repo = resolveRepoDir(req, "obsidian_vault_dir", data_root, "obsidian-vault");
+    const fs::path music_repo = resolveRepoDir(music_config.music_daily_dir, data_root, "music-daily");
+    const fs::path vault_repo = resolveRepoDir(music_config.obsidian_vault_dir, data_root, "obsidian-vault");
 
     if (action == "preflight_cn_catalog") {
         if (req.contains("allow_offline_catalog_fallback") &&
@@ -1532,7 +1533,7 @@ omnidesk::CapabilityResult MusicEngine::handlePlaylistRpc(
                 const fs::path upstream_check =
                     (!music_repo.empty() && fs::exists(music_repo / "scripts" / "apple_music_sync.py"))
                         ? (music_repo / "scripts" / "apple_music_sync.py")
-                        : (resolveRepoDir({}, "music_daily_dir", data_root, "music-daily") / "scripts" / "apple_music_sync.py");
+                        : (resolveRepoDir(music_config.music_daily_dir, data_root, "music-daily") / "scripts" / "apple_music_sync.py");
                 const bool use_python_interactive =
                     !resolveWritebackWorkerScript(ctx_).empty() &&
                     !upstream_check.empty() && fs::exists(upstream_check);

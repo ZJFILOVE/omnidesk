@@ -143,4 +143,8 @@ public:
 OMNIDESK_API std::string sdkVersion();
 OMNIDESK_API std::string sdkAbiSignature();
 
+/// Process-local capability token for privileged calls initiated by the host UI.
+/// Remote control/MCP clients run in other processes and cannot observe this value.
+OMNIDESK_API const std::string& localUiCallToken();
+
 } // namespace omnidesk

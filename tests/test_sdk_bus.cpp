@@ -125,6 +125,29 @@ int main() {
     TEST_CHECK(bus.publish("entity.book.open", {{"page", 42}}) == 1);
     TEST_CHECK(seen_a == 1 && seen_b == 2);
 
+    std::atomic<bool> delivery_entered{false};
+    std::atomic<bool> release_delivery{false};
+    bus.subscribe("entity.book.blocking", "plugin-blocked",
+                  [&](const std::string&, const nlohmann::json&) {
+                      delivery_entered.store(true, std::memory_order_release);
+                      while (!release_delivery.load(std::memory_order_acquire)) {
+                          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                      }
+                  });
+    std::thread blocking_publisher([&]() {
+        bus.publish("entity.book.blocking");
+    });
+    while (!delivery_entered.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    TEST_CHECK(bus.hasInFlightOwner("plugin-blocked"));
+    bus.unsubscribeOwner("plugin-blocked");
+    TEST_CHECK(!bus.waitForOwnerIdle("plugin-blocked", 20));
+    release_delivery.store(true, std::memory_order_release);
+    blocking_publisher.join();
+    TEST_CHECK(bus.waitForOwnerIdle("plugin-blocked", 1000));
+    TEST_CHECK(!bus.hasInFlightOwner("plugin-blocked"));
+
     // 3. DomainRegistry registration & unload cleanup
     omnidesk::DomainRegistry domains;
     domains.registerMediaSource("plugin-dummy", std::make_shared<DummyMediaSource>());

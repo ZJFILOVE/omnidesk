@@ -653,6 +653,7 @@ void CurationSchedulerManager::setAgentRunner(const std::string& runner, const s
     nlohmann::json req = {
         {"action", "configure_daily_scheduler"},
         {"agent_runner", runner},
+        {"_omnidesk_local_ui_token", localUiCallToken()},
     };
     if (!custom_cmd.empty()) {
         req["custom_agent_command"] = custom_cmd;

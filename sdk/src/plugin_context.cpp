@@ -3,6 +3,7 @@
 #include "omnidesk/worker_domain_bridge.hpp"
 #include <borealis/core/logger.hpp>
 #include <mutex>
+#include <random>
 
 namespace omnidesk {
 namespace {
@@ -157,6 +158,22 @@ std::optional<std::string> PluginContext::getSecret(const std::string& key) cons
 
 bool PluginContext::setSecret(const std::string& key, const std::string& value) {
     return secrets_.setSecret(plugin_id_, key, value);
+}
+
+const std::string& localUiCallToken() {
+    static const std::string token = []() {
+        std::random_device rd;
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string out;
+        out.reserve(64);
+        for (int i = 0; i < 32; ++i) {
+            const unsigned int byte = rd() & 0xffu;
+            out.push_back(kHex[byte >> 4]);
+            out.push_back(kHex[byte & 0x0f]);
+        }
+        return out;
+    }();
+    return token;
 }
 
 void PluginContext::logInfo(const std::string& msg) const {

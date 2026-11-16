@@ -1,5 +1,6 @@
 #include "omnidesk/entity_bus.hpp"
 #include <algorithm>
+#include <chrono>
 #include <unordered_set>
 
 namespace omnidesk {
@@ -139,6 +140,7 @@ size_t EntityBus::publishExcludingOwner(const std::string& topic,
             }
             if (sub.topic == topic || sub.topic == "*") {
                 targets.push_back({sub.owner_id, sub.handler});
+                ++in_flight_by_owner_[sub.owner_id];
             }
         }
     }
@@ -164,6 +166,18 @@ size_t EntityBus::publishExcludingOwner(const std::string& topic,
                 try {
                     fault_cb(target.owner_id, topic, "unknown subscriber exception");
                 } catch (...) {
+                }
+            }
+        }
+        {
+            std::lock_guard lock(mutex_);
+            auto it = in_flight_by_owner_.find(target.owner_id);
+            if (it != in_flight_by_owner_.end()) {
+                if (it->second <= 1) {
+                    in_flight_by_owner_.erase(it);
+                    owner_idle_cv_.notify_all();
+                } else {
+                    --it->second;
                 }
             }
         }
@@ -198,6 +212,25 @@ std::vector<std::string> EntityBus::activeTopics() const {
     std::vector<std::string> out(unique.begin(), unique.end());
     std::sort(out.begin(), out.end());
     return out;
+}
+
+bool EntityBus::hasInFlightOwner(const std::string& owner_id) const {
+    std::lock_guard lock(mutex_);
+    auto it = in_flight_by_owner_.find(owner_id);
+    return it != in_flight_by_owner_.end() && it->second > 0;
+}
+
+bool EntityBus::waitForOwnerIdle(const std::string& owner_id, int timeout_ms) const {
+    std::unique_lock lock(mutex_);
+    auto idle = [&]() {
+        auto it = in_flight_by_owner_.find(owner_id);
+        return it == in_flight_by_owner_.end() || it->second == 0;
+    };
+    if (timeout_ms <= 0) {
+        return idle();
+    }
+    return owner_idle_cv_.wait_for(
+        lock, std::chrono::milliseconds(timeout_ms), idle);
 }
 
 } // namespace omnidesk
