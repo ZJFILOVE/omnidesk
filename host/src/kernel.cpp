@@ -276,7 +276,9 @@ bool HostKernel::init(const char* argv0) {
             [this](const std::string&, const nlohmann::json& payload) {
                 const std::string pid = payload.is_object() ? payload.value("plugin_id", "") : "";
                 const std::string state = payload.is_object() ? payload.value("state", "") : "";
-                if (!pid.empty() && (state == "unloaded" || state == "disabled" || state == "removed")) {
+                const bool loaded = payload.is_object() ? payload.value("loaded", true) : true;
+                if (!pid.empty() &&
+                    (!loaded || state == "unloaded" || state == "disabled" || state == "removed")) {
                     if (search_index_ && search_index_->isOpen()) {
                         search_index_->clearSource(pid);
                     }

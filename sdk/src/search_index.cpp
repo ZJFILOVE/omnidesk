@@ -72,10 +72,20 @@ std::string makeSnippet(const std::string& title,
                         const std::string& body,
                         const std::string& query) {
     auto truncateUtf8 = [](const std::string& src, size_t max_bytes) -> std::string {
-        if (src.size() <= max_bytes) return src;
-        size_t cut = max_bytes > 3 ? max_bytes - 3 : max_bytes;
-        while (cut > 0 && (static_cast<unsigned char>(src[cut]) & 0xC0) == 0x80) --cut;
-        return src.substr(0, cut) + "...";
+        (void)max_bytes;
+        size_t cut = src.size();
+        while (cut > 0 && (static_cast<unsigned char>(src[cut - 1]) & 0xC0) == 0x80) {
+            --cut;
+        }
+        if (cut > 0) {
+            const unsigned char lead = static_cast<unsigned char>(src[cut - 1]);
+            size_t expected = 1;
+            if ((lead & 0xE0) == 0xC0) expected = 2;
+            else if ((lead & 0xF0) == 0xE0) expected = 3;
+            else if ((lead & 0xF8) == 0xF0) expected = 4;
+            if (cut - 1 + expected > src.size()) --cut;
+        }
+        return src.substr(0, cut);
     };
     if (!body.empty()) {
         if (!query.empty()) {
@@ -89,16 +99,27 @@ std::string makeSnippet(const std::string& title,
                 if (pos != std::string::npos) {
                     size_t start = pos > 36 ? pos - 36 : 0;
                     while (start > 0 && (static_cast<unsigned char>(body[start]) & 0xC0) == 0x80) --start;
-                    std::string slice = body.substr(start, 140);
+                    std::string slice = truncateUtf8(body.substr(start, 137), 140);
                     if (start > 0) slice = "..." + slice;
-                    return truncateUtf8(slice, 144);
+                    return slice;
                 }
             }
         }
-        return truncateUtf8(body, 140);
+        std::string slice = body.size() > 140 ? body.substr(0, 137) : body;
+        slice = truncateUtf8(slice, 140);
+        if (body.size() > slice.size()) slice += "...";
+        return slice;
     }
-    if (!subtitle.empty()) return truncateUtf8(subtitle, 140);
-    return truncateUtf8(title, 140);
+    if (!subtitle.empty()) {
+        std::string slice = subtitle.size() > 140 ? subtitle.substr(0, 137) : subtitle;
+        slice = truncateUtf8(slice, 140);
+        if (subtitle.size() > slice.size()) slice += "...";
+        return slice;
+    }
+    std::string slice = title.size() > 140 ? title.substr(0, 137) : title;
+    slice = truncateUtf8(slice, 140);
+    if (title.size() > slice.size()) slice += "...";
+    return slice;
 }
 
 std::string colText(sqlite3_stmt* stmt, int col) {
@@ -282,7 +303,8 @@ struct SearchIndexService::Impl {
         if (!db || doc.doc_id.empty()) return false;
         if (!stmt_upsert_doc && !prepareHotStatementsLocked()) return false;
 
-        const std::string payload_str = doc.payload.dump();
+        const std::string payload_str =
+            doc.payload.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         // Fast skip if the existing document already has identical indexed fields & payload.
         if (stmt_check_doc) {

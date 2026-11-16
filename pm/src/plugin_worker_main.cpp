@@ -80,7 +80,8 @@ public:
     }
 
     bool sendJson(const nlohmann::json& j) {
-        const std::string line = j.dump() + "\n";
+        const std::string line =
+            j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
         std::lock_guard<std::mutex> lk(write_mutex_);
         if (write_fd_ < 0) return false;
         return writeAllFd(write_fd_, line);

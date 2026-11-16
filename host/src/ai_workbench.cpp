@@ -478,7 +478,7 @@ void saveAiChatSessionsToDisk(const std::vector<AiChatSession>& sessions) {
     {
         std::ofstream ofs(tmp, std::ios::trunc);
         if (!ofs) return;
-        ofs << root.dump(2);
+        ofs << root.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
     }
     std::filesystem::rename(tmp, path, ec);
 }

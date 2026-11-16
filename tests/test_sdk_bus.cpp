@@ -2464,6 +2464,31 @@ for line in rx:
         auto r_cjk1 = s_caps.call("search.index.v1", {{"action", "query"}, {"q", "书"}});
         TEST_CHECK(r_cjk1.ok && r_cjk1.data["total"].get<size_t>() >= 1);
 
+        std::string cjk_body;
+        for (int i = 0; i < 40; ++i) cjk_body += "中";
+        cjk_body += " boundarymarker ";
+        for (int i = 0; i < 80; ++i) cjk_body += "文";
+        auto r_cjk_snip = s_caps.call("search.index.v1", {
+            {"action", "upsert"},
+            {"doc", {{"doc_id", "custom:cjk-snippet"}, {"kind", "journal_article"},
+                     {"domain", "text"}, {"title", "中文截断回归"}, {"body", cjk_body}}},
+        });
+        TEST_CHECK(r_cjk_snip.ok);
+        auto r_cjk_snip_hit = s_caps.call("search.index.v1", {
+            {"action", "query"}, {"q", "boundarymarker"}, {"kind", "journal_article"},
+        });
+        TEST_CHECK(r_cjk_snip_hit.ok && r_cjk_snip_hit.data["hits"].size() == 1);
+        const std::string snippet = r_cjk_snip_hit.data["hits"][0].value("snippet", "");
+        TEST_CHECK(snippet.find("boundarymarker") != std::string::npos);
+        bool snippet_json_ok = true;
+        try {
+            nlohmann::json probe = {{"snippet", snippet}};
+            (void)probe.dump();
+        } catch (...) {
+            snippet_json_ok = false;
+        }
+        TEST_CHECK(snippet_json_ok);
+
         // Custom upsert + remove + stats
         auto r_up = s_caps.call("search.index.v1", {
             {"action", "upsert"},
