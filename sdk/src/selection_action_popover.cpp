@@ -413,8 +413,8 @@ private:
             return;
         }
         if (ctx_.bus) {
-            ctx_.bus->publish("entity.search.open", {{"query", q}});
             if (dialog_) dialog_->dismiss();
+            ctx_.bus->publish("entity.search.open", {{"query", q}});
         }
     }
 

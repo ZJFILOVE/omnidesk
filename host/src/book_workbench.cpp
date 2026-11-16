@@ -6,6 +6,7 @@
 
 #include <SDL.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -4940,6 +4941,12 @@ void BookWorkbench::promptCreateGroup() {
 
 void BookWorkbench::promptBatchMoveGroup(const std::vector<BookItem>& selected_books) {
     if (selected_books.empty()) return;
+    auto closed = std::make_shared<std::atomic<bool>>(false);
+    auto closeOnce = [closed]() {
+        if (closed->exchange(true)) return false;
+        brls::Application::popActivity();
+        return true;
+    };
     auto* backdrop = new brls::Box(brls::Axis::COLUMN);
     backdrop->setWidthPercentage(100);
     backdrop->setHeightPercentage(100);
@@ -4958,8 +4965,9 @@ void BookWorkbench::promptBatchMoveGroup(const std::vector<BookItem>& selected_b
     grp_wrap->setMarginTop(14);
     grp_wrap->setMarginBottom(14);
 
-    auto applyMove = [this, alive = alive_, selected_books](const std::string& gid, const std::string& gname) {
-        brls::Application::popActivity();
+    auto applyMove = [this, alive = alive_, selected_books, closeOnce](const std::string& gid,
+                                                                       const std::string& gname) {
+        if (!closeOnce()) return;
         brls::sync([this, alive, selected_books, gid, gname]() {
             if (!alive->load(std::memory_order_acquire)) return;
             beginLibraryBusSuppression();
@@ -4987,13 +4995,14 @@ void BookWorkbench::promptBatchMoveGroup(const std::vector<BookItem>& selected_b
         grp_wrap->addView(gb);
     }
 
-    auto* create_and_move = ui::makeButton("+ 新建分组并移入...", [this, alive = alive_, selected_books]() {
+    auto* create_and_move = ui::makeButton("+ 新建分组并移入...",
+                                           [this, alive = alive_, selected_books, closeOnce]() {
         if (auto* plat = brls::Application::getPlatform()) {
             plat->getImeManager()->openForText(
-                [this, alive, selected_books](std::string name) {
-                    brls::sync([this, alive, selected_books, name = std::move(name)]() {
+                [this, alive, selected_books, closeOnce](std::string name) {
+                    brls::sync([this, alive, selected_books, closeOnce, name = std::move(name)]() {
                         if (!alive->load(std::memory_order_acquire) || name.empty()) return;
-                        brls::Application::popActivity();
+                        if (!closeOnce()) return;
                         beginLibraryBusSuppression();
                         const auto g = BookLibraryStore::instance().createGroup(name);
                         if (!g.id.empty()) {
@@ -5015,12 +5024,12 @@ void BookWorkbench::promptBatchMoveGroup(const std::vector<BookItem>& selected_b
 
     auto* cancel_row = new brls::Box(brls::Axis::ROW);
     cancel_row->setJustifyContent(brls::JustifyContent::FLEX_END);
-    cancel_row->addView(ui::makeButton("取消", []() { brls::Application::popActivity(); }, false, 34.0f));
+    cancel_row->addView(ui::makeButton("取消", [closeOnce]() { closeOnce(); }, false, 34.0f));
     card->addView(cancel_row);
 
     backdrop->addView(card);
-    backdrop->registerAction("关闭", brls::ControllerButton::BUTTON_B, [](brls::View*) {
-        brls::Application::popActivity();
+    backdrop->registerAction("关闭", brls::ControllerButton::BUTTON_B, [closeOnce](brls::View*) {
+        closeOnce();
         return true;
     });
     auto* act = new brls::Activity(backdrop);
