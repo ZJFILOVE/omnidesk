@@ -1375,6 +1375,7 @@ void PlaybackCoordinator::play() {
     MPVCore* m = nullptr;
     PlaybackSessionState snap;
     bool retry_resolve = false;
+    bool resume_suspended = false;
     uint64_t gen = 0;
     PlaybackTrack retry_track;
     DeferredStreamTarget retry_target;
@@ -1382,6 +1383,8 @@ void PlaybackCoordinator::play() {
         std::lock_guard<std::mutex> lk(impl_->mutex);
         impl_->user_stopped = false;
         m = impl_->mpv;
+        resume_suspended = impl_->session.active_role == PlaybackRole::None &&
+            impl_->session.has_suspended_music;
         if (impl_->session.active_role != PlaybackRole::None &&
             !impl_->stream_resolving &&
             (impl_->session.active_track.options.url.empty() ||
@@ -1394,6 +1397,9 @@ void PlaybackCoordinator::play() {
                 retry_resolve = true;
             }
         }
+    }
+    if (resume_suspended && resumeSuspendedMusic()) {
+        return;
     }
     if (retry_resolve) {
         impl_->startStreamResolution(gen, std::move(retry_track), std::move(retry_target));

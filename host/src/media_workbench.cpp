@@ -456,12 +456,19 @@ AppleMusicLookup extractAppleMusicLookup(const MediaItem& item) {
     return out;
 }
 
+bool isBilibiliSourceId(const std::string& source_id) {
+    return source_id == "bilibili" || source_id == "plugin-bilibili";
+}
+
+bool isYoutubeSourceId(const std::string& source_id) {
+    return source_id == "youtube" || source_id == "plugin-youtube";
+}
+
 bool isPlayableOrResolvableItem(const MediaItem& item) {
     if (item.id.rfind("demo-", 0) == 0 || item.id.rfind("cache:", 0) == 0) return false;
     if (!item.play_url.empty()) return true;
     if (extractAppleMusicLookup(item).is_apple_music) return true;
-    if (item.source_id == "bilibili" || item.source_id == "youtube" ||
-        item.source_id == "plugin-bilibili" || item.source_id == "plugin-youtube") {
+    if (isBilibiliSourceId(item.source_id) || isYoutubeSourceId(item.source_id)) {
         return !item.id.empty();
     }
     if (item.extra.is_object()) {
@@ -3618,7 +3625,22 @@ void MediaWorkbench::renderNasView() {
                                 item.source_badge = "飞牛 NAS";
                                 item.play_url = res.data.value("play_url", "");
                                 item.extra = {{"local_path", res.data.value("path", epath)}};
+                                if (item.kind == "music" &&
+                                    std::none_of(current_items_.begin(), current_items_.end(),
+                                                 [&item](const MediaItem& it) {
+                                                     return it.id == item.id &&
+                                                         it.source_id == item.source_id;
+                                                 })) {
+                                    current_items_.push_back(item);
+                                }
                                 selectItem(item, true);
+                                if (item.kind == "music" && isPlayableOrResolvableItem(item)) {
+                                    const auto opts = buildPlaybackOptions(active_item_);
+                                    last_loaded_stream_key_ =
+                                        active_item_.source_id + ":" + active_item_.id + "|" +
+                                        opts.url + "|" + opts.audio_url;
+                                    playVisibleMusic();
+                                }
                             },
                             [this, alive, req]() {
                                 if (!alive->load(std::memory_order_acquire)) return;
@@ -4399,10 +4421,10 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                 const bool is_demo = (item.id.rfind("demo-", 0) == 0);
                 const auto am = extractAppleMusicLookup(item);
                 if (!is_demo && item.play_url.empty() &&
-                    (item.source_id == "bilibili" || item.source_id == "youtube") &&
+                    (isBilibiliSourceId(item.source_id) || isYoutubeSourceId(item.source_id)) &&
                     caps.has("media.source.v1")) {
                     const std::string target_plugin =
-                        (item.source_id == "youtube") ? "plugin-youtube" : "plugin-bilibili";
+                        isYoutubeSourceId(item.source_id) ? "plugin-youtube" : "plugin-bilibili";
                     const nlohmann::json req_json = {{"action", "playurl"}, {"id", item.id}};
                     auto res = caps.callProvider(target_plugin, "media.source.v1", req_json);
                     if (!res.ok && res.error.find("not found") != std::string::npos) {
@@ -4439,8 +4461,11 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                         }
                     }
                 }
-                if (!cancel->isCancelled() && item.source_id == "bilibili" && caps.has("media.danmaku.v1")) {
-                    auto dm_res = caps.call("media.danmaku.v1", {{"bvid", item.id}});
+                if (!cancel->isCancelled() && isBilibiliSourceId(item.source_id) &&
+                    caps.has("media.danmaku.v1")) {
+                    const std::string bvid = item.extra.is_object()
+                        ? item.extra.value("bvid", item.id) : item.id;
+                    auto dm_res = caps.call("media.danmaku.v1", {{"bvid", bvid}});
                     if (dm_res.ok && dm_res.data.contains("items") && dm_res.data["items"].is_array()) {
                         for (const auto& row : dm_res.data["items"]) {
                             if (!row.is_object()) continue;
@@ -4581,7 +4606,7 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                     if (!details.audio_url.empty()) {
                         active_item_.extra["audio_url"] = std::move(details.audio_url);
                     }
-                    if (active_item_.source_id == "bilibili") {
+                    if (isBilibiliSourceId(active_item_.source_id)) {
                         if (details.android_media) {
                             active_item_.extra.erase("http_headers");
                             active_item_.extra["referrer"] = "";
@@ -4590,7 +4615,7 @@ void MediaWorkbench::selectItem(const MediaItem& item, bool switch_to_player) {
                             active_item_.extra["referrer"] = "https://www.bilibili.com";
                             active_item_.extra["user_agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36";
                         }
-                    } else if (active_item_.source_id == "youtube") {
+                    } else if (isYoutubeSourceId(active_item_.source_id)) {
                         active_item_.extra.erase("referrer");
                         active_item_.extra["user_agent"] =
                             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
@@ -5722,8 +5747,24 @@ void MediaWorkbench::triggerSubHunterMatch() {
                 active_item_.extra["subtitle_urls"] = nlohmann::json::array({final_sub_path});
                 active_item_.has_bilingual_sub = true;
                 if (mpv_stage_) {
+                    auto& core = mpv_stage_->core();
+                    const auto stage_state = core.state();
                     MediaRequestOptions opts = buildPlaybackOptions(active_item_);
-                    if (!opts.url.empty()) {
+                    const auto url_base = [](std::string url) {
+                        const auto query = url.find('?');
+                        if (query != std::string::npos) url.resize(query);
+                        return url;
+                    };
+                    const bool same_media = stage_state.initialized && !stage_state.stopped &&
+                        !opts.url.empty() &&
+                        url_base(stage_state.current_url) == url_base(opts.url);
+                    if (same_media) {
+                        core.addSubtitleFile(final_sub_path);
+                        mpv_stage_->setSubtitles(active_lyrics_);
+                    } else if (!opts.url.empty()) {
+                        if (stage_state.position_sec > 0.0) {
+                            opts.start_seconds = stage_state.position_sec;
+                        }
                         mpv_stage_->loadMedia(opts, active_lyrics_, active_chapters_, active_item_.title);
                     }
                 }

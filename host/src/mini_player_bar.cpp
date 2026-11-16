@@ -261,7 +261,7 @@ void MiniPlayerBar::refresh(const PlaybackSessionState& session) {
         meta_label_->setText(meta);
     }
 
-    const bool paused = session.mpv.paused || !session.mpv.playing;
+    const bool paused = !has_active || session.mpv.paused || !session.mpv.playing;
     if (play_btn_ && paused != last_paused_) {
         last_paused_ = paused;
         play_btn_->setText(paused ? "播放" : "暂停");
@@ -296,8 +296,10 @@ void MiniPlayerBar::updateProgress(const PlaybackSessionState& session) {
         (session.active_role != PlaybackRole::None && !session.active_track.item.id.empty());
     const PlaybackTrack& shown_track =
         has_active ? session.active_track : session.suspended_music_track;
-    const double pos = std::max(0.0, session.mpv.position_sec);
-    const double dur = session.mpv.duration_sec > 0.0
+    const double pos = has_active
+                           ? std::max(0.0, session.mpv.position_sec)
+                           : std::max(0.0, session.suspended_music_position_sec);
+    const double dur = has_active && session.mpv.duration_sec > 0.0
                            ? session.mpv.duration_sec
                            : std::max(0.0, shown_track.item.duration_sec);
     if (time_label_) {
