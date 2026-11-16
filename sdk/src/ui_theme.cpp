@@ -122,6 +122,9 @@ void applyDesignSystemTheme() {
 }
 
 NVGcolor color(const std::string& token) {
+    if (brls::Application::getPlatform() == nullptr) {
+        return nvgRGB(41, 39, 38);
+    }
     auto theme = brls::Application::getTheme();
     try {
         return theme.getColor(token);
@@ -168,7 +171,9 @@ brls::Button* makeButton(const std::string& text,
         btn->setBackgroundColor(color("desktop/surface"));
     }
     btn->registerClickAction([fn = std::move(on_click)](brls::View*) {
-        if (fn) fn();
+        if (fn) {
+            brls::sync([fn]() { fn(); });
+        }
         return true;
     });
     return btn;

@@ -28,6 +28,7 @@ private:
     std::shared_ptr<CancelToken> catalog_request_;
     uint64_t auth_sub_token_ = 0;
     bool syncing_catalog_ = false;
+    bool refresh_pending_ = false;
     brls::Box* body_ = nullptr;
 };
 

@@ -2201,7 +2201,6 @@ void AuthCenterManager::startBrowserCookieLogin(
             "--app=" + target_url,
             "--user-data-dir=" + profile_dir.string(),
             "--remote-debugging-port=0",
-            "--remote-allow-origins=*",
             "--no-first-run",
             "--no-default-browser-check",
             "--password-store=basic",

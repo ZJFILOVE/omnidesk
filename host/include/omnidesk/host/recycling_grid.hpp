@@ -183,7 +183,6 @@ private:
 
     bool static_mode_ = false;
     float last_layout_width_ = 0.0f;
-    float last_layout_height_ = 0.0f;
     float cached_cell_width_ = 0.0f;
 
     size_t cached_item_count_ = 0;

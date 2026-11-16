@@ -362,6 +362,23 @@ void PluginStoreView::refreshIfNeeded() {
 }
 
 void PluginStoreView::refresh() {
+    if (!alive_->load(std::memory_order_acquire)) return;
+    if (brls::Application::getActivitiesStack().size() > 1) {
+        if (refresh_pending_) return;
+        refresh_pending_ = true;
+        brls::delay(300, [this, alive = alive_]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            refresh_pending_ = false;
+            refresh();
+        });
+        return;
+    }
+    for (brls::View* cur = brls::Application::getCurrentFocus(); cur; cur = cur->getParent()) {
+        if (cur == this) {
+            brls::Application::giveFocus(nullptr);
+            break;
+        }
+    }
     dirty_ = false;
     auto& kernel = HostKernel::instance();
     if (!kernel.isInitialized()) return;

@@ -665,7 +665,8 @@ bool readCommittedFile(const fs::path& repo, const std::string& head,
 
 bool verifyVaultCurrentPublication(const fs::path& music_repo, const std::string& music_head,
                                    const fs::path& vault_repo, const ManifestDay& day,
-                                   const std::string& music_state_raw, std::string& error) {
+                                   const std::string& music_state_raw, std::string& error,
+                                   bool execute_gate) {
     std::string vault_head;
     if (vault_repo.empty() || !verifyCleanGitRepo(vault_repo, vault_head, error)) {
         error = "Clean obsidian-vault checkout required when local_sync_gate.py is unavailable";
@@ -712,7 +713,8 @@ bool verifyVaultCurrentPublication(const fs::path& music_repo, const std::string
         error = "Missing or mismatched PUBLISHED transaction bundle / QA receipt for " + day.date;
         return false;
     }
-    if (fs::exists(music_repo / "scripts" / "publication_gate.py") && fs::exists("/usr/bin/python3")) {
+    if (execute_gate && fs::exists(music_repo / "scripts" / "publication_gate.py") &&
+        fs::exists("/usr/bin/python3")) {
         std::string gate_out;
         return runProcess(music_repo, {
             "/usr/bin/python3", (music_repo / "scripts" / "publication_gate.py").string(),
@@ -764,7 +766,7 @@ bool authorizeDailyRepository(const nlohmann::json& req, const fs::path& music_r
                               std::vector<std::string>& targets_out,
                               std::string& music_head_out,
                               std::vector<std::string>& anomalies_out,
-                              std::string& error) {
+                              std::string& error, bool execute_gate = true) {
     days_out.clear();
     targets_out.clear();
     anomalies_out.clear();
@@ -846,7 +848,7 @@ bool authorizeDailyRepository(const nlohmann::json& req, const fs::path& music_r
             return false;
         }
         const fs::path gate = music_repo / "scripts" / "local_sync_gate.py";
-        if (fs::exists(gate) && fs::exists("/usr/bin/python3")) {
+        if (execute_gate && fs::exists(gate) && fs::exists("/usr/bin/python3")) {
             std::string gate_out;
             if (!runProcess(music_repo, {
                     "/usr/bin/python3", gate.string(), "--repo", music_repo.string(),
@@ -863,7 +865,8 @@ bool authorizeDailyRepository(const nlohmann::json& req, const fs::path& music_r
                 return false;
             }
         }
-        if (!verifyVaultCurrentPublication(music_repo, music_head_out, vault_repo, found->second, state_raw, error)) {
+        if (!verifyVaultCurrentPublication(music_repo, music_head_out, vault_repo, found->second,
+                                           state_raw, error, execute_gate)) {
             return false;
         }
         days_out.push_back(found->second);
@@ -874,7 +877,7 @@ bool authorizeDailyRepository(const nlohmann::json& req, const fs::path& music_r
     for (const auto& [date, _] : by_date) dates.push_back(date);
     std::sort(dates.rbegin(), dates.rend());
     const fs::path gate = music_repo / "scripts" / "local_sync_gate.py";
-    if (fs::exists(gate) && fs::exists("/usr/bin/python3")) {
+    if (execute_gate && fs::exists(gate) && fs::exists("/usr/bin/python3")) {
         std::string gate_out;
         if (!runProcess(music_repo, {
                 "/usr/bin/python3", gate.string(), "--repo", music_repo.string(),
@@ -883,7 +886,8 @@ bool authorizeDailyRepository(const nlohmann::json& req, const fs::path& music_r
             return false;
         }
     }
-    if (!verifyVaultCurrentPublication(music_repo, music_head_out, vault_repo, by_date.at(dates.front()), state_raw, error)) {
+    if (!verifyVaultCurrentPublication(music_repo, music_head_out, vault_repo,
+                                       by_date.at(dates.front()), state_raw, error, execute_gate)) {
         return false;
     }
     std::unordered_set<std::string> seen;
@@ -1084,7 +1088,7 @@ omnidesk::CapabilityResult MusicEngine::handlePlaylistRpc(
         std::string music_head;
         std::vector<std::string> history_anomalies;
         if (!authorizeDailyRepository(req, music_repo, vault_repo, sync_all, days, targets,
-                                      music_head, history_anomalies, err)) {
+                                      music_head, history_anomalies, err, !dry_run)) {
             return fail("publication_not_authorized", err);
         }
 

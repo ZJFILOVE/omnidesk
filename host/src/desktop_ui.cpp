@@ -116,6 +116,44 @@ State& state() {
     return s;
 }
 
+void forgetCachedView(brls::View* view) {
+    if (!view) return;
+    auto& st = state();
+    if (st.hint_root == view) {
+        st.hint_mode = false;
+        st.hint_root = nullptr;
+        st.hint_prefix.clear();
+        st.hints.clear();
+    }
+    st.hints.erase(
+        std::remove_if(st.hints.begin(), st.hints.end(),
+                       [view](const HintTarget& hint) { return hint.view == view; }),
+        st.hints.end());
+    if (st.last_observed_root == view) st.last_observed_root = nullptr;
+    if (st.scroll_cache_root == view) {
+        st.scroll_cache_root = nullptr;
+        st.scroll_cache_dirty = true;
+    }
+    if (st.cached_nav_rail == view) st.cached_nav_rail = nullptr;
+    if (st.last_root == view) st.last_root = nullptr;
+    if (st.last_focused_view == view) st.last_focused_view = nullptr;
+    if (st.last_pane_box == view) st.last_pane_box = nullptr;
+    if (st.pre_focus_scroll_sf == view) {
+        st.pre_focus_scroll_sf = nullptr;
+        st.adjust_scroll_after_focus = false;
+    }
+    if (st.hovered_view == view) {
+        st.hovered_view = nullptr;
+        st.hover_dirty = true;
+    }
+    st.dirty_subtrees.erase(
+        std::remove(st.dirty_subtrees.begin(), st.dirty_subtrees.end(), view),
+        st.dirty_subtrees.end());
+    st.cached_scroll_frames.erase(
+        std::remove(st.cached_scroll_frames.begin(), st.cached_scroll_frames.end(), view),
+        st.cached_scroll_frames.end());
+}
+
 brls::View* currentRootView() {
     const auto& stack = brls::Application::getActivitiesStack();
     return stack.empty() ? nullptr : stack.back()->getContentView();
@@ -1781,6 +1819,8 @@ void DesktopInputController::install(DesktopCallbacks callbacks) {
                 }
             } else if (eventType == facebook::yoga::Event::NodeDeallocation) {
                 std::lock_guard<std::mutex> lk(st.alloc_mutex);
+                forgetCachedView(static_cast<brls::View*>(
+                    YGNodeGetContext(const_cast<YGNode*>(&node))));
                 st.allocated_ygnodes.erase(&node);
                 st.scroll_cache_dirty = true;
                 st.hover_dirty = true;

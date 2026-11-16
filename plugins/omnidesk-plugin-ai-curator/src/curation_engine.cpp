@@ -1361,6 +1361,20 @@ omnidesk::CapabilityResult CurationEngine::actionPublishDailyBundle(const nlohma
                 std::string mpath = upd.value("path", "");
                 std::string mauto = upd.value("auto_block", "");
                 if (!mpath.empty() && !mauto.empty()) {
+                    if (paths.obsidian_vault_dir.empty()) {
+                        return makeError("invalid_markdown_path",
+                                         "obsidian_vault_dir is not configured");
+                    }
+                    std::error_code path_ec;
+                    const fs::path vault_root =
+                        fs::weakly_canonical(fs::path(paths.obsidian_vault_dir), path_ec);
+                    const fs::path target =
+                        fs::weakly_canonical(fs::path(mpath), path_ec);
+                    const fs::path relative = fs::relative(target, vault_root, path_ec);
+                    if (path_ec || relative.empty() || relative.begin()->string() == "..") {
+                        return makeError("invalid_markdown_path",
+                                         "markdown update must stay inside obsidian_vault_dir");
+                    }
                     std::string uerr;
                     if (!updateMarkdownPreservingNotes(mpath, mauto, &uerr)) {
                         return makeError("markdown_update_failed", uerr);

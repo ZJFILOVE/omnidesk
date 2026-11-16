@@ -326,7 +326,9 @@ int main() {
     CHECK(bad_ledger.data.value("error_code", "") == "unreadable_ledger");
 
     // Handwritten ## Notes preservation + ephemeral_chat_note (今日饮食) isolation
-    const fs::path note_md = temp_root / "daily_note_test.md";
+    const fs::path clean_obs = temp_root / "clean_empty_obs";
+    fs::create_directories(clean_obs);
+    const fs::path note_md = clean_obs / "daily_note_test.md";
     ai_curator::writeFileAtomic(note_md.string(),
         "---\ndate: " + today + "\n---\n\n<!-- AUTO:START -->\nold content\n<!-- AUTO:END -->\n\n## Notes\n\nMy handwritten reflection.\n");
     auto good_daily = caps.call("recommend.feed.v1", {
@@ -343,7 +345,7 @@ int main() {
             {"business_date", today},
             {"receipt", {{"path", ".recommendation/transactions/english/" + today + ".json"}}},
         }},
-        {"obsidian_vault_dir", (temp_root / "clean_empty_obs").string()},
+        {"obsidian_vault_dir", clean_obs.string()},
         {"music_daily_dir", (temp_root / "clean_empty_mus").string()},
         {"ephemeral_chat_note", "今日饮食：清蒸鲈鱼配糙米饭"},
         {"markdown_updates", {{{"path", note_md.string()}, {"auto_block", "new auto content"}}}},

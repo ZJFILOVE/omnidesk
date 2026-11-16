@@ -757,16 +757,12 @@ void RecyclingGrid::onLayout() {
     if (static_mode_ || w <= 1.0f || h <= 1.0f) return;
 
     const bool width_changed = std::abs(w - last_layout_width_) > 1.0f;
-    const bool height_changed = std::abs(h - last_layout_height_) > 1.0f;
     last_layout_width_ = w;
-    last_layout_height_ = h;
 
     if (width_changed) {
         rebuildRowOffsets();
-        syncVisibleRows(true);
-    } else if (height_changed) {
-        syncVisibleRows(false);
     }
+    syncVisibleRows(width_changed);
 }
 
 void RecyclingGrid::draw(NVGcontext* vg,

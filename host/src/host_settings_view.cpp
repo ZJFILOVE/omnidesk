@@ -55,7 +55,23 @@ HostSettingsView::~HostSettingsView() {
 }
 
 void HostSettingsView::refresh() {
-    if (!body_) return;
+    if (!body_ || !alive_->load(std::memory_order_acquire)) return;
+    if (brls::Application::getActivitiesStack().size() > 1) {
+        if (refresh_pending_) return;
+        refresh_pending_ = true;
+        brls::delay(300, [this, alive = alive_]() {
+            if (!alive->load(std::memory_order_acquire)) return;
+            refresh_pending_ = false;
+            refresh();
+        });
+        return;
+    }
+    for (brls::View* cur = brls::Application::getCurrentFocus(); cur; cur = cur->getParent()) {
+        if (cur == body_) {
+            brls::Application::giveFocus(nullptr);
+            break;
+        }
+    }
     body_->clearViews();
     auto& kernel = HostKernel::instance();
     if (!kernel.isInitialized()) return;
@@ -127,9 +143,12 @@ void HostSettingsView::refresh() {
 
     auto* btn_row = new brls::Box(brls::Axis::ROW);
     auto* toggle = ui::makeButton(kernel.isDarkTheme() ? "切换至 Paper 亮色" : "切换至 Graphite 暗色",
-                                  [this]() {
+                                  [this, alive = alive_]() {
+                                      if (!alive->load(std::memory_order_acquire)) return;
                                       if (on_theme_toggled_) on_theme_toggled_();
-                                      brls::sync([this]() { refresh(); });
+                                      brls::sync([this, alive]() {
+                                          if (alive->load(std::memory_order_acquire)) refresh();
+                                      });
                                   },
                                   true, 38.0f);
     toggle->setMarginRight(10);
@@ -215,7 +234,8 @@ void HostSettingsView::refresh() {
     auto* add_cat = ui::makeButton("导入远程第三方插件市场目录 JSON URL", [this]() {
         if (auto* plat = brls::Application::getPlatform()) {
             plat->getImeManager()->openForText(
-                [this](std::string url) {
+                [this, alive = alive_](std::string url) {
+                    if (!alive->load(std::memory_order_acquire)) return;
                     if (url.empty()) return;
                     std::string err;
                     if (HostKernel::instance().catalog().mergeRemoteUrl(url, err)) {
@@ -223,7 +243,9 @@ void HostSettingsView::refresh() {
                     } else {
                         brls::Application::notify("拉取失败: " + err);
                     }
-                    brls::sync([this]() { refresh(); });
+                    brls::sync([this, alive]() {
+                        if (alive->load(std::memory_order_acquire)) refresh();
+                    });
                 },
                 "添加远程 Marketplace Catalog JSON",
                 "输入 HTTPS JSON 索引 URL，将动态并入插件市场目录",

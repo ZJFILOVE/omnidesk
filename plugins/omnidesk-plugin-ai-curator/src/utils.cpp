@@ -239,7 +239,11 @@ bool writeFileAtomicLocked(const std::string& path, const std::string& content, 
 bool writeFileAtomic(const std::string& path, const std::string& content, std::string* error_out) {
     try {
         requireSafePath(path);
-        CacheLock lock(path + ".lock");
+        const fs::path lock_root =
+            fs::temp_directory_path() / ("omnidesk-ai-curator-locks-" + std::to_string(::geteuid()));
+        fs::create_directories(lock_root);
+        ::chmod(lock_root.c_str(), 0700);
+        CacheLock lock((lock_root / (sha256(fs::absolute(path).string()) + ".lock")).string());
         return writeFileAtomicLocked(path, content, error_out);
     } catch (const std::exception& error) {
         if (error_out) *error_out = error.what();

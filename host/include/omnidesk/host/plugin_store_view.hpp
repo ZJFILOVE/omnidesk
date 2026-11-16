@@ -88,6 +88,7 @@ private:
     bool busy_ = false;
     bool radar_busy_ = false;
     bool dirty_ = false;
+    bool refresh_pending_ = false;
     std::unordered_map<std::string, brls::Box*> list_cards_;
     std::unordered_map<std::string, brls::Button*> config_edit_buttons_;
 

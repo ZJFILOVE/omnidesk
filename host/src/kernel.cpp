@@ -545,6 +545,9 @@ std::string HostKernel::controlSocketPath() const {
 }
 
 bool HostKernel::isDarkTheme() const {
+    if (brls::Application::getPlatform() == nullptr) {
+        return true;
+    }
     return brls::Application::getThemeVariant() == brls::ThemeVariant::DARK;
 }
 

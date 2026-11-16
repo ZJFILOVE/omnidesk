@@ -652,3 +652,14 @@ index 0e0474c1..2f6d83b0 100644
  float Label::getFontQuality()
  {
      return this->fontQuality;
+diff --git a/library/lib/core/application.cpp b/library/lib/core/application.cpp
+--- a/library/lib/core/application.cpp
++++ b/library/lib/core/application.cpp
+@@ -1061,4 +1061,7 @@
+ ThemeVariant Application::getThemeVariant()
+ {
++    if (Application::platform == nullptr)
++        return ThemeVariant::DARK;
++
+     return Application::platform->getThemeVariant();
+ }

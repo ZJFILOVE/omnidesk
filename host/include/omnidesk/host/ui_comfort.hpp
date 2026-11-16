@@ -92,7 +92,9 @@ inline brls::Button* makeFilterChip(const std::string& text,
     btn->setBorderColor(bd);
 
     btn->registerClickAction([fn = std::move(on_click)](brls::View*) {
-        if (fn) fn();
+        if (fn) {
+            brls::sync([fn]() { fn(); });
+        }
         return true;
     });
     return btn;
