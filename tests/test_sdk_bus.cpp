@@ -2326,8 +2326,25 @@ for line in rx:
         }
         TEST_CHECK(coord.state().subtitles_attached);
 
+        // Manual play resumes suspended music after a non-restoring video release
+        TEST_CHECK(coord.releaseLease(vid_lease, false));
+        auto st_pending = coord.state();
+        TEST_CHECK(st_pending.active_role == omnidesk::PlaybackRole::None);
+        TEST_CHECK(st_pending.has_suspended_music);
+        coord.play();
+        auto st_manual = coord.state();
+        TEST_CHECK(st_manual.active_role == omnidesk::PlaybackRole::BackgroundMusic);
+        TEST_CHECK(st_manual.active_track.item.id == "track-1");
+        TEST_CHECK(st_manual.active_track.options.start_seconds >= 44.5);
+
+        // Re-suspend on a second video and verify explicit lease release still restores music
+        omnidesk::PlaybackTrack v2 = v1;
+        v2.item.id = "BV1test2";
+        uint64_t vid_lease2 = coord.play(omnidesk::PlaybackRole::ForegroundVideo, "host.media_workbench", v2);
+        TEST_CHECK(vid_lease2 != 0);
+
         // Releasing video lease restores BackgroundMusic at saved breakpoint
-        TEST_CHECK(coord.releaseLease(vid_lease, true));
+        TEST_CHECK(coord.releaseLease(vid_lease2, true));
         auto st_resumed = coord.state();
         TEST_CHECK(st_resumed.active_role == omnidesk::PlaybackRole::BackgroundMusic);
         TEST_CHECK(st_resumed.active_track.item.id == "track-1");
