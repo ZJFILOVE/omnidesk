@@ -629,45 +629,6 @@ omnidesk::CapabilityResult CurationEngine::handleRecommendFeed(const nlohmann::j
     return makeError("unknown_action", "Unsupported recommend.feed.v1 action: " + action);
 }
 
-omnidesk::CapabilityResult CurationEngine::handleAiCuration(const nlohmann::json& req) {
-    if (!req.is_object()) {
-        return makeError("invalid_request", "Request payload must be a JSON object.");
-    }
-    const std::string action = req.value("action", "daily_status");
-    if (action == "daily_status") return actionDailyStatus(req);
-    if (action == "configure_daily_scheduler") return actionConfigureDailyScheduler(req);
-    if (action == "run_daily_pipeline" || action == "run_daily_workflows" ||
-        action == "start_daily_workflows") {
-        return actionRunDailyWorkflows(req);
-    }
-    if (action == "cancel_daily_workflows") return actionCancelDailyWorkflows(req);
-    if (action == "sync_github") return actionSyncGitHub(req);
-    if (action == "rehydrate_archive") return actionBootstrapAndRehydrate(req);
-    if (action == "curate_interactive") {
-        const std::string prompt = trim(req.value("user_prompt", req.value("prompt", "")));
-        if (prompt.empty()) {
-            return makeError("invalid_request", "user_prompt is required for curate_interactive.");
-        }
-        auto search_res = actionSearchArchive({
-            {"query", prompt},
-            {"domain", req.value("domain", "all")},
-            {"limit", req.value("limit", 12)},
-        });
-        if (!search_res.ok) return search_res;
-        nlohmann::json push_req = {
-            {"action", "push_interactive_set"},
-            {"mode", "interactive_ephemeral"},
-            {"record_permanent_history", false},
-            {"title", req.value("title", "AI 灵感推荐 · " + utf8Truncate(prompt, 32))},
-            {"user_prompt", prompt},
-            {"media_items", search_res.data.value("media_items", nlohmann::json::array())},
-            {"text_items", search_res.data.value("text_items", search_res.data.value("text_items", nlohmann::json::array()))},
-        };
-        return actionPushInteractiveSet(push_req);
-    }
-    return makeError("unknown_action", "Unsupported ai.curation.v1 action: " + action);
-}
-
 omnidesk::CapabilityResult CurationEngine::actionBootstrapAndRehydrate(const nlohmann::json& req) {
     const auto t0 = std::chrono::steady_clock::now();
     const RepoPaths paths = GitMirror::resolveRepoPaths(&ctx_, &req);

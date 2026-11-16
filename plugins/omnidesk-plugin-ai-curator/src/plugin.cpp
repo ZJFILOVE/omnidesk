@@ -26,19 +26,6 @@ bool AiCuratorPlugin::onLoad(omnidesk::PluginContext& ctx) {
         },
         100);
 
-    ctx.registerCapability(
-        "ai.curation.v1",
-        [eng = engine_](const nlohmann::json& req) -> omnidesk::CapabilityResult {
-            return eng->handleAiCuration(req);
-        },
-        {
-            {"description", "Daily scheduled pipeline orchestration and interactive ephemeral curation"},
-            {"actions", {"daily_status", "configure_daily_scheduler", "run_daily_pipeline",
-                         "run_daily_workflows", "cancel_daily_workflows", "sync_github",
-                         "rehydrate_archive", "curate_interactive"}},
-        },
-        80);
-
     ctx.registerMediaSource(std::make_shared<CuratorMediaSource>(engine_));
     ctx.registerTextSource(std::make_shared<CuratorTextSource>(engine_));
     ctx.registerBookSource(std::make_shared<CuratorBookSource>(engine_));

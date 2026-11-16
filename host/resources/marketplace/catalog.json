@@ -52,7 +52,6 @@
         "book.source.v1"
       ],
       "consumes": [
-        "ai.curation.v1",
         "media.playlist.v1",
         "vocab.sm2.v1",
         "book.bilingual_pdf.v1"

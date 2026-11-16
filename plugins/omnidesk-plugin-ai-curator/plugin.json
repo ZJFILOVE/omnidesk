@@ -22,8 +22,7 @@
     "verify_cmd": "ctest --output-on-failure"
   },
   "provides": [
-    "recommend.feed.v1",
-    "ai.curation.v1"
+    "recommend.feed.v1"
   ],
   "consumes": [
     "vocab.sm2.v1",

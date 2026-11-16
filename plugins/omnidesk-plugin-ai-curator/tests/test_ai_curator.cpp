@@ -86,6 +86,8 @@ int main() {
 
     ai_curator::AiCuratorPlugin plugin;
     CHECK(plugin.onLoad(ctx));
+    CHECK(caps.has("recommend.feed.v1"));
+    CHECK(!caps.has("ai.curation.v1"));
 
     int recommend_updated_events = 0;
     bus.subscribe("entity.recommend.updated", "test", [&](const std::string&, const nlohmann::json&) {
@@ -570,7 +572,7 @@ int main() {
     CHECK(run_res.data.value("started", false) == true);
     CHECK(fs::exists(today_journal_md));
 
-    auto post_status = caps.call("ai.curation.v1", {
+    auto post_status = caps.call("recommend.feed.v1", {
         {"action", "daily_status"},
         {"obsidian_vault_dir", git_obs.string()},
         {"music_daily_dir", git_mus.string()},

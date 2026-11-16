@@ -23,7 +23,6 @@ public:
     void shutdown();
 
     omnidesk::CapabilityResult handleRecommendFeed(const nlohmann::json& req);
-    omnidesk::CapabilityResult handleAiCuration(const nlohmann::json& req);
     nlohmann::json statusJson() const;
 
     // Domain query methods
