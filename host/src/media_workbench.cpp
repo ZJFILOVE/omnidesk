@@ -829,6 +829,24 @@ public:
         top_row_->addView(sub_pill_.box);
         addView(top_row_);
 
+        thumb_box_ = new brls::Box(brls::Axis::COLUMN);
+        thumb_box_->setWidthPercentage(100);
+        thumb_box_->setCornerRadius(10.0f);
+        thumb_box_->setBackgroundColor(ui::color("desktop/soft"));
+        thumb_box_->setJustifyContent(brls::JustifyContent::CENTER);
+        thumb_box_->setAlignItems(brls::AlignItems::CENTER);
+        thumb_box_->setMarginBottom(8);
+
+        cover_img_ = new CachedImageView(&ImageCache::instance());
+        cover_img_->setWidthPercentage(100);
+        cover_img_->setCornerRadius(10.0f);
+        cover_img_->setScalingType(brls::ImageScalingType::FILL);
+        thumb_box_->addView(cover_img_);
+
+        placeholder_lbl_ = ui::makeLabel("16:9 视频预览", 13.0f, "font/grey");
+        thumb_box_->addView(placeholder_lbl_);
+        addView(thumb_box_);
+
         title_lbl_ = ui::makeLabel("", 16.0f, "brls/text", 1.38f);
         addView(title_lbl_);
 
@@ -862,25 +880,61 @@ public:
 
     void prepareForReuse() override { on_activate_ = nullptr; }
 
-    void bind(const MediaItem& item, std::function<void()> on_activate) {
+    void bind(const MediaItem& item,
+              float inner_cover_w,
+              float cover_h,
+              std::function<void()> on_activate) {
         on_activate_ = std::move(on_activate);
         setBackgroundColor(ui::color("desktop/surface"));
         setBorderColor(ui::color("desktop/line"));
         badge_pill_.bind(item.source_badge.empty() ? "飞牛 NAS" : item.source_badge,
                          "status/info_bg", "domain/media");
         sub_pill_.bind(item.has_bilingual_sub ? "双语字幕" : "", "status/ok_bg", "status/ok_fg");
+
+        const bool url_changed = (item.cover_url != bound_cover_url_);
+        bound_cover_url_ = item.cover_url;
+        thumb_box_->setHeight(std::max(96.0f, cover_h));
+        if (!item.cover_url.empty()) {
+            if (url_changed) {
+                cover_img_->setImageUrl("", {});
+            }
+            placeholder_lbl_->setVisibility(brls::Visibility::GONE);
+            cover_img_->setVisibility(brls::Visibility::VISIBLE);
+            cover_img_->setDimensions(std::max(160.0f, inner_cover_w), std::max(96.0f, cover_h));
+            cover_img_->setImageUrl(item.cover_url, extractHeadersFromItem(item));
+        } else {
+            if (url_changed) {
+                cover_img_->setImageUrl("", {});
+            }
+            cover_img_->setVisibility(brls::Visibility::GONE);
+            placeholder_lbl_->setVisibility(brls::Visibility::VISIBLE);
+        }
+
         title_lbl_->setTextColor(ui::color("brls/text"));
         title_lbl_->setText(clipUtf8Bytes(item.title, 88));
         meta_lbl_->setTextColor(ui::color("font/grey"));
-        meta_lbl_->setText((item.quality_label.empty() ? item.kind : item.quality_label) + " · 点击播放");
+        std::string meta = item.quality_label.empty() ? item.kind : item.quality_label;
+        const int ep_count = item.extra.is_object() ? item.extra.value("episode_count", 0) : 0;
+        if (ep_count > 0) {
+            meta = "共 " + std::to_string(ep_count) + " 集 · " + meta;
+        }
+        const std::string season_code = item.extra.is_object() ? item.extra.value("season_code", "") : "";
+        if (!season_code.empty() && meta.find(season_code) == std::string::npos) {
+            meta = season_code + " · " + meta;
+        }
+        meta_lbl_->setText(meta + " · 点击播放");
     }
 
 private:
     brls::Box* top_row_ = nullptr;
+    brls::Box* thumb_box_ = nullptr;
+    CachedImageView* cover_img_ = nullptr;
+    brls::Label* placeholder_lbl_ = nullptr;
     ReusablePillSlot badge_pill_;
     ReusablePillSlot sub_pill_;
     brls::Label* title_lbl_ = nullptr;
     brls::Label* meta_lbl_ = nullptr;
+    std::string bound_cover_url_;
     std::function<void()> on_activate_;
 };
 
@@ -1376,10 +1430,28 @@ MediaWorkbench::MediaWorkbench(std::function<void(const std::string&)> on_entity
                 return cell;
             }
 
-            auto* cell = static_cast<MediaVideoGridCell*>(recycler->dequeueReusableCell("media_card"));
-            if (!cell || index >= wb->visible_grid_items_.size()) return cell;
-            const MediaItem item = wb->visible_grid_items_[index];
             const float inner_cover_w = std::max(160.0f, recycler->cellColumnWidth() - 48.0f);
+            if (index >= wb->visible_grid_items_.size()) return nullptr;
+            const MediaItem item = wb->visible_grid_items_[index];
+            const bool is_nas_item =
+                wb->sub_mode_ == SubMode::NasLibrary ||
+                item.source_id == "plugin-fnos-nas" ||
+                item.kind == "nas";
+            if (is_nas_item) {
+                auto* cell = static_cast<NasMediaGridCell*>(recycler->dequeueReusableCell("nas_card"));
+                if (!cell) return nullptr;
+                cell->bind(item, inner_cover_w, wb->active_video_cover_h_, [wb, alive, item]() {
+                    brls::sync([wb, alive, item]() {
+                        if (alive->load(std::memory_order_acquire)) {
+                            wb->activateMediaItem(item);
+                        }
+                    });
+                });
+                return cell;
+            }
+
+            auto* cell = static_cast<MediaVideoGridCell*>(recycler->dequeueReusableCell("media_card"));
+            if (!cell) return nullptr;
             cell->bind(item, inner_cover_w, wb->active_video_cover_h_, [wb, alive, item]() {
                 brls::sync([wb, alive, item]() {
                     if (alive->load(std::memory_order_acquire)) {
