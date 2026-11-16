@@ -1950,15 +1950,18 @@ std::vector<omnidesk::MediaItem> CurationEngine::queryMedia(const std::string& c
             }
         }
         std::string target_date = date_filter.empty() ? latest_date : date_filter;
+        std::unordered_set<std::string> seen;
         for (const auto& m : daily_media_) {
             if (m.kind == "music" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, target_date, kw_lower)) {
+                mediaMatchesFilter(m, target_date, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
         for (const auto& m : archive_.media_items) {
             if (m.kind == "music" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, target_date, kw_lower)) {
+                mediaMatchesFilter(m, target_date, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
@@ -1966,15 +1969,18 @@ std::vector<omnidesk::MediaItem> CurationEngine::queryMedia(const std::string& c
     }
 
     if (category == "每日 5 首 · 全量曲库") {
+        std::unordered_set<std::string> seen;
         for (const auto& m : daily_media_) {
             if (m.kind == "music" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, date_filter, kw_lower)) {
+                mediaMatchesFilter(m, date_filter, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
         for (const auto& m : archive_.media_items) {
             if (m.kind == "music" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, date_filter, kw_lower)) {
+                mediaMatchesFilter(m, date_filter, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
@@ -1985,13 +1991,15 @@ std::vector<omnidesk::MediaItem> CurationEngine::queryMedia(const std::string& c
         std::unordered_set<std::string> seen;
         for (const auto& m : daily_media_) {
             if (m.kind == "video" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, date_filter, kw_lower) && seen.insert(m.id).second) {
+                mediaMatchesFilter(m, date_filter, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
         for (const auto& m : archive_.media_items) {
             if (m.kind == "video" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, date_filter, kw_lower) && seen.insert(m.id).second) {
+                mediaMatchesFilter(m, date_filter, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
@@ -2002,13 +2010,15 @@ std::vector<omnidesk::MediaItem> CurationEngine::queryMedia(const std::string& c
         std::unordered_set<std::string> seen;
         for (const auto& m : daily_media_) {
             if (m.kind == "music" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, date_filter, kw_lower) && seen.insert(m.id).second) {
+                mediaMatchesFilter(m, date_filter, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
         for (const auto& m : archive_.media_items) {
             if (m.kind == "music" && !dismissed_ids_.count(m.id) &&
-                mediaMatchesFilter(m, date_filter, kw_lower) && seen.insert(m.id).second) {
+                mediaMatchesFilter(m, date_filter, kw_lower) &&
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
@@ -2024,20 +2034,20 @@ std::vector<omnidesk::MediaItem> CurationEngine::queryMedia(const std::string& c
     for (const auto& s : interactive_sessions_) {
         for (const auto& m : s.media_items) {
             if (!dismissed_ids_.count(m.id) && mediaMatchesFilter(m, date_filter, kw_lower) &&
-                seen.insert(m.id).second) {
+                seen.insert(mediaSessionKey(m)).second) {
                 out.push_back(m);
             }
         }
     }
     for (const auto& m : daily_media_) {
         if (!dismissed_ids_.count(m.id) && mediaMatchesFilter(m, date_filter, kw_lower) &&
-            seen.insert(m.id).second) {
+            seen.insert(mediaSessionKey(m)).second) {
             out.push_back(m);
         }
     }
     for (const auto& m : archive_.media_items) {
         if (!dismissed_ids_.count(m.id) && mediaMatchesFilter(m, date_filter, kw_lower) &&
-            seen.insert(m.id).second) {
+            seen.insert(mediaSessionKey(m)).second) {
             out.push_back(m);
         }
     }
@@ -2047,15 +2057,23 @@ std::vector<omnidesk::MediaItem> CurationEngine::queryMedia(const std::string& c
 std::vector<omnidesk::TextChannel> CurationEngine::textChannels() const {
     std::lock_guard<std::mutex> lock(mutex_);
     int news_c = 0, journal_c = 0, reddit_c = 0, english_c = 0, ix_c = 0;
-    auto count_item = [&](const omnidesk::TextFeedItem& t) {
+    std::unordered_set<std::string> seen;
+    auto count_item = [&](const omnidesk::TextFeedItem& t, const omnidesk::TextArticle& article) {
         if (dismissed_ids_.count(t.id)) return;
+        if (!seen.insert(textSessionKey(t, article)).second) return;
         if (t.category == "news") ++news_c;
         else if (t.category == "journal") ++journal_c;
         else if (t.category == "reddit") ++reddit_c;
         else if (t.category == "english") ++english_c;
     };
-    for (const auto& t : daily_texts_) count_item(t);
-    for (const auto& t : archive_.text_items) count_item(t);
+    for (const auto& t : daily_texts_) {
+        const auto it = daily_articles_.find(t.id);
+        count_item(t, it == daily_articles_.end() ? omnidesk::TextArticle{} : it->second);
+    }
+    for (const auto& t : archive_.text_items) {
+        const auto it = archive_.articles.find(t.id);
+        count_item(t, it == archive_.articles.end() ? omnidesk::TextArticle{} : it->second);
+    }
     for (const auto& s : interactive_sessions_) {
         for (const auto& t : s.text_items) {
             if (!dismissed_ids_.count(t.id)) ++ix_c;
@@ -2087,15 +2105,26 @@ std::vector<omnidesk::TextFeedItem> CurationEngine::queryTextFeed(const std::str
         }
     }
     if (channel_id != "interactive") {
+        std::unordered_set<std::string> seen;
         for (const auto& t : daily_texts_) {
             if (dismissed_ids_.count(t.id)) continue;
             if (!channel_id.empty() && t.category != channel_id) continue;
-            if (textMatchesFilter(t, date_filter, kw_lower)) out.push_back(t);
+            const auto it = daily_articles_.find(t.id);
+            const std::string key =
+                textSessionKey(t, it == daily_articles_.end() ? omnidesk::TextArticle{} : it->second);
+            if (textMatchesFilter(t, date_filter, kw_lower) && seen.insert(key).second) {
+                out.push_back(t);
+            }
         }
         for (const auto& t : archive_.text_items) {
             if (dismissed_ids_.count(t.id)) continue;
             if (!channel_id.empty() && t.category != channel_id) continue;
-            if (textMatchesFilter(t, date_filter, kw_lower)) out.push_back(t);
+            const auto it = archive_.articles.find(t.id);
+            const std::string key =
+                textSessionKey(t, it == archive_.articles.end() ? omnidesk::TextArticle{} : it->second);
+            if (textMatchesFilter(t, date_filter, kw_lower) && seen.insert(key).second) {
+                out.push_back(t);
+            }
         }
     }
     return out;
@@ -2122,6 +2151,12 @@ std::vector<omnidesk::BookItem> CurationEngine::listBooks(const std::string& for
     parseQueryFilter(query, date_filter, kw_lower);
 
     std::vector<omnidesk::BookItem> out;
+    std::unordered_set<std::string> seen;
+    auto append_book = [&](omnidesk::BookItem book) {
+        if (seen.insert(bookSessionKey(book)).second) {
+            out.push_back(std::move(book));
+        }
+    };
     if ((fmt.empty() || fmt == "all" || fmt == "markdown") && !archive_.english_days.empty()) {
         if (date_filter.empty()) {
             omnidesk::BookItem master;
@@ -2135,7 +2170,7 @@ std::vector<omnidesk::BookItem> CurationEngine::listBooks(const std::string& for
             master.bilingual_ready = true;
             master.vocab_count = static_cast<int>(archive_.vocab_cards.size());
             if (kw_lower.empty() || toLowerAscii(master.title + " " + master.author).find(kw_lower) != std::string::npos) {
-                out.push_back(std::move(master));
+                append_book(std::move(master));
             }
         }
 
@@ -2158,7 +2193,7 @@ std::vector<omnidesk::BookItem> CurationEngine::listBooks(const std::string& for
             }
             b.vocab_count = vc;
             if (kw_lower.empty() || toLowerAscii(b.title + " " + titles).find(kw_lower) != std::string::npos) {
-                out.push_back(std::move(b));
+                append_book(std::move(b));
             }
         }
     }
@@ -2171,7 +2206,7 @@ std::vector<omnidesk::BookItem> CurationEngine::listBooks(const std::string& for
             continue;
         }
         if (!kw_lower.empty() && toLowerAscii(b.title + " " + b.author).find(kw_lower) == std::string::npos) continue;
-        out.push_back(b);
+        append_book(b);
     }
     for (const auto& session : interactive_sessions_) {
         for (const auto& b : session.book_items) {
@@ -2185,7 +2220,7 @@ std::vector<omnidesk::BookItem> CurationEngine::listBooks(const std::string& for
                 toLowerAscii(b.title + " " + b.author).find(kw_lower) == std::string::npos) {
                 continue;
             }
-            out.push_back(b);
+            append_book(b);
         }
     }
     return out;

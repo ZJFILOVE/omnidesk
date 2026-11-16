@@ -2718,6 +2718,27 @@ $$
             TEST_CHECK(playurl_calls[1].first == "1833283533" && playurl_calls[1].second == "jp");
         }
 
+        // A missing video provider must fail explicitly instead of falling back to
+        // the generic media.source.v1 provider (plugin-music).
+        const size_t calls_before_missing_video = playurl_calls.size();
+        omnidesk::PlaybackTrack missing_video;
+        missing_video.item = {"BV1missing", "plugin-bilibili", "Missing provider", "Test",
+                              "video", "Bilibili", "", "", "1080p", 60.0, 0.0, 0, false};
+        TEST_CHECK(coord.play(omnidesk::PlaybackRole::ForegroundVideo, "host.test.missing_video",
+                              missing_video) != 0);
+        for (int i = 0; i < 200; ++i) {
+            if (coord.state().mpv.last_error.find("plugin-bilibili") != std::string::npos) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST_CHECK(coord.state().mpv.last_error.find("plugin-bilibili") != std::string::npos);
+        {
+            std::lock_guard<std::mutex> lk(resolved_mu);
+            TEST_CHECK(playurl_calls.size() == calls_before_missing_video);
+        }
+        coord.stop();
+
         coord.shutdown();
         am_mpv.shutdown();
         am_ui.shutdown(1000);

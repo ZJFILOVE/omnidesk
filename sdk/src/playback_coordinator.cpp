@@ -360,6 +360,14 @@ DeferredStreamTarget analyzeDeferredStreamTarget(const PlaybackTrack& track) {
     return out;
 }
 
+bool hasMediaSourceProvider(const CapabilityRegistry& caps, const std::string& plugin_id) {
+    if (plugin_id.empty()) return false;
+    const auto providers = caps.providersFor("media.source.v1");
+    return std::any_of(providers.begin(), providers.end(), [&](const CapabilityDescriptor& provider) {
+        return provider.plugin_id == plugin_id;
+    });
+}
+
 } // namespace
 
 const char* playbackRoleLabel(PlaybackRole role) {
@@ -537,10 +545,28 @@ struct PlaybackCoordinator::Impl {
             caps_ptr = caps;
             runner = ui_tasks;
         }
-        if (!caps_ptr || !target.needed || !caps_ptr->has("media.source.v1")) {
+        if (!caps_ptr || !target.needed) {
             std::lock_guard<std::mutex> lk(mutex);
             if (generation == gen) {
                 stream_resolving = false;
+            }
+            return;
+        }
+        if (!hasMediaSourceProvider(*caps_ptr, target.target_plugin)) {
+            PlaybackSessionState err_snap;
+            bool notify_err = false;
+            {
+                std::lock_guard<std::mutex> lk(mutex);
+                if (generation == gen) {
+                    stream_resolving = false;
+                    session.mpv.last_error =
+                        "未安装 " + target.target_plugin + "（media.source.v1），无法解析播放地址";
+                    err_snap = session;
+                    notify_err = true;
+                }
+            }
+            if (notify_err) {
+                notifyListeners(err_snap, true, "playback.state_changed");
             }
             return;
         }
@@ -549,10 +575,8 @@ struct PlaybackCoordinator::Impl {
                          target = std::move(target)](const std::shared_ptr<CancelToken>& c) mutable {
             if (!alive_flag->load(std::memory_order_acquire) || (c && c->isCancelled())) return;
 
-            CapabilityResult res = caps_ptr->callProvider(target.target_plugin, "media.source.v1", target.playurl_req);
-            if (!res.ok && res.error.find("not found") != std::string::npos) {
-                res = caps_ptr->call("media.source.v1", target.playurl_req);
-            }
+            CapabilityResult res =
+                caps_ptr->callProvider(target.target_plugin, "media.source.v1", target.playurl_req);
             if (!alive_flag->load(std::memory_order_acquire) || (c && c->isCancelled())) return;
 
             if (!res.ok || !res.data.is_object()) {
@@ -693,9 +717,6 @@ struct PlaybackCoordinator::Impl {
                 if (!target.apple_storefront.empty()) lreq["storefront"] = target.apple_storefront;
                 if (!target.apple_url.empty()) lreq["url"] = target.apple_url;
                 CapabilityResult lres = caps_ptr->callProvider("plugin-music", "media.source.v1", lreq);
-                if (!lres.ok && lres.error.find("not found") != std::string::npos) {
-                    lres = caps_ptr->call("media.source.v1", lreq);
-                }
                 if (lres.ok && lres.data.is_object() &&
                     alive_flag->load(std::memory_order_acquire) && !(c && c->isCancelled())) {
                     const nlohmann::json* larr = nullptr;

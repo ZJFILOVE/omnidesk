@@ -216,6 +216,11 @@ std::string toLowerCopy(std::string s) {
     return s;
 }
 
+bool isEnglishArchiveBook(const BookItem& book) {
+    return book.source_id == "plugin-ai-curator" &&
+           (book.id == "english-archive-all" || book.id.rfind("english-date-", 0) == 0);
+}
+
 bool sameVocabCard(const VocabCard& a, const VocabCard& b) {
     return a.word == b.word && a.lemma == b.lemma && a.phonetic == b.phonetic &&
            a.etymology == b.etymology && a.meaning == b.meaning &&
@@ -1659,7 +1664,7 @@ void BookWorkbench::refresh() {
                     size_t shelf_count = 0;
                     size_t reading_count = 0;
                     for (const auto& b : books_) {
-                        if (b.source_id == "plugin-ai-curator") continue;
+                        if (isEnglishArchiveBook(b)) continue;
                         ++shelf_count;
                         const auto entry = BookLibraryStore::instance().entryForBook(b);
                         if (BookLibraryStore::effectiveStatus(b, entry) == BookReadingStatus::Reading) {
@@ -1837,7 +1842,7 @@ std::vector<BookItem> BookWorkbench::collectBatchSelectedBooks() const {
     std::vector<BookItem> selected;
     auto& store = BookLibraryStore::instance();
     for (const auto& b : books_) {
-        if (b.source_id == "plugin-ai-curator") continue;
+        if (isEnglishArchiveBook(b)) continue;
         const auto entry = store.entryForBook(b);
         if (entry.removed_from_shelf) continue;
         if (batch_selected_keys_.count(entry.key) > 0) {
@@ -2002,7 +2007,7 @@ void BookWorkbench::renderBookshelf() {
     size_t count_finished = 0;
 
     for (const auto& b : books_) {
-        if (b.source_id == "plugin-ai-curator") continue;
+        if (isEnglishArchiveBook(b)) continue;
         ShelfDisplayItem item;
         item.book = b;
         item.entry = store.entryForBook(b);
