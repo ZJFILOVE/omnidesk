@@ -2356,6 +2356,7 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
     switchTab(DockTab::Chat);
 
     auto& sess = currentSession();
+    const std::string session_id = sess.id;
     const bool first_msg = sess.messages.empty();
     sess.domain = domain_;
     if (!entity_summary_.empty()) {
@@ -2474,6 +2475,7 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
             {"sync_playlist", sync_playlist},
             {"playlist_name", "OmniDesk AI 灵感电台"},
             {"stream", true},
+            {"session_id", session_id},
         };
         caps.callStreamAsync(
             "ai.curation.v1",
@@ -2535,8 +2537,8 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
     caps.callAsync(
         "recommend.feed.v1",
         {{"action", "search_archive"}, {"query", prompt}, {"limit", 8}},
-        [this, alive = alive_, cancel, seq, prompt](const CapabilityResult& res) {
-            brls::sync([this, alive, cancel, seq, prompt, res]() {
+        [this, alive = alive_, cancel, seq, prompt, session_id](const CapabilityResult& res) {
+            brls::sync([this, alive, cancel, seq, prompt, session_id, res]() {
                 if (!alive->load(std::memory_order_acquire) || seq != active_req_seq_) return;
                 if (res.cancelled || cancel->isCancelled()) {
                     finalizeActiveStream("历史归档策展 · 已中断", "[已取消]", "", false);
@@ -2563,9 +2565,9 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
                             std::string dt = it.value("business_date", it.value("date", ""));
                             if (!dt.empty()) summary += " `[" + dt + "]`";
                             summary += "\n";
-                            std::string dom = it.value("domain", "");
-                            if (dom == "text" || it.contains("url")) text_items.push_back(it);
-                            else if (dom == "book" || it.contains("format")) book_items.push_back(it);
+                            const std::string dom = classifyAiCurationItem(it);
+                            if (dom == "text") text_items.push_back(it);
+                            else if (dom == "book") book_items.push_back(it);
                             else media_items.push_back(it);
                         }
                         break;
@@ -2579,6 +2581,7 @@ void AiCompanionDock::dispatchCurationRequest(const std::string& prompt, bool sy
                         {
                             {"action", "push_interactive_set"},
                             {"mode", "interactive_ephemeral"},
+                            {"session_id", session_id},
                             {"title", "归档匹配 · " + prompt},
                             {"user_prompt", prompt},
                             {"repeat_policy", "prefer_familiar"},

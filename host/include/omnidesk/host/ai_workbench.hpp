@@ -40,6 +40,7 @@ struct AiChatSession {
 // Shared persistence & UI helpers used by both AiWorkbench and AiCompanionDock
 std::string makeAiChatSessionId();
 std::string summarizeAiSessionTitle(const std::string& first_prompt);
+std::string classifyAiCurationItem(const nlohmann::json& item);
 void splitAiThinkAndReply(const std::string& raw,
                           const std::string& explicit_reasoning,
                           std::string* reasoning_out,

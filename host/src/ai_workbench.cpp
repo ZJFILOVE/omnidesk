@@ -328,6 +328,26 @@ std::string summarizeAiSessionTitle(const std::string& first_prompt) {
     return single;
 }
 
+std::string classifyAiCurationItem(const nlohmann::json& item) {
+    if (!item.is_object()) return "media";
+    const std::string domain = item.value("domain", "");
+    if (domain == "media" || domain == "text" || domain == "book") return domain;
+    if (item.contains("format") || item.contains("book_id") || item.contains("author") ||
+        item.contains("isbn") || item.contains("page_count")) {
+        return "book";
+    }
+    if (item.contains("apple_music") || item.contains("video_id") || item.contains("kind") ||
+        item.contains("artist") || item.contains("album") || item.contains("duration_sec") ||
+        item.contains("cover_url")) {
+        return "media";
+    }
+    if (item.contains("content") || item.contains("excerpt") || item.contains("text") ||
+        item.contains("url")) {
+        return "text";
+    }
+    return "media";
+}
+
 void splitAiThinkAndReply(const std::string& raw,
                           const std::string& explicit_reasoning,
                           std::string* reasoning_out,
@@ -2186,6 +2206,7 @@ void AiWorkbench::dispatchCurationRequest(const std::string& prompt, bool sync_p
     cancelActiveStream();
 
     auto& sess = currentSession();
+    const std::string session_id = sess.id;
     const bool first_msg = sess.messages.empty();
 
     AiChatMessage user_msg;
@@ -2298,6 +2319,7 @@ void AiWorkbench::dispatchCurationRequest(const std::string& prompt, bool sync_p
             {"sync_playlist", sync_playlist},
             {"playlist_name", "OmniDesk AI 灵感电台"},
             {"stream", true},
+            {"session_id", session_id},
         };
         caps.callStreamAsync(
             "ai.curation.v1",
@@ -2359,8 +2381,8 @@ void AiWorkbench::dispatchCurationRequest(const std::string& prompt, bool sync_p
     caps.callAsync(
         "recommend.feed.v1",
         {{"action", "search_archive"}, {"query", prompt}, {"limit", 8}},
-        [this, alive = alive_, cancel, seq, prompt](const CapabilityResult& res) {
-            brls::sync([this, alive, cancel, seq, prompt, res]() {
+        [this, alive = alive_, cancel, seq, prompt, session_id](const CapabilityResult& res) {
+            brls::sync([this, alive, cancel, seq, prompt, session_id, res]() {
                 if (!alive->load(std::memory_order_acquire) || seq != active_req_seq_) return;
                 if (res.cancelled || cancel->isCancelled()) {
                     finalizeActiveStream("历史归档策展 · 已中断", "[已取消]", "", false);
@@ -2387,9 +2409,9 @@ void AiWorkbench::dispatchCurationRequest(const std::string& prompt, bool sync_p
                             std::string dt = it.value("business_date", it.value("date", ""));
                             if (!dt.empty()) summary += " `[" + dt + "]`";
                             summary += "\n";
-                            std::string dom = it.value("domain", "");
-                            if (dom == "text" || it.contains("url")) text_items.push_back(it);
-                            else if (dom == "book" || it.contains("format")) book_items.push_back(it);
+                            const std::string dom = classifyAiCurationItem(it);
+                            if (dom == "text") text_items.push_back(it);
+                            else if (dom == "book") book_items.push_back(it);
                             else media_items.push_back(it);
                         }
                         break;
@@ -2403,6 +2425,7 @@ void AiWorkbench::dispatchCurationRequest(const std::string& prompt, bool sync_p
                         {
                             {"action", "push_interactive_set"},
                             {"mode", "interactive_ephemeral"},
+                            {"session_id", session_id},
                             {"title", "归档匹配 · " + prompt},
                             {"user_prompt", prompt},
                             {"repeat_policy", "prefer_familiar"},
