@@ -215,6 +215,7 @@ void DailyWorkflowScheduler::initialize(const RepoPaths& paths) {
 }
 
 void DailyWorkflowScheduler::shutdown() {
+    shutting_down_.store(true);
     cancel_requested_.store(true);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1050,34 +1051,59 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
         }
     }
 
-    std::unique_lock<std::mutex> tlock(thread_lifecycle_mutex_);
+    struct StartReservation {
+        std::atomic<bool>& flag;
+        bool held = false;
 
+        explicit StartReservation(std::atomic<bool>& value) : flag(value) {}
+        ~StartReservation() {
+            if (held) flag.store(false);
+        }
+
+        void hold() {
+            flag.store(true);
+            held = true;
+        }
+
+        void clear() {
+            flag.store(false);
+            held = false;
+        }
+    } reservation(start_in_progress_);
+
+    bool already_running = false;
+    bool auto_run_disabled = false;
     bool do_pre_pull = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         loadConfigAndStateLocked(paths.curation_dir);
 
-        if (running_) {
-            tlock.unlock();
-            omnidesk::CapabilityResult res;
-            res.ok = true;
-            res.data = inspectStatus(paths);
-            res.data["started"] = false;
-            res.data["already_running"] = true;
-            return res;
+        already_running = running_ || start_in_progress_.load() || shutting_down_.load();
+        if (!already_running) {
+            if (is_auto && !config_.auto_run_enabled) {
+                auto_run_disabled = true;
+            } else {
+                reservation.hold();
+                do_pre_pull = config_.git_sync_enabled && req.value("sync_remote", true);
+            }
         }
+    }
 
-        if (is_auto && !config_.auto_run_enabled) {
-            tlock.unlock();
-            omnidesk::CapabilityResult res;
-            res.ok = true;
-            res.data = inspectStatus(paths);
-            res.data["started"] = false;
-            res.data["skipped_reason"] = "auto_run_disabled";
-            return res;
-        }
-
-        do_pre_pull = config_.git_sync_enabled && req.value("sync_remote", true);
+    if (already_running) {
+        omnidesk::CapabilityResult res;
+        res.ok = true;
+        res.data = inspectStatus(paths);
+        res.data["started"] = false;
+        res.data["already_running"] = true;
+        return res;
+    }
+    if (auto_run_disabled) {
+        omnidesk::CapabilityResult res;
+        res.ok = true;
+        res.data = inspectStatus(paths);
+        res.data["started"] = false;
+        res.data["skipped_reason"] = "auto_run_disabled";
+        return res;
     }
 
     nlohmann::json pre_sync_result = nlohmann::json::object();
@@ -1085,10 +1111,25 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
         pre_sync_result = syncGitHubRepos(paths, false, true);
     }
 
+    if (shutting_down_.load()) {
+        reservation.clear();
+        return makeSchedError("scheduler_stopping", "Daily workflow scheduler is shutting down");
+    }
+
+    std::unique_lock<std::mutex> tlock(thread_lifecycle_mutex_);
+    if (shutting_down_.load()) {
+        reservation.clear();
+        tlock.unlock();
+        return makeSchedError("scheduler_stopping", "Daily workflow scheduler is shutting down");
+    }
+
     std::string run_id;
     std::vector<std::string> to_run;
     std::string runner_id;
     std::string runner_bin_or_cmd;
+    bool nothing_pending = false;
+    bool no_agent_runner = false;
+    std::string runner_err;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1125,39 +1166,60 @@ omnidesk::CapabilityResult DailyWorkflowScheduler::startWorkflows(const RepoPath
         }
 
         if (to_run.empty()) {
-            tlock.unlock();
+            nothing_pending = true;
+        }
+
+        if (!nothing_pending) {
+            const auto available = detectAvailableAgentsLocked();
+            if (!resolveSelectedRunnerLocked(available, runner_id, runner_bin_or_cmd, runner_err)) {
+                no_agent_runner = true;
+            }
+        }
+    }
+
+    if (nothing_pending) {
+        reservation.clear();
+        tlock.unlock();
+        omnidesk::CapabilityResult res;
+        res.ok = true;
+        res.data = inspectStatus(paths);
+        res.data["started"] = false;
+        res.data["skipped_reason"] = "nothing_pending_today";
+        if (!pre_sync_result.empty()) {
+            res.data["git_sync"] = std::move(pre_sync_result);
+        }
+        return res;
+    }
+
+    if (no_agent_runner) {
+        reservation.clear();
+        tlock.unlock();
+        if (is_auto) {
             omnidesk::CapabilityResult res;
             res.ok = true;
             res.data = inspectStatus(paths);
             res.data["started"] = false;
-            res.data["skipped_reason"] = "nothing_pending_today";
-            if (!pre_sync_result.empty()) {
-                res.data["git_sync"] = std::move(pre_sync_result);
-            }
+            res.data["skipped_reason"] = "no_agent_runner";
             return res;
         }
+        return makeSchedError("no_agent_runner", runner_err);
+    }
 
-        const auto available = detectAvailableAgentsLocked();
-        std::string runner_err;
-        if (!resolveSelectedRunnerLocked(available, runner_id, runner_bin_or_cmd, runner_err)) {
-            if (is_auto) {
-                tlock.unlock();
-                omnidesk::CapabilityResult res;
-                res.ok = true;
-                res.data = inspectStatus(paths);
-                res.data["started"] = false;
-                res.data["skipped_reason"] = "no_agent_runner";
-                return res;
-            }
-            return makeSchedError("no_agent_runner", runner_err);
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutting_down_.load()) {
+            reservation.clear();
+            tlock.unlock();
+            return makeSchedError("scheduler_stopping",
+                                  "Daily workflow scheduler is shutting down");
         }
-
-        if (worker_thread_.joinable()) {
-            worker_thread_.join();
-        }
-
         cancel_requested_.store(false);
         running_ = true;
+        reservation.clear();
         active_child_pgid_ = -1;
         run_id = "sched-" + today + "-" +
                  std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(

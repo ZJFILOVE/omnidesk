@@ -1,6 +1,7 @@
 #include "ai_curator/git_mirror.hpp"
 
 #include "ai_curator/utils.hpp"
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
@@ -10,6 +11,34 @@ namespace fs = std::filesystem;
 namespace ai_curator {
 
 namespace {
+
+bool containsControlCharacter(const std::string& value) {
+    for (unsigned char c : value) {
+        if (c < 0x20 || c == 0x7f) return true;
+    }
+    return false;
+}
+
+bool isSafeGitBranch(const std::string& branch) {
+    if (branch.empty() || branch.size() > 255 || branch.front() == '-' ||
+        containsControlCharacter(branch)) {
+        return false;
+    }
+    for (char c : branch) {
+        if (std::isspace(static_cast<unsigned char>(c))) return false;
+    }
+    if (branch.front() == '/' || branch.back() == '/' || branch.back() == '.') return false;
+    if (branch.size() >= 5 && branch.compare(branch.size() - 5, 5, ".lock") == 0) return false;
+    static const char* kForbidden[] = {"..", "@{", "\\", "~", "^", ":", "?", "*", "["};
+    for (const char* token : kForbidden) {
+        if (branch.find(token) != std::string::npos) return false;
+    }
+    return true;
+}
+
+bool isSafeGitRemote(const std::string& remote) {
+    return !remote.empty() && remote.front() != '-' && !containsControlCharacter(remote);
+}
 
 bool hasOriginRemote(const std::string& repo_dir) {
     ProcessResult res = runProcess({"git", "remote", "get-url", "origin"}, repo_dir, 5000);
@@ -191,6 +220,11 @@ RepoSyncStatus GitMirror::syncRepo(const std::string& repo_dir,
     st.path = repo_dir;
     std::error_code ec;
     const std::string target_branch = branch.empty() ? "main" : branch;
+    if (!isSafeGitBranch(target_branch)) {
+        st.error = "Invalid Git branch name: " + target_branch;
+        st.status_detail = "invalid_branch";
+        return st;
+    }
 
     if (!fs::exists(repo_dir, ec)) {
         st.exists = false;
@@ -198,12 +232,17 @@ RepoSyncStatus GitMirror::syncRepo(const std::string& repo_dir,
             st.status_detail = "missing_skip_clone";
             return st;
         }
+        if (!isSafeGitRemote(remote_url)) {
+            st.error = "Invalid Git remote URL";
+            st.status_detail = "invalid_remote_url";
+            return st;
+        }
         fs::path parent = fs::path(repo_dir).parent_path();
         if (!parent.empty()) {
             fs::create_directories(parent, ec);
         }
         ProcessResult clone_res = runProcess(
-            {"git", "clone", "--branch", target_branch, remote_url, repo_dir}, "", 120000);
+            {"git", "clone", "--branch", target_branch, "--", remote_url, repo_dir}, "", 120000);
         if (!clone_res.spawn_error.empty() || clone_res.exit_code != 0) {
             st.error = clone_res.spawn_error.empty()
                            ? trim(clone_res.stderr_text + " " + clone_res.stdout_text)
@@ -249,7 +288,8 @@ RepoSyncStatus GitMirror::syncRepo(const std::string& repo_dir,
         return st;
     }
 
-    ProcessResult fetch_res = runProcess({"git", "fetch", "origin", target_branch}, repo_dir, 60000);
+    ProcessResult fetch_res =
+        runProcess({"git", "fetch", "--", "origin", target_branch}, repo_dir, 60000);
     if (fetch_res.exit_code != 0) {
         st.error = trim(fetch_res.stderr_text + " " + fetch_res.stdout_text);
         st.status_detail = "git_fetch_failed";
@@ -271,7 +311,8 @@ RepoSyncStatus GitMirror::syncRepo(const std::string& repo_dir,
         }
     }
 
-    ProcessResult merge_res = runProcess({"git", "merge", "--ff-only", remote_ref}, repo_dir, 30000);
+    ProcessResult merge_res =
+        runProcess({"git", "merge", "--ff-only", "--", remote_ref}, repo_dir, 30000);
     if (merge_res.exit_code != 0) {
         st.error = trim(merge_res.stderr_text + " " + merge_res.stdout_text);
         st.status_detail = "git_merge_ff_only_failed";
@@ -291,6 +332,11 @@ RepoPushStatus GitMirror::pushRepo(const std::string& repo_dir,
     st.path = repo_dir;
     std::error_code ec;
     const std::string target_branch = branch.empty() ? "main" : branch;
+    if (!isSafeGitBranch(target_branch)) {
+        st.error = "Invalid Git branch name: " + target_branch;
+        st.status_detail = "invalid_branch";
+        return st;
+    }
 
     if (repo_dir.empty() || !fs::exists(repo_dir, ec)) {
         st.exists = false;
@@ -338,7 +384,8 @@ RepoPushStatus GitMirror::pushRepo(const std::string& repo_dir,
         return st;
     }
 
-    ProcessResult fetch_res = runProcess({"git", "fetch", "origin", target_branch}, repo_dir, 60000);
+    ProcessResult fetch_res =
+        runProcess({"git", "fetch", "--", "origin", target_branch}, repo_dir, 60000);
     if (fetch_res.exit_code != 0) {
         st.error = trim(fetch_res.stderr_text + " " + fetch_res.stdout_text);
         st.status_detail = "git_fetch_failed";
@@ -363,7 +410,9 @@ RepoPushStatus GitMirror::pushRepo(const std::string& repo_dir,
 
     if (st.ahead_count > 0) {
         ProcessResult push_res =
-            runProcess({"git", "push", "origin", target_branch + ":" + target_branch}, repo_dir, 90000);
+            runProcess({"git", "push", "--", "origin", target_branch + ":" + target_branch},
+                       repo_dir,
+                       90000);
         if (!push_res.spawn_error.empty() || push_res.exit_code != 0) {
             st.error = push_res.spawn_error.empty()
                            ? trim(push_res.stderr_text + " " + push_res.stdout_text)

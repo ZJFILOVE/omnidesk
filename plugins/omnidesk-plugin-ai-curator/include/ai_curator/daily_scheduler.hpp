@@ -159,6 +159,8 @@ private:
     CodexFlagSupport codex_flags_;
 
     bool running_ = false;
+    std::atomic<bool> start_in_progress_{false};
+    std::atomic<bool> shutting_down_{false};
     std::atomic<bool> cancel_requested_{false};
     pid_t active_child_pgid_ = -1;
     std::string active_run_id_;

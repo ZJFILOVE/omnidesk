@@ -627,6 +627,25 @@ int main() {
         auto c_mus = ai_curator::GitMirror::syncRepo(clone_mus.string(), bare_mus.string(), true, true);
         CHECK(c_obs.cloned && c_obs.has_remote);
         CHECK(c_mus.cloned && c_mus.has_remote);
+
+        auto bad_branch = ai_curator::GitMirror::syncRepo(
+            (temp_root / "clone_bad_branch").string(),
+            bare_obs.string(),
+            true,
+            true,
+            "--upload-pack=touch /tmp/omnidesk-git-branch-injection");
+        CHECK(bad_branch.status_detail == "invalid_branch");
+        CHECK(!fs::exists(temp_root / "clone_bad_branch"));
+
+        auto bad_remote = ai_curator::GitMirror::syncRepo(
+            (temp_root / "clone_bad_remote").string(),
+            "--upload-pack=touch /tmp/omnidesk-git-remote-injection",
+            true,
+            true,
+            "main");
+        CHECK(bad_remote.status_detail == "invalid_remote_url");
+        CHECK(!fs::exists(temp_root / "clone_bad_remote"));
+
         ai_curator::runProcess({"git", "config", "user.email", "agent@omnidesk.local"}, clone_obs.string());
         ai_curator::runProcess({"git", "config", "user.name", "OmniDesk Agent"}, clone_obs.string());
         ai_curator::runProcess({"git", "config", "user.email", "agent@omnidesk.local"}, clone_mus.string());
