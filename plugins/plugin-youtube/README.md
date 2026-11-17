@@ -15,6 +15,11 @@ OmniDesk v2 Stage 4 `workspace` plugin (`domain = "media"`, `provides = ["media.
   - `list_subtitles` / `fetch_subtitles`: prioritizes official subtitles over automatic captions, parses VTT & SRT, optionally translates via `llm.translate.v1` with atomic cache under `cache_dir`, and optionally falls back to `speech.asr.v1` when no subtitles exist.
   - `list_subscriptions` / `sync_subscriptions`: requires SecretVault `oauth_token` or user-provided `channel_ids` / `playlist_ids` (returns `not_configured` otherwise).
   - `fetch_chapters`: merges native chapters and optional `player.timeline.v1`.
+  - `cover`: fetches HTTPS ytimg thumbnails through the configured proxy, with a bounded image cache, host allowlist, and no redirects or account cookies.
+
+## Desktop playback
+
+`stream_timeout_sec` defaults to 60 seconds. When available, Node is enabled for yt-dlp's JavaScript extraction. Existing v1 cookies can be reused through a private temporary cookie file, removed after extraction. The optional `proxy` setting is passed to extraction, thumbnail loading, and mpv playback; local Adam streams remain direct. The workbench exposes video grids, channel navigation, and automatic skipping of community-marked sponsor segments.
 
 ## Security Guarantees
 

@@ -249,6 +249,10 @@ export function toMediaItem(raw: unknown): MediaItem | null {
     title: str(item.title, id),
     subtitle: str(item.subtitle),
     creator: str(item.creator),
+    creatorId: (typeof extra.mid === 'number' ? String(extra.mid) : str(extra.mid, str(extra.channel_id, str(extra.creator_id)))) || undefined,
+    collection: typeof dict(extra.collection).id === 'string' ? {
+      id: str(dict(extra.collection).id), type: str(dict(extra.collection).type),
+    } : undefined,
     durationSec: duration,
     durationLabel: formatDuration(duration),
     aspect: item.aspect === '1:1' ? '1:1' : '16:9',

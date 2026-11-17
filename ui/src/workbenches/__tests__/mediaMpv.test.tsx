@@ -243,7 +243,7 @@ describe('MediaWorkbench real mpv integration', () => {
       expect(invoke).toHaveBeenCalledWith('mpv_status');
     });
 
-    fireEvent.click(await screen.findByRole('button', { name: '开始播放' }));
+    fireEvent.click(await screen.findByRole('button', { name: '播放 Attention Is All You Need' }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('call', {
         args: expect.objectContaining({
@@ -353,6 +353,7 @@ describe('MediaWorkbench real mpv integration', () => {
 
     render(<MediaWorkbench />);
 
+    fireEvent.click(await screen.findByRole('button', { name: '播放 Attention Is All You Need' }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('mpv_embed_enable');
       expect(screen.getByTestId('mpv-canvas')).not.toBeNull();

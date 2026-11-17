@@ -11,6 +11,8 @@ export interface MediaItem {
   title: string;
   subtitle: string;
   creator: string;
+  creatorId?: string;
+  collection?: { id: string; type: string };
   durationSec: number;
   durationLabel: string;
   aspect: '16:9' | '1:1';

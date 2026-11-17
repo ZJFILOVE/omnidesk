@@ -140,7 +140,13 @@ def set_settings(plugin: YouTubePlugin, req: Mapping[str, Any]) -> CapabilityRes
         patch["ytdlp_bin"] = (
             str(req.get("ytdlp_bin") or "yt-dlp").strip() or "yt-dlp"
         )
-    for key in ("api_key", "oauth_token"):
+    if "proxy" in req:
+        from urllib.parse import urlsplit
+        proxy = str(req.get("proxy") or "").strip()
+        if proxy and (urlsplit(proxy).scheme not in {"http", "https", "socks5", "socks5h"} or not urlsplit(proxy).hostname or any(ch in proxy for ch in "\r\n\t")):
+            return plugin._fail("代理地址无效", error_code="invalid_argument")
+        patch["proxy"] = proxy
+    for key in ("api_key", "oauth_token", "cookie_header"):
         value = str(req.get(key) or "").strip()
         if value:
             plugin.ctx.set_secret(key, value)

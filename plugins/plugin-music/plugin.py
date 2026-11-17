@@ -17,6 +17,7 @@ from omnidesk_sdk import (
 )
 
 if __package__:
+    from .adam import AdamService
     from .apple_client import AppleMusicClientProtocol, AppleMusicCredentials
     from .charts import ChartFetchError, fetch_apple_music_chart
     from .lyrics_translate import translate_lyric_lines
@@ -27,6 +28,7 @@ else:
     _PLUGIN_ROOT = str(Path(__file__).resolve().parent)
     if _PLUGIN_ROOT not in sys.path:
         sys.path.insert(0, _PLUGIN_ROOT)
+    from adam import AdamService
     from apple_client import AppleMusicClientProtocol, AppleMusicCredentials
     from charts import ChartFetchError, fetch_apple_music_chart
     from lyrics_translate import translate_lyric_lines
@@ -66,6 +68,7 @@ class MusicPlugin(BasePlugin):
         self._media_source: AppleMusicMediaSource | None = None
         self._last_event: dict[str, Any] = {}
         self._charts_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+        self._adam: AdamService | None = None
 
     async def on_load(self, ctx: PluginContext) -> None:
         self._ctx = ctx
@@ -75,6 +78,8 @@ class MusicPlugin(BasePlugin):
             client_factory=self._client_factory,
             qwen_loader=self._qwen_loader,
         )
+        self._adam = AdamService(ctx, lambda: self._playlist_service._build_client(ctx, require_write=False)[0])
+        ctx.register_capability("media.adam.v1", self._adam.handle)
 
         async def _translate_lines(texts: Any, title: str) -> tuple[list[str] | None, str]:
             return await translate_lyric_lines(ctx, texts, title=title)
@@ -94,6 +99,7 @@ class MusicPlugin(BasePlugin):
             ),
             translate_lines=_translate_lines,
             fetch_metadata=_fetch_metadata,
+            adam_feed=self._adam.feed,
         )
 
         ctx.register_capability("media.playlist.v1", self._playlist_service.handle)
@@ -127,6 +133,7 @@ class MusicPlugin(BasePlugin):
         ctx.subscribe("entity.media.open", self._on_bus_event)
 
     async def on_unload(self) -> None:
+        self._adam = None
         self._ctx = None
 
     async def on_health_check(self) -> dict[str, Any]:

@@ -77,7 +77,7 @@ class BilibiliMediaSource(MediaSource):
     def categories(self) -> list[str]:
         """Return supported Bilibili workbench categories."""
         return [
-            "recommend", "popular", "dynamic", "bangumi", "live",
+            "recommend", "popular", "dynamic", "followings", "bangumi", "live",
             "history", "watch_later", "favorites", "search",
         ]
 

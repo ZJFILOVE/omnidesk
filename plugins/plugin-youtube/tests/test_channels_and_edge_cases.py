@@ -196,3 +196,58 @@ print(json.dumps({{
 
         await invoke_lifecycle_hook(plugin.on_unload)
         await ctx.acleanup()
+
+@pytest.mark.asyncio
+async def test_v1_cookie_copy_proxy_runtime_and_cleanup(tmp_path, monkeypatch):
+    from omnidesk_sdk import SubprocessResult
+    from unittest.mock import AsyncMock
+    from yt_dlp import run_ytdlp_json
+    import yt_dlp as module
+    monkeypatch.setattr(module, 'resolve_executable', lambda value: ('yt-dlp', None))
+    monkeypatch.setattr(module.shutil, 'which', lambda name: '/usr/bin/node' if name == 'node' else None)
+    cookie_file = tmp_path / 'v1-cookies.txt'
+    original = '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\ttest-secret\n'
+    cookie_file.write_text(original)
+    ctx = PluginContext('plugin-youtube', config_dir=tmp_path / 'config')
+    ctx.set_config({'cookies_file': str(cookie_file), 'proxy': 'http://127.0.0.1:7891'})
+    observed = []
+    async def execute(args, **kwargs):
+        path = Path(args[args.index('--cookies') + 1])
+        observed.append(path)
+        assert path != cookie_file and path.read_text() == original
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert args[args.index('--proxy') + 1] == 'http://127.0.0.1:7891'
+        assert args[args.index('--js-runtimes') + 1] == 'node'
+        return SubprocessResult(args=args, returncode=0, stdout='{"id":"test"}', stderr='')
+    monkeypatch.setattr(ctx, 'exec_subprocess', execute)
+    data, error = await run_ytdlp_json(ctx, 'yt-dlp', ['-J', 'https://www.youtube.com/watch?v=jNQXAC9IVRw'])
+    assert data == {'id': 'test'} and error is None
+    assert not observed[0].exists()
+    assert cookie_file.read_text() == original
+    await ctx.acleanup()
+
+@pytest.mark.asyncio
+async def test_cover_uses_selected_proxy_and_rejects_other_hosts(monkeypatch):
+    from types import SimpleNamespace
+    from email.message import Message
+    import yt_cover
+    yt_cover._cache.clear()
+    seen = []
+    class Response:
+        headers = Message()
+        headers['Content-Type'] = 'image/jpeg'
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, limit): return b'jpeg-test'
+    def opener(*handlers):
+        seen.extend(handlers)
+        return SimpleNamespace(open=lambda request, timeout: Response())
+    monkeypatch.setattr(yt_cover.urllib.request, 'build_opener', opener)
+    plugin = SimpleNamespace(ctx=SimpleNamespace(get_config=lambda key: 'http://127.0.0.1:7891'))
+    for url in ('https://evil.example/a.jpg', 'http://i.ytimg.com/a.jpg', 'https://i.ytimg.com:bad/a.jpg', 'https://u:p@i.ytimg.com/a.jpg'):
+        assert not (await yt_cover.fetch_cover(plugin, {'url': url})).ok
+    assert not seen
+    result = await yt_cover.fetch_cover(plugin, {'url': 'https://i.ytimg.com/vi/test/hqdefault.jpg'})
+    assert result.ok and result.data['data_url'].startswith('data:image/jpeg;base64,')
+    assert seen[0].proxies == {'https': 'http://127.0.0.1:7891'}
+    assert isinstance(seen[1], yt_cover.NoRedirect)

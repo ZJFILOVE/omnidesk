@@ -25,6 +25,7 @@ SUPPORTED_ACTIONS = (
     "fetch_items",
     "search",
     "resolve_stream",
+    "cover",
     "list_subtitles",
     "fetch_subtitles",
     "list_subscriptions",
@@ -75,6 +76,8 @@ def build_ui_schema(plugin: YouTubePlugin) -> dict[str, Any]:
             "type": "Form",
             "id": "youtube-settings-form",
             "fields": [
+                {"name": "proxy", "label": "YouTube 独立代理（留空使用系统代理）", "type": "string", "default": str(plugin.ctx.get_config("proxy") or "")},
+                {"name": "cookie_header", "label": "YouTube Cookie（留空保持不变，也可复用浏览器登录）", "type": "secret", "default": ""},
                 {
                     "name": "quality",
                     "label": "默认播放画质",

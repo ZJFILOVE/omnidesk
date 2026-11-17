@@ -154,6 +154,22 @@ fn mpv_probe_reports_clear_unavailable_diagnostics_and_never_fakes_hwdec() {
 }
 
 #[test]
+fn media_proxy_is_per_request_and_adam_remains_direct() {
+    let mut req = MediaOpenRequest {
+        url: "https://rr1.googlevideo.com/video.mp4".into(),
+        http_proxy: Some("http://127.0.0.1:7891".into()),
+        ..Default::default()
+    };
+    validate_media_open_request(&req).unwrap();
+    assert!(build_loadfile_options(&req).contains("http-proxy=\"http://127.0.0.1:7891\""));
+    req.url = "https://127.0.0.1:20025/api/v1/playback/test/audio".into();
+    assert!(build_loadfile_options(&req).contains("http-proxy=\"\""));
+    assert!(!build_loadfile_options(&req).contains("7891"));
+    req.http_proxy = Some("http://127.0.0.1:7891\ninject".into());
+    assert!(validate_media_open_request(&req).is_err());
+}
+
+#[test]
 fn mpv_loadfile_options_redaction_and_ipc_message_parsing_match_v1() {
     let mut headers = BTreeMap::new();
     headers.insert("Referer".to_string(), "https://www.bilibili.com".to_string());

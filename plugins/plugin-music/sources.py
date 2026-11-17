@@ -14,6 +14,7 @@ from typing import Any
 from omnidesk_sdk import LyricLine, MediaItem, MediaSource
 
 if __package__:
+    from .adam import CATEGORIES as ADAM_CATEGORIES, resolver as adam_resolver, artwork
     from .state_store import (
         atomic_write_json,
         is_valid_iso_date,
@@ -30,6 +31,7 @@ if __package__:
         read_cached_lyrics,
     )
 else:
+    from adam import CATEGORIES as ADAM_CATEGORIES, resolver as adam_resolver, artwork
     from state_store import (
         atomic_write_json,
         is_valid_iso_date,
@@ -97,17 +99,19 @@ class AppleMusicMediaSource(MediaSource):
         get_qwen: Callable[[], QwenModules] | None = None,
         translate_lines: TranslateLines | None = None,
         fetch_metadata: Callable[[list[str]], Awaitable[list[dict[str, Any]]]] | None = None,
+        adam_feed: Callable[..., Awaitable[list[MediaItem]]] | None = None,
     ) -> None:
         self._get_config = get_config
         self._get_data_dir = get_data_dir
         self._get_qwen = get_qwen
         self._translate_lines = translate_lines
         self._fetch_metadata = fetch_metadata
+        self._adam_feed = adam_feed
         self.last_translation_error = ""
         self.last_translated_count = 0
 
     def categories(self) -> list[str]:
-        return list(_CATEGORIES)
+        return list(_CATEGORIES) + (ADAM_CATEGORIES if self._adam_feed else [])
 
     def _qwen(self) -> QwenModules:
         if self._get_qwen is not None:
@@ -533,6 +537,8 @@ class AppleMusicMediaSource(MediaSource):
         if page < 1:
             return []
         cat = (category or "").strip()
+        if cat in ADAM_CATEGORIES and self._adam_feed:
+            return await self._adam_feed(cat, query, page)
         catalog_cache = self._catalog_cache()
         items: list[MediaItem] = []
 
@@ -592,6 +598,10 @@ class AppleMusicMediaSource(MediaSource):
             except Exception:
                 # A metadata outage must not hide the user's local collection.
                 pass
+        for item in page_items:
+            song_id = str(item.extra.get("apple_music_song_id") or normalize_song_id(item.id))
+            item.extra["stream_resolver"] = adam_resolver(song_id)
+            item.cover_url = artwork(item.cover_url)
         return page_items
 
     async def fetch_lyrics(self, item_id: str) -> list[LyricLine]:

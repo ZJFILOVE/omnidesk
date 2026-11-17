@@ -13,6 +13,11 @@ const CATEGORY_LABELS: Record<string, string> = {
   recommend: '推荐',
   popular: '热门',
   dynamic: '动态',
+  followings: '关注 UP 主',
+  recommendations: '为你推荐',
+  'heavy-rotation': '常听',
+  'recently-played': '最近播放',
+  library: '资料库',
   bangumi: '追番',
   live: '直播',
   search: '搜索',
@@ -39,6 +44,10 @@ const QUALITY_LABELS: Record<string, string> = {
   '480p': '480p',
   '360p': '360p',
   audio: '仅音频',
+  hires: '高解析无损',
+  lossless: '无损',
+  aac: 'AAC',
+  atmos: '杜比全景声',
 };
 
 function label(value: string): string {

@@ -21,9 +21,11 @@ import { MEDIA_ITEMS, type ChapterSegment, type MediaItem } from '../data/mock';
 import { useLiveMedia } from '../hooks/useLiveDomain';
 import { enqueueEphemeralTrack, runMediaInspectorCapability } from './mediaActions';
 import { MediaSourceToolbar } from './MediaSourceToolbar';
+import { MediaBrowser } from './MediaBrowser';
 import { LiveSourceControls } from './LiveSourceControls';
 import MediaInspector from './panels/MediaInspector';
 import { useMediaLyrics } from './useMediaLyrics';
+import { useMediaChapters } from './useMediaChapters';
 import { useMpvPlayback, type MpvPlaybackController } from './useMpvPlayback';
 
 type MediaFilterId =
@@ -68,7 +70,13 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   const [backendQuery, setBackendQuery] = useState<string>('');
   const [quality, setQuality] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string>(MEDIA_ITEMS[0]?.id ?? '');
+  const [openedItem, setOpenedItem] = useState<MediaItem>();
+  const [showPlayer, setShowPlayer] = useState(false);
+  const [autoSkipAds, setAutoSkipAds] = useState(true);
+  const skippedAds = useRef(new Set<string>());
   const liveMedia = useLiveMedia(activeCategory, backendQuery, activeSourceId);
+  const browsingSource = activeSourceId || liveMedia.sourceId;
+  const libraryLayout = ['plugin-bilibili', 'plugin-youtube', 'plugin-music'].includes(browsingSource);
   const categoryOptions = liveMedia.categories;
   const effectiveCategory =
     activeCategory && categoryOptions.includes(activeCategory)
@@ -217,10 +225,10 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
 
   const selectedItem: MediaItem | undefined = useMemo(
     () =>
-      mediaItems.find((item) => item.id === selectedId) ??
+      (openedItem?.id === selectedId ? openedItem : undefined) ?? mediaItems.find((item) => item.id === selectedId) ??
       filteredItems[0] ??
       mediaItems[0],
-    [mediaItems, selectedId, filteredItems],
+    [mediaItems, selectedId, filteredItems, openedItem],
   );
   const qualityOptions = selectedItem?.streamResolver?.qualityOptions ?? [];
   const qualityKey = qualityOptions.join('|');
@@ -253,13 +261,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       : settingsPluginId === 'plugin-youtube'
         ? 'YouTube 登录/设置'
         : '';
-  const mediaLyrics = useMediaLyrics(selectedItem);
+  const mediaLyrics = useMediaLyrics(!libraryLayout || showPlayer ? selectedItem : undefined);
+  const mediaChapters = useMediaChapters(selectedItem, showPlayer || Boolean(selectedItem && mpv.state?.itemId === selectedItem.id));
   const displayItem = useMemo(
-    () =>
-      selectedItem && mediaLyrics.lines.length > 0
-        ? { ...selectedItem, lyrics: mediaLyrics.lines }
-        : selectedItem,
-    [mediaLyrics.lines, selectedItem],
+    () => selectedItem ? { ...selectedItem,
+      lyrics: mediaLyrics.lines.length ? mediaLyrics.lines : selectedItem.lyrics,
+      chapters: [...(selectedItem.chapters ?? []), ...mediaChapters.segments],
+    } : undefined,
+    [mediaLyrics.lines, mediaChapters.segments, selectedItem],
   );
 
   const selectedIsPlaying = mpv.state?.itemId === selectedItem?.id;
@@ -272,14 +281,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
 
   useEffect(() => {
     if (!mpv.embedded) return undefined;
-    const shouldRender = Boolean(isActive && selectedItem?.kind === 'video');
+    const shouldRender = Boolean(isActive && selectedItem?.kind === 'video' && (!libraryLayout || showPlayer));
     void mpvEmbedSetActive(shouldRender);
     return () => {
       if (shouldRender) {
         void mpvEmbedSetActive(false);
       }
     };
-  }, [isActive, mpv.embedded, selectedItem?.kind]);
+  }, [isActive, mpv.embedded, selectedItem?.kind, libraryLayout, showPlayer]);
 
   useEffect(() => {
     if (!onContextChange) return;
@@ -318,13 +327,24 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   }, [displayItem, currentSec]);
 
   const nextSponsorSegment = useMemo(() => {
-    if (!selectedItem?.chapters?.length) return null;
+    if (!displayItem?.chapters?.length) return null;
     return (
-      selectedItem.chapters.find(
+      displayItem.chapters.find(
         (ch) => (ch.kind === 'sponsor' || ch.kind === 'ad') && ch.endSec > currentSec,
       ) ?? null
     );
-  }, [selectedItem, currentSec]);
+  }, [displayItem, currentSec]);
+
+  useEffect(() => {
+    const seg = mediaChapters.segments.find(s => (s.kind === 'ad' || s.kind === 'sponsor') && currentSec >= s.startSec && currentSec < s.endSec);
+    if (!autoSkipAds || !mpv.enabled || !playing || !selectedItem || !seg) return;
+    const key = `${selectedItem.id}:${seg.id}`;
+    if (skippedAds.current.has(key)) return;
+    skippedAds.current.add(key);
+    void mpv.seek(selectedItem, seg.endSec).then(result => {
+      if (mountedRef.current) setActionStatus(result.ok ? `已跳过：${seg.label}` : result.message);
+    });
+  }, [autoSkipAds, mediaChapters.segments, currentSec, playing, selectedItem, mpv.enabled, mpv.seek]);
 
   const handleSourceChange = (sourceId: string) => {
     setActiveSourceId(sourceId);
@@ -332,11 +352,17 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     setActiveFilter('all');
     setSelectedId('');
     setQuality('');
+    setOpenedItem(undefined);
+    setShowPlayer(false);
+    setQuery('');
   };
 
   const handleCategoryChange = (category: string) => {
     setActiveCategory(category);
     setSelectedId('');
+    setOpenedItem(undefined);
+    setShowPlayer(false);
+    setQuery('');
   };
 
   const handleQualityChange = async (nextQuality: string) => {
@@ -367,6 +393,8 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   };
 
   const handleSelectMedia = async (item: MediaItem) => {
+    setOpenedItem(item);
+    setShowPlayer(true);
     setSelectedId(item.id);
     if (!mpv.enabled) {
       setPreviewSec(0);
@@ -467,7 +495,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     }
     if (action === 'slower' || action === 'faster' || action === 'normal') handleSpeedChange(action === 'normal' ? 1 : Math.max(0.3, Math.min(4, Number((speed + (action === 'slower' ? -0.1 : 0.1)).toFixed(1)))));
     if (action === 'skip') {
-      const segment = selectedItem.chapters?.find((ch) => (ch.kind === 'sponsor' || ch.kind === 'ad') && ch.startSec <= currentSec && ch.endSec > currentSec);
+      const segment = displayItem?.chapters?.find((ch) => (ch.kind === 'sponsor' || ch.kind === 'ad') && ch.startSec <= currentSec && ch.endSec > currentSec);
       if (segment) handleSkipSponsor(segment);
       else setActionStatus('当前位置没有可跳过的赞助片段');
     }
@@ -503,8 +531,8 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     <WorkbenchLayout
       domain="media"
       testId="workbench-media"
-      title="影视与音乐"
-      subtitle="16:9 精播舞台 · Apple Music 双语歌词 · 飞牛 NAS 原盘"
+      title={browsingSource === 'plugin-bilibili' ? 'Bilibili' : browsingSource === 'plugin-youtube' ? 'YouTube' : browsingSource === 'plugin-music' ? 'Apple Music' : '影视与音乐'}
+      subtitle={libraryLayout ? '发现、关注与收藏 · 你的媒体空间' : '视频、音乐与私人影库'}
       headerActions={
         <div className="flex flex-wrap items-center gap-2.5">
           <SearchInput
@@ -519,6 +547,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
             widthClass="w-56"
           />
           <TagChip tone="neutral">灵感电台 · {ephemeralQueue.length}</TagChip>
+          {libraryLayout && openedItem && !showPlayer && <button className="min-h-11 rounded-lg border border-[var(--border-line)] px-3 text-sm" onClick={() => setShowPlayer(true)}>返回播放</button>}
           {mpv.embedded ? <TagChip tone="core">LIBMPV 内嵌</TagChip> : null}
         </div>
       }
@@ -547,7 +576,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
             onFocus={emitFocus}
           />
           <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
-            <SegmentedPills
+            {!libraryLayout && <SegmentedPills
               options={FILTER_OPTIONS}
               value={activeFilter}
               onChange={setActiveFilter}
@@ -556,7 +585,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
               onFocus={emitFocus}
               tone="media"
               ariaLabel="媒体源筛选"
-            />
+            />}
             <span className="text-[14px] text-[var(--text-muted)]">
               {liveMedia.live ? (
                 <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
@@ -571,9 +600,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
         </div>
       }
       mainPane={
+        <>
+        {libraryLayout && <div hidden={showPlayer}><MediaBrowser key={`${browsingSource}:${effectiveCategory}`} sourceId={browsingSource} category={effectiveCategory} items={filteredItems} onPlay={item => void handleSelectMedia(item)} footer={liveMedia.pagination ? <LoadMoreButton id="media:feed:more" pagination={liveMedia.pagination} /> : undefined} /></div>}
+        {(!libraryLayout || showPlayer) &&
         <div className="flex flex-col gap-6 p-6 @[860px]/workbench:flex-row">
           {/* Primary Cinema / Studio Stage */}
           <div className="min-w-0 flex-1">
+            {libraryLayout && <button className="mb-4 min-h-11 rounded-lg border border-[var(--border-line)] px-4 text-sm focus-visible:outline-2 focus-visible:outline-[var(--domain-media)]" onClick={() => setShowPlayer(false)}>← 返回浏览</button>}
+            {['plugin-bilibili', 'plugin-youtube'].includes(browsingSource) && <div className="mb-4 flex flex-wrap items-center gap-3 text-sm"><label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={autoSkipAds} onChange={e => setAutoSkipAds(e.target.checked)} />自动跳过社区标记的广告</label><span role="status" className="text-[var(--text-muted)]">{mediaChapters.message}</span></div>}
             {displayItem ? (
               <MediaInspector
                 item={displayItem}
@@ -692,7 +726,8 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
               歌单隔离：<span className="font-mono">p.YJXV7dEIeb3GzZX</span> 仅接受每日不重复精选；即时点播与重温仅写入「OmniDesk AI 灵感电台」。
             </p>
           </aside>
-        </div>
+        </div>}
+        </>
       }
     />
   );

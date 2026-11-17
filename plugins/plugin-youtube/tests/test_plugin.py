@@ -175,7 +175,7 @@ def test_manifest_matches_schema_and_config_rules() -> None:
     assert manifest["domain"] == "media"
     assert manifest["entry"] == "plugin:create_plugin"
     assert manifest["provides"] == ["media.source.v1"]
-    assert set(manifest["consumes"]) == {"llm.translate.v1", "speech.asr.v1", "player.timeline.v1"}
+    assert set(manifest["consumes"]) == {"llm.translate.v1", "speech.asr.v1", "player.timeline.v1", "web.cookies.v1"}
     assert set(manifest.keys()).issubset(set(schema["properties"].keys()))
 
     cap_re = re.compile(schema["properties"]["provides"]["items"]["pattern"])
@@ -321,6 +321,7 @@ else:
     assert err_drm.ok is False and err_drm.data["error_code"] == "permission_denied" and err_drm.data["reason"] == "drm_protected"
 
     ctx.set_config("request_timeout_sec", 0.25)
+    ctx.set_config("stream_timeout_sec", 0.25)
     err_to = await ctx.capabilities.call("media.youtube.v1", {"action": "resolve_stream", "video_id": "VidTimeout1"})
     assert err_to.ok is False and err_to.data["error_code"] == "timeout"
 

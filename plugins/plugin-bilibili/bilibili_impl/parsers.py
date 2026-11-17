@@ -216,6 +216,10 @@ def normalize_media_url(raw_url: str, *, api_base: str = "") -> str:
         return ""
     if url.startswith("//"):
         return f"https:{url}"
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "http" and (host == "hdslb.com" or host.endswith(".hdslb.com")):
+        return urllib.parse.urlunsplit(parsed._replace(scheme="https"))
     if url.startswith("/") and api_base:
         return urllib.parse.urljoin(api_base.rstrip("/") + "/", url.lstrip("/"))
     return url

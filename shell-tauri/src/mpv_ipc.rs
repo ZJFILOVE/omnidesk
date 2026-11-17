@@ -57,6 +57,8 @@ pub struct MediaOpenRequest {
     pub subtitle_urls: Vec<String>,
     #[serde(default, alias = "http_headers")]
     pub http_headers: BTreeMap<String, String>,
+    #[serde(default, alias = "http_proxy")]
+    pub http_proxy: Option<String>,
     #[serde(default)]
     pub referrer: Option<String>,
     #[serde(default, alias = "user_agent")]
@@ -199,6 +201,7 @@ pub fn validate_media_open_request(req: &MediaOpenRequest) -> Result<(), RpcErro
         req.album.as_deref(),
         req.cover_url.as_deref(),
         req.item_id.as_deref(),
+        req.http_proxy.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -221,6 +224,11 @@ pub fn validate_media_open_request(req: &MediaOpenRequest) -> Result<(), RpcErro
             return Err(RpcError::invalid_argument(
                 "http_headers keys/values must be non-empty and free of NUL/newlines",
             ));
+        }
+    }
+    if let Some(proxy) = req.http_proxy.as_deref() {
+        if !proxy.is_empty() && !(proxy.starts_with("http://") || proxy.starts_with("https://")) {
+            return Err(RpcError::invalid_argument("Playback proxy must use HTTP(S)"));
         }
     }
     if let Some(start) = req.start_seconds {
@@ -375,6 +383,9 @@ pub fn build_loadfile_options(opts: &MediaOpenRequest) -> String {
         }
     } else {
         parts.push("network-timeout=10".to_string());
+        if let Some(proxy) = opts.http_proxy.as_deref() {
+            parts.push(format!("http-proxy=\"{}\"", escape_mpv_quoted(proxy)));
+        }
     }
 
     let hwdec = opts.hwdec.unwrap_or(true);

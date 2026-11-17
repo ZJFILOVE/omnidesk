@@ -15,7 +15,8 @@
   "consumes": [
     "llm.translate.v1",
     "speech.asr.v1",
-    "player.timeline.v1"
+    "player.timeline.v1",
+    "web.cookies.v1"
   ],
   "permissions": [
     "network:wan",
@@ -106,6 +107,30 @@
       "type": "int",
       "default": 15,
       "description": "Timeout in seconds for YouTube Data API, subtitle downloads, and yt-dlp calls."
+    },
+    {
+      "key": "cookie_header",
+      "label": "YouTube 登录 Cookie",
+      "type": "secret",
+      "default": ""
+    },
+    {
+      "key": "stream_timeout_sec",
+      "label": "完整取流超时（秒）",
+      "type": "int",
+      "default": 60
+    },
+    {
+      "key": "proxy",
+      "label": "YouTube 独立代理",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "key": "cookies_file",
+      "label": "已有 Netscape Cookie 文件（v1 兼容）",
+      "type": "string",
+      "default": ""
     }
   ]
 }

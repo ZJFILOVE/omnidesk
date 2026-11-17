@@ -109,7 +109,20 @@ async def resolve_via_playurl(
     if target.get("room_id") and not target.get("bvid") and not target.get("aid"):
         return await _resolve_live_playurl(client, int(target["room_id"]), cookie=cookie, req_label=req_label, req_qn=req_qn)
     cid, title = await resolve_target_cid(client, target, cookie)
-    data = await client.fetch_playurl(bvid=target.get("bvid", ""), aid=target.get("aid"), cid=cid, qn=req_qn or 80, cookie=cookie)
+    try:
+        data = await client.fetch_playurl(bvid=target.get("bvid", ""), aid=target.get("aid"), cid=cid, qn=req_qn or 127, cookie=cookie)
+    except BilibiliApiError as exc:
+        if exc.error_code in {"drm_protected", "not_found", "cancelled"}:
+            raise
+        android = await _try_android_stream(
+            plugin, target=target, aid=target.get("aid"), cid=cid,
+            req_qn=req_qn, current_best=0, android_token=android_token,
+            unlock_hd=unlock_hd, preferred_codec=preferred_codec, proxy=proxy,
+            grpc_endpoint=grpc_endpoint, curl_bin=curl_bin,
+        )
+        if android is not None:
+            return {**android, "cid": cid, "title": title}
+        raise
     if data.get("is_preview") == 1 and not data.get("dash") and not data.get("durl"):
         raise BilibiliApiError("当前视频为试看或受限片段，无完整可用流", error_code="quality_unavailable")
     if data.get("drm_tech_type"):
@@ -126,6 +139,7 @@ async def resolve_via_playurl(
             "qn": int(v.get("id") or 0),
             "quality": QN_TO_QUALITY.get(int(v.get("id") or 0), str(v.get("id") or "")),
             "codecs": str(v.get("codecs") or ""),
+            "codecid": int(v.get("codecid") or 0),
             "width": int(v.get("width") or 0),
             "height": int(v.get("height") or 0),
             "fps": str(v.get("frameRate") or v.get("frame_rate") or ""),
@@ -182,13 +196,13 @@ async def resolve_via_playurl(
                 f"请求的清晰度 {req_label} (qn={req_qn}) 不可用，可用清晰度: {', '.join(avail) or 'none'}{hint}",
                 error_code="quality_unavailable",
             )
-    elif unlock_hd and android_token and target.get("aid") and cid:
+    elif unlock_hd and android_token and cid:
         android = await _try_android_stream(
             plugin,
             target=target,
             aid=target.get("aid"),
             cid=cid,
-            req_qn=127,
+            req_qn=None,
             current_best=current_best,
             android_token=android_token,
             unlock_hd=unlock_hd,
@@ -200,7 +214,8 @@ async def resolve_via_playurl(
         if android is not None:
             return {**android, "cid": cid, "title": title}
 
-    chosen_v = next((v for v in videos if v["qn"] == req_qn), None) if req_qn is not None else (max(videos, key=lambda v: v["qn"]) if videos else None)
+    candidates = [v for v in videos if req_qn is None or v["qn"] == req_qn]
+    chosen_v = max(candidates, key=lambda v: (v["qn"], v["codecid"] == preferred_codec, v["bandwidth"])) if candidates else None
     if chosen_v is None and progressive:
         chosen_v = {"url": progressive[0]["url"], "qn": actual_qn}
     if chosen_v is None:
@@ -237,9 +252,17 @@ async def _try_android_stream(
     grpc_endpoint: str,
     curl_bin: str,
 ) -> dict[str, Any] | None:
-    if plugin is None or not unlock_hd or not android_token or not aid or cid <= 0:
+    if plugin is None or not unlock_hd or not android_token or cid <= 0:
         return None
     try:
+        if not aid and target.get("bvid"):
+            cookie, _ = await plugin.resolve_cookie()
+            view = await plugin._build_client().fetch_view(bvid=target["bvid"], cookie=cookie)
+            aid = view.get("aid")
+            if aid:
+                target["aid"] = int(aid)
+        if not aid:
+            return None
         candidate = await fetch_play_view_unite(
             plugin,
             aid=int(aid),
@@ -255,7 +278,7 @@ async def _try_android_stream(
         )
     except (BilibiliApiError, ValueError, TypeError):
         return None
-    if int(candidate.get("qn") or 0) <= current_best:
+    if req_qn is None and int(candidate.get("qn") or 0) <= current_best:
         return None
     if req_qn is not None and int(candidate.get("qn") or 0) < req_qn:
         return None

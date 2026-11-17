@@ -188,6 +188,7 @@ export interface MpvOpenRequest {
   audioUrl?: string;
   subtitleUrls?: string[];
   httpHeaders?: Record<string, string>;
+  httpProxy?: string;
   referrer?: string;
   userAgent?: string;
   startSeconds?: number;

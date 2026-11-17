@@ -174,6 +174,12 @@ class YouTubePlugin(BasePlugin):
         """Dispatch `media.youtube.v1` RPC actions with fail-closed error handling."""
         payload = dict(req) if req is not None else {}
         action = str(payload.get("action") or "status").strip()
+        if action == "cover":
+            if __package__:
+                from .yt_cover import fetch_cover
+            else:
+                from yt_cover import fetch_cover
+            return await fetch_cover(self, payload)
         if action == "status":
             return CapabilityResult.ok(await self.on_health_check())
         if action == "categories":
@@ -229,7 +235,7 @@ class YouTubePlugin(BasePlugin):
             return bad or self._fail("无效的视频标识", error_code="invalid_argument")
 
         info, err = await fetch_video_info(
-            self.ctx, self.ytdlp_bin(), vid, timeout_sec=self.timeout_sec(), extra_secrets=self.secret_values(),
+            self.ctx, self.ytdlp_bin(), vid, timeout_sec=max(self.timeout_sec(), float(self.ctx.get_config('stream_timeout_sec', 60))), extra_secrets=self.secret_values(),
             allow_loopback_http=self.allow_loopback_http, allowed_loopback_origins=self.allowed_loopback_origins(),
         )
         if err is not None or info is None:
@@ -242,6 +248,9 @@ class YouTubePlugin(BasePlugin):
         if sel_err is not None or selected is None:
             return self._fail_from_dict(sel_err, "未找到可用的媒体流", fallback_code="not_found")
         self._last_action_status = f"resolved:{vid}:{selected['quality']}"
+        proxy = str(self.ctx.get_config('proxy') or '')
+        if proxy.startswith(('http://', 'https://')):
+            selected['http_proxy'] = proxy
         if bool(req.get("record_history", True)):
             item = library_item(self, vid, selected, title=str(req.get("title") or ""))
             if item is not None:

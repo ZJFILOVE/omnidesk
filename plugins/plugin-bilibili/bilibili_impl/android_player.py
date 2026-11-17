@@ -199,7 +199,7 @@ def normalize_android_reply(
     best = max(videos, key=lambda item: int(item.get("qn") or 0))
     audio = max(audios, key=lambda item: int(item.get("bandwidth") or 0)) if audios else {}
     return {
-        "quality": QN_TO_QUALITY.get(int(parsed.get("quality") or 0), ""),
+        "quality": QN_TO_QUALITY.get(int(best.get("qn") or parsed.get("quality") or 0), ""),
         "qn": int(best.get("qn") or parsed.get("quality") or 0),
         "available_qualities": [QN_TO_QUALITY.get(int(item.get("qn") or 0), str(item.get("qn") or "")) for item in videos],
         "video_url": best["url"],

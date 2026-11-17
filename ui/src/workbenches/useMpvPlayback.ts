@@ -58,6 +58,7 @@ interface ResolvedMediaStream {
   url: string;
   audioUrl?: string;
   httpHeaders?: Record<string, string>;
+  httpProxy?: string;
   quality?: string;
 }
 
@@ -166,6 +167,7 @@ export async function resolveMediaStream(
       url,
       audioUrl,
       httpHeaders,
+      httpProxy: typeof data.http_proxy === 'string' ? data.http_proxy : undefined,
       quality: typeof data.quality === 'string' ? data.quality : item.qualityLabel,
     },
   };
@@ -361,6 +363,7 @@ export function useMpvPlayback(options: { enabled?: boolean } = {}): MpvPlayback
             url: stream.url,
             audioUrl: stream.audioUrl,
             httpHeaders: stream.httpHeaders,
+            httpProxy: stream.httpProxy,
             itemId: item.id,
             title: item.title,
             artist: item.creator,

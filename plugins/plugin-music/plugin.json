@@ -12,7 +12,8 @@
   "provides": [
     "media.charts.v1",
     "media.playlist.v1",
-    "media.source.v1"
+    "media.source.v1",
+    "media.adam.v1"
   ],
   "consumes": [
     "llm.translate.v1",
@@ -26,7 +27,8 @@
     "network:loopback",
     "fs:user_mount",
     "process:git",
-    "process:mpv"
+    "process:mpv",
+    "process:engine"
   ],
   "verify_cmd": "uv run pytest -q",
   "config_schema": [
@@ -127,6 +129,18 @@
       "type": "secret",
       "default": "",
       "description": "Optional Apple Music Cookie header stored exclusively in 0600 SecretVault"
+    },
+    {
+      "key": "adam_engine_bin",
+      "label": "Adam 引擎路径",
+      "type": "string",
+      "default": "/home/zhu/Projects/apple-music-online/electron/dist/resources/engine"
+    },
+    {
+      "key": "adam_data_dir",
+      "label": "Adam 数据目录（复用 v1）",
+      "type": "string",
+      "default": "~/.config/adam/engine-data"
     }
   ]
 }

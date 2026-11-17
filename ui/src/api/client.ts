@@ -245,6 +245,7 @@ export async function mpvOpen(
       audioUrl: request.audioUrl,
       subtitleUrls: request.subtitleUrls,
       httpHeaders: request.httpHeaders,
+      httpProxy: request.httpProxy,
       referrer: request.referrer,
       userAgent: request.userAgent,
       startSeconds: request.startSeconds,

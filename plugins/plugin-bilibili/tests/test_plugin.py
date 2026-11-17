@@ -105,6 +105,7 @@ async def test_media_source_categories_fetch_items_and_empty_results(
             "recommend",
             "popular",
             "dynamic",
+            "followings",
             "bangumi",
             "live",
             "history",

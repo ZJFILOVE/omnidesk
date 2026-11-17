@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+import http.cookies
+import os
+import shutil
+import tempfile
+import stat
+from pathlib import Path
+from urllib.parse import urlsplit
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -127,12 +134,61 @@ async def run_ytdlp_json(
         return None, {"error_code": "path_safety", "error": "ytdlp_bin 包含非法路径字符"}
     if resolved is None:
         return None, {"error_code": "not_configured", "error": "未找到可用的 yt-dlp 可执行文件"}
+    proxy = str(ctx.get_config('proxy') or '').strip()
+    if proxy and (urlsplit(proxy).scheme not in {'http', 'https', 'socks5', 'socks5h'} or not urlsplit(proxy).hostname or any(ch in proxy for ch in '\r\n\t')):
+        return None, {'error_code': 'invalid_argument', 'error': 'YouTube 代理地址无效'}
+    cookie_path = ''
+    cookie = str(ctx.get_secret('cookie_header') or '')
+    if not cookie and ctx.capabilities.has('web.cookies.v1'):
+        cookie_result = await ctx.capabilities.call('web.cookies.v1', {'action': 'get_cookies', 'url': 'https://www.youtube.com/', 'domain': 'youtube.com', 'include_subdomains': True})
+        if cookie_result.ok:
+            cookie = str(cookie_result.data.get('cookie_header') or '')
+    runtime_args = ['--js-runtimes', 'node'] if shutil.which('node') and not shutil.which('deno') else []
+    extra_secrets = (*extra_secrets, *(value for value in (cookie, proxy) if value))
     try:
-        res = await ctx.exec_subprocess([resolved, *args], timeout_sec=timeout_sec)
+        auth_args = []
+        legacy_cookies = str(ctx.get_config('cookies_file') or '').strip()
+        if cookie:
+            parsed = http.cookies.SimpleCookie()
+            parsed.load(cookie)
+            extra_secrets = (*extra_secrets, *(m.value for m in parsed.values()))
+            fd, cookie_path = tempfile.mkstemp(prefix='omnidesk-youtube-', suffix='.txt')
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'w') as handle:
+                handle.write('# Netscape HTTP Cookie File\n')
+                for name, value in parsed.items():
+                    if not any(ch in value.value for ch in '\r\n\t'):
+                        handle.write(f'.youtube.com\tTRUE\t/\tTRUE\t0\t{name}\t{value.value}\n')
+            auth_args = ['--cookies', cookie_path]
+        elif legacy_cookies:
+            # v1 already stored a Netscape cookie jar; copy it because yt-dlp
+            # updates its cookie file and must not rewrite the user's original.
+            source = Path(legacy_cookies).expanduser()
+            if source.is_symlink() or not source.is_file():
+                return None, {'error_code': 'not_configured', 'error': 'YouTube Cookie 文件不存在'}
+            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, 'rb') as handle:
+                meta = os.fstat(handle.fileno())
+                if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.geteuid() or meta.st_size > 1024 * 1024:
+                    return None, {'error_code': 'path_safety', 'error': 'YouTube Cookie 文件必须属于当前用户且不超过 1MB'}
+                raw = handle.read(1024 * 1024 + 1)
+            fd, cookie_path = tempfile.mkstemp(prefix='omnidesk-youtube-', suffix='.txt')
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(raw)
+            extra_secrets = (*extra_secrets, *(line.split('\t')[-1] for line in raw.decode(errors='replace').splitlines() if '\t' in line))
+            auth_args = ['--cookies', cookie_path]
+        network_args = ['--socket-timeout', '10', '--retries', '1', '--extractor-retries', '1']
+        if proxy:
+            network_args += ['--proxy', proxy]
+        res = await ctx.exec_subprocess([resolved, *runtime_args, *network_args, *auth_args, *args], timeout_sec=timeout_sec)
     except FileNotFoundError:
         return None, {"error_code": "not_configured", "error": "yt-dlp 可执行文件不存在"}
     except (PermissionError, OSError) as exc:
         return None, {"error_code": "service_offline", "error": f"启动 yt-dlp 失败: {redact_sensitive(str(exc) or type(exc).__name__, extra_secrets)}"}
+    finally:
+        if cookie_path:
+            Path(cookie_path).unlink(missing_ok=True)
     if not res.ok:
         code, msg, extra = classify_ytdlp_failure(res, extra_secrets)
         return None, {"error_code": code, "error": msg, **extra}

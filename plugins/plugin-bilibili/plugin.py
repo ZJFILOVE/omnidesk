@@ -46,6 +46,7 @@ from bilibili_impl.streams import (  # noqa: E402
     resolve_ytdlp_mode,
 )
 from bilibili_impl.workspace_ui import build_ui_schema  # noqa: E402
+from bilibili_impl.browse import browse  # noqa: E402
 from sources import BilibiliMediaSource  # noqa: E402
 
 _SUPPORTED_ACTIONS = (
@@ -65,6 +66,7 @@ _SUPPORTED_ACTIONS = (
     "fetch_chapters",
     "categories",
     "fetch_items",
+    "followings", "dynamics", "space",
 )
 
 
@@ -77,6 +79,7 @@ class BilibiliPlugin(BasePlugin):
         self._android_qr_auth_code = ""
         self._last_qr: dict[str, Any] | None = None
         self._tab_status = ""
+        self._browse_offsets: dict[Any, Any] = {}
 
     async def on_load(self, ctx: PluginContext) -> None:
         """Non-blocking registration of MediaSource, action capability, and workspace tab."""
@@ -93,6 +96,7 @@ class BilibiliPlugin(BasePlugin):
         self._last_qr = None
         self._tab_status = ""
         self._media_source = None
+        self._browse_offsets.clear()
 
     async def on_health_check(self) -> dict[str, Any]:
         """Lightweight offline readiness report without calling external network services."""
@@ -157,6 +161,8 @@ class BilibiliPlugin(BasePlugin):
         payload = dict(req) if req is not None else {}
         action = str(payload.get("action") or "").strip()
         try:
+            if action in {"followings", "dynamics", "space"}:
+                return await browse(self, payload)
             if action == "status":
                 return await action_status(self)
             if action == "qr_login_start":
@@ -219,6 +225,8 @@ class BilibiliPlugin(BasePlugin):
         proxy = validate_proxy_url(str(req.get("proxy") if "proxy" in req else cfg.get("proxy") or ""))
         ytdlp_bin = validate_ytdlp_bin(str(req.get("ytdlp_bin") if "ytdlp_bin" in req else cfg.get("ytdlp_bin") or ""))
         method = str(req.get("method") or "auto").strip().lower()
+        if method not in {"auto", "playurl", "ytdlp"}:
+            return CapabilityResult.fail("未知取流方式", error_code="invalid_argument")
         cookie, cookie_src = await self.resolve_cookie()
         assert self.ctx is not None
         android_token = str(self.ctx.get_secret("android_access_token") or "")
@@ -226,19 +234,13 @@ class BilibiliPlugin(BasePlugin):
         preferred_codec = self._preferred_codec_id()
 
         mode, bin_path = resolve_ytdlp_mode(client, method=method, ytdlp_bin=ytdlp_bin)
-        if mode == "ytdlp":
-            resolved = await resolve_via_ytdlp(
-                self, bin_path, target["url"], cookie=cookie, proxy=proxy,
-                timeout_sec=client.timeout_sec, req_label=req_label, req_qn=req_qn,
-                allowed_origins=client.allowed_loopback_origins,
-            )
-        else:
+        async def native_stream() -> dict[str, Any]:
             grpc_endpoint = validate_grpc_endpoint(
                 str(cfg.get("grpc_endpoint") or DEFAULT_GRPC_ENDPOINT),
                 allowed_loopback_origins=client.allowed_loopback_origins,
             )
             curl_bin = validate_curl_bin(str(cfg.get("curl_bin") or "curl"))
-            resolved = await resolve_via_playurl(
+            return await resolve_via_playurl(
                 client,
                 target,
                 cookie=cookie,
@@ -252,6 +254,33 @@ class BilibiliPlugin(BasePlugin):
                 curl_bin=curl_bin,
                 plugin=self,
             )
+
+        async def ytdlp_stream() -> dict[str, Any]:
+            return await resolve_via_ytdlp(
+                self, bin_path, target["url"], cookie=cookie, proxy=proxy,
+                timeout_sec=client.timeout_sec, req_label=req_label, req_qn=req_qn,
+                allowed_origins=client.allowed_loopback_origins,
+            )
+
+        # An authorized App session must participate in normal playback even
+        # when yt-dlp happens to be installed. Explicit methods stay explicit.
+        if method == "ytdlp":
+            resolved = await ytdlp_stream()
+        elif method == "playurl" or mode != "ytdlp":
+            resolved = await native_stream()
+        else:
+            try:
+                resolved = await native_stream()
+            except BilibiliApiError as native_error:
+                if native_error.error_code in {"drm_protected", "not_found", "cancelled"}:
+                    raise
+                try:
+                    resolved = await ytdlp_stream()
+                except BilibiliApiError as extractor_error:
+                    raise BilibiliApiError(
+                        f"原生取流：{native_error.message}；yt-dlp：{extractor_error.message}",
+                        error_code=extractor_error.error_code,
+                    ) from None
 
         android_media = bool(resolved.get("android_media"))
         headers = default_stream_headers(
