@@ -9,7 +9,10 @@ it('maps player transport keys without consuming workbench modifier bindings', (
   expect(key('F9')).toBe('skip');
   expect(key('ArrowLeft')).toBe('back');
   expect(key('N', true)).toBe('next');
-  expect(key(']', false)).toBe('faster');
+  expect(key('.')).toBe('faster');
+  expect(key('。')).toBe('faster');
+  expect(key(',')).toBe('slower');
+  expect(key('，')).toBe('slower');
   expect(key('m', false, true)).toBeUndefined();
 });
 it('seeks on the media workbench and isolates typing and overlays', () => {

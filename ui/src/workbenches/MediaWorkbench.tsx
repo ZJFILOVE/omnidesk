@@ -465,7 +465,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       if (volume > 0) { unmutedVolume.current = volume; handleVolumeChange(0); }
       else handleVolumeChange(unmutedVolume.current);
     }
-    if (action === 'slower' || action === 'faster' || action === 'normal') handleSpeedChange(action === 'normal' ? 1 : Math.max(0.25, Math.min(4, speed + (action === 'slower' ? -0.25 : 0.25))));
+    if (action === 'slower' || action === 'faster' || action === 'normal') handleSpeedChange(action === 'normal' ? 1 : Math.max(0.3, Math.min(4, Number((speed + (action === 'slower' ? -0.1 : 0.1)).toFixed(1)))));
     if (action === 'skip') {
       const segment = selectedItem.chapters?.find((ch) => (ch.kind === 'sponsor' || ch.kind === 'ad') && ch.startSec <= currentSec && ch.endSec > currentSec);
       if (segment) handleSkipSponsor(segment);

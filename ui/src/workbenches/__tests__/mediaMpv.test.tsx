@@ -280,12 +280,10 @@ describe('MediaWorkbench real mpv integration', () => {
       expect(invoke).toHaveBeenCalledWith('mpv_volume', { args: { volume: 40 } });
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '1.5×' }));
+    fireEvent.change(screen.getByRole('slider', { name: '播放倍速' }), { target: { value: '1.1' } });
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('mpv_set_speed', { args: { speed: 1.5 } });
-      expect(screen.getByRole('button', { name: '1.5×' }).getAttribute('aria-pressed')).toBe(
-        'true',
-      );
+      expect(invoke).toHaveBeenCalledWith('mpv_set_speed', { args: { speed: 1.1 } });
+      expect((screen.getByRole('slider', { name: '播放倍速' }) as HTMLInputElement).value).toBe('1.1');
     });
 
     fireEvent.click(screen.getByRole('button', { name: '暂停播放' }));

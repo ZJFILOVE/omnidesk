@@ -32,8 +32,6 @@ export function formatMediaTime(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
-
 function formatSpeed(speed: number): string {
   return `${Number(speed.toFixed(2))}×`;
 }
@@ -291,34 +289,26 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         ) : null}
 
         {onSpeedChange ? (
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-3">
             <span className="w-12 shrink-0 text-[13.5px] text-[var(--text-muted)]">倍速</span>
-            <div
-              role="group"
+            <input
+              type="range"
+              min={0.3}
+              max={4}
+              step={0.1}
+              value={speed}
+              onChange={(e) => onSpeedChange(Number(e.target.value))}
               aria-label="播放倍速"
-              className="flex flex-wrap items-center gap-1.5"
-            >
-              {SPEED_OPTIONS.map((option) => {
-                const selected = Math.abs(speed - option) < 0.005;
-                return (
-                  <FocusButton
-                    key={option}
-                    focusId={`media:player:speed:${option}`}
-                    activeFocusId={activeFocusId}
-                    onFocus={onFocus}
-                    onActivate={() => onSpeedChange(option)}
-                    selected={selected}
-                    tone="media"
-                    surface="soft"
-                    className="px-2.5 py-1 font-mono text-[13.5px]"
-                  >
-                    {formatSpeed(option)}
-                  </FocusButton>
-                );
-              })}
-            </div>
-            <span className="ml-auto font-mono text-[13.5px] text-[var(--text-subtle)]">
-              当前 {formatSpeed(speed)}
+              aria-valuetext={formatSpeed(speed)}
+              data-focused={activeFocusId === 'media:player:speed' ? 'true' : undefined}
+              {...focusableInputProps('media:player:speed', activeFocusId, onFocus)}
+              className={focusClass(
+                activeFocusId === 'media:player:speed',
+                'min-w-0 flex-1 cursor-pointer accent-[var(--domain-media)]',
+              )}
+            />
+            <span className="w-12 shrink-0 text-right font-mono text-[13.5px] text-[var(--text-subtle)]">
+              {formatSpeed(speed)}
             </span>
           </div>
         ) : null}

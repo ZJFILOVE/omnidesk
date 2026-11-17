@@ -61,7 +61,7 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
       { keys: ['Space'], description: '播放 / 暂停当前音视频媒体' },
       { keys: ['←', '→'], description: '影视音乐页：后退 / 前进 10 秒' },
       { keys: ['↑', '↓', 'M'], description: '影视音乐页：音量 ±5% / 静音与恢复' },
-      { keys: ['[', ']', 'Backspace'], description: '降低 / 提高倍速，恢复 1×' },
+      { keys: [',', '.', 'Backspace'], description: '降低 / 提高倍速（每次 0.1×），恢复 1×' },
       { keys: ['Shift+P', 'Shift+N'], description: '上一项 / 下一项' },
       { keys: ['F9'], description: '跳过当前位置的赞助片段（v1）' },
       { keys: ['F11'], description: '影视音乐页：切换全屏（v1）' },
