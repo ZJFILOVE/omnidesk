@@ -4,6 +4,7 @@ import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
 import { LoadMoreButton } from '../components/LoadMoreButton';
 import { MediaCover } from '../components/MediaCover';
+import { PdfParseButton } from '../components/PdfParseButton';
 import { AnnasDownloadPanel } from '../components/AnnasDownloadPanel';
 import { TranslationButton } from '../components/TranslationContext';
 import { useBookSearch } from '../hooks/useBookSearch';
@@ -507,6 +508,8 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       rightWidthClass="@[860px]/workbench:w-[292px]"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
+          {selectedBook?.sourcePlugin === 'plugin-pdf-babeldoc' ? <PdfParseButton bookId={selectedBook.id}
+            page={activeSpread?.page ?? selectedBook.currentPage} onParsed={liveSpread.reload} /> : null}
           <TranslationButton label="翻译当前页" disabled={liveSpread.loading} request={{ title: `${selectedBook?.title ?? '图书'} · 第 ${activeSpread?.page ?? 1} 页`,
             segments: activeSpread?.leftParagraphs.filter(paragraph => paragraph.text.trim()).map(paragraph => ({ id: paragraph.id, text: paragraph.text })) ?? [],
             onTranslated: results => setPageTranslations(previous => ({ ...previous, [pageKey]: Object.fromEntries(results.map(result => [result.id, result.translation])) })),

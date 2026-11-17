@@ -40,6 +40,7 @@ class BabelDocBookSource(BookSource):
         self._cover_cache: dict[tuple[str, int, int], str] = {}
         self._get_config = get_config_fn
         self._get_job_store = get_job_store_fn
+        self.mineru = None
 
     def _config_roots(self) -> tuple[list[Path], Path | None, str]:
         cfg = self._get_config()
@@ -213,6 +214,14 @@ class BabelDocBookSource(BookSource):
             raise FileNotFoundError(f"Book not found in configured pdf_library_roots: {book_id!r}")
 
         source_path, meta = matched
+        if self.mineru is not None:
+            parsed = await asyncio.to_thread(self.mineru.cached, source_path, page_number)
+            if parsed:
+                return BookSpread(book_id=book_id, chapter_title=f"第 {page_number} 页 · MinerU",
+                    page_number=page_number, total_pages=meta.total_pages, blocks=parsed['blocks'],
+                    extra={'status': 'mineru_ready', 'parser': 'mineru', 'format': parsed['format'],
+                           'locations': parsed.get('locations', []), 'source_path': str(source_path),
+                           'source_sha256': parsed['source_sha256'], 'needs_bilingual_pdf': False})
         dual_pdf, page_map = self._resolve_artifacts(book_id, source_path, output_root, target_lang, roots)
 
         if dual_pdf is None and page_map is None:

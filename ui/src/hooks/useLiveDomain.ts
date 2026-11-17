@@ -618,10 +618,13 @@ export interface LiveSpread {
   spreads: BookSpread[];
   loading: boolean;
   error: string | null;
+  reload: () => void;
 }
 
 /** Fetch a page spread from the live book source. */
 export function useLiveSpread(bookId: string, page = 1, sourceId?: string): LiveSpread {
+  const [revision, setRevision] = useState(0);
+  const reload = useCallback(() => setRevision(value => value + 1), []);
   const [spreads, setSpreads] = useState<BookSpread[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -660,9 +663,9 @@ export function useLiveSpread(bookId: string, page = 1, sourceId?: string): Live
     return () => {
       cancelled = true;
     };
-  }, [bookId, page, sourceId]);
+  }, [bookId, page, sourceId, revision]);
 
-  return { spreads, loading, error };
+  return { spreads, loading, error, reload };
 }
 
 export interface VocabPersistence {

@@ -14,7 +14,7 @@ from typing import Any
 from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext
 
 if __package__:
-    from . import job_store, pdf_utils, runner
+    from . import job_store, pdf_utils, runner, mineru_reader
     from .sources import BabelDocBookSource
 else:
     _PLUGIN_ROOT = str(Path(__file__).resolve().parent)
@@ -23,9 +23,10 @@ else:
     import job_store  # type: ignore[import-not-found,no-redef]
     import pdf_utils  # type: ignore[import-not-found,no-redef]
     import runner  # type: ignore[import-not-found,no-redef]
+    import mineru_reader
     from sources import BabelDocBookSource  # type: ignore[import-not-found,no-redef]
 
-_SUPPORTED_BILINGUAL_ACTIONS = ("status", "submit", "job_status", "cancel", "list_jobs")
+_SUPPORTED_BILINGUAL_ACTIONS = ("status", "submit", "job_status", "cancel", "list_jobs", "parse_page", "mineru_settings", "configure_mineru")
 _SUPPORTED_SOURCE_ACTIONS = ("status", "list_books", "fetch_spread", "list_vocab")
 _SEMVER_EXTRACT_RE = re.compile(r"\b(\d+\.\d+(?:\.\d+[^\s]*)?)\b")
 
@@ -42,6 +43,7 @@ class PdfBabeldocPlugin(BasePlugin):
     async def on_load(self, ctx: PluginContext) -> None:
         await super().on_load(ctx)
         self._book_source = BabelDocBookSource(self._read_config, self._get_job_store)
+        self._book_source.mineru = mineru_reader.MineruReader(ctx.data_dir, self._read_config, lambda: ctx.get_secret('mineru_api_token') or '')
         ctx.register_book_source(self._book_source)
         ctx.register_capability("book.source.v1", self.handle_book_source)
         ctx.register_capability("book.bilingual_pdf.v1", self.handle_bilingual_pdf)
@@ -175,6 +177,52 @@ class PdfBabeldocPlugin(BasePlugin):
             return CapabilityResult.fail("插件尚未加载", error_code="service_offline")
         payload = dict(req) if req is not None else {}
         action = str(payload.get("action") or "").strip()
+        if action in {'mineru_settings', 'configure_mineru'}:
+            if action == 'configure_mineru':
+                patch = {}
+                for key in ('mineru_wrapper', 'mineru_python', 'mineru_token_file'):
+                    if key in payload:
+                        value = payload[key]
+                        if not isinstance(value, str) or len(value) > 4096 or '\x00' in value or (value.strip() and not Path(value.strip()).expanduser().is_absolute()):
+                            return CapabilityResult.fail('路径须为绝对路径或留空', error_code='invalid_argument')
+                        patch[key] = value.strip()
+                token = payload.get('mineru_api_token')
+                if token is not None and (not isinstance(token, str) or len(token) > 16384 or any(c.isspace() for c in token)):
+                    return CapabilityResult.fail('MinerU Token 格式无效', error_code='invalid_argument')
+                if patch:
+                    self.ctx.set_config(patch)
+                if token:
+                    self.ctx.set_secret('mineru_api_token', token)
+                elif payload.get('clear_token') is True:
+                    self.ctx.set_secret('mineru_api_token', None)
+            cfg = self._read_config()
+            wrapper = cfg.get('mineru_wrapper') or str(Path.home() / 'Documents/GLM-OCR/.agent/skills/mineru-document-parser/scripts/mineru_api.py')
+            python = cfg.get('mineru_python') or str(Path.home() / 'Projects/qwen-translator/runtime/pdf-venv/bin/python')
+            token_file = cfg.get('mineru_token_file') or str(Path.home() / 'Documents/GLM-OCR/.mineru/token')
+            return CapabilityResult.ok({**{key: cfg.get(key, '') for key in ('mineru_wrapper', 'mineru_python', 'mineru_token_file')},
+                'token_configured': bool(self.ctx.get_secret('mineru_api_token')),
+                'token_file_available': Path(token_file).expanduser().is_file(),
+                'wrapper_available': Path(wrapper).expanduser().is_file(),
+                'python_available': Path(python).expanduser().is_file(),
+                'provider': 'mineru.net', 'upload_scope': 'current_page'})
+        if action == "parse_page":
+            page = payload.get('page_number', 1)
+            if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+                return CapabilityResult.fail('页码必须是正整数', error_code='invalid_argument')
+            assert self._book_source is not None
+            matched = next(((p, m) for p, m in self._book_source._scan_library()
+                            if pdf_utils.make_book_id(p) == payload.get('book_id')), None)
+            if matched is None:
+                return CapabilityResult.fail('未找到书库中的 PDF', error_code='not_found')
+            source, meta = matched
+            if page > meta.total_pages:
+                return CapabilityResult.fail('页码超出 PDF 范围', error_code='invalid_argument')
+            try:
+                parsed = await self._book_source.mineru.parse(source, page, upload=payload.get('upload_current_page') is True)
+                return CapabilityResult.ok({'page': page, 'parser': 'mineru', 'format': parsed['format'],
+                    'block_count': len(parsed['blocks']), 'image_count': sum(bool(b.image_url) for b in parsed['blocks'])})
+            except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
+                return CapabilityResult.fail(self._redact(str(exc)) or 'MinerU 解析超时，稍后重试可继续已有任务', error_code='parse_failed')
         if action == "status":
             return await self._handle_status()
         if action == "submit":

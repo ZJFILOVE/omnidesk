@@ -19,12 +19,43 @@
   "permissions": [
     "process:babeldoc",
     "process:pdftoppm",
+    "process:python",
+    "network:https",
     "fs:user_mount",
     "config:read",
-    "config:write"
+    "config:write",
+    "secret:vault"
   ],
   "verify_cmd": "uv run pytest -q",
   "config_schema": [
+    {
+      "key": "mineru_api_token",
+      "label": "MinerU API Token",
+      "type": "secret",
+      "default": "",
+      "description": "保存在密钥库，优先于 Token 文件；留空保留已有密钥"
+    },
+    {
+      "key": "mineru_wrapper",
+      "label": "MinerU API 适配器路径",
+      "type": "string",
+      "default": "",
+      "description": "留空复用学案工作台默认的 GLM-OCR/mineru_api.py；只在明确点击解析当前页时上传"
+    },
+    {
+      "key": "mineru_python",
+      "label": "MinerU Python（需 PyMuPDF）",
+      "type": "string",
+      "default": "",
+      "description": "留空使用 ~/Projects/qwen-translator/runtime/pdf-venv/bin/python"
+    },
+    {
+      "key": "mineru_token_file",
+      "label": "MinerU Token 文件路径",
+      "type": "string",
+      "default": "",
+      "description": "填写学案工作台所用账号的私有 Token 文件路径，不要填写 Token 内容；留空使用 ~/Documents/GLM-OCR/.mineru/token"
+    },
     {
       "key": "babeldoc_bin",
       "label": "BabelDOC 可执行文件",
