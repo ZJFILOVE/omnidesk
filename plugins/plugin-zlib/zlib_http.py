@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import ssl
 import tempfile
 import time
 import urllib.error
@@ -33,7 +34,7 @@ from zlib_security import (
 
 _CHUNK_SIZE = 65536
 _MAX_REDIRECTS = 5
-_AUTH_STRIP_HEADERS = ("cookie", "authorization", "remix-userid", "remix-key", "x-api-key")
+_AUTH_STRIP_HEADERS = ("cookie", "authorization", "remix-userid", "remix-key", "remix-userkey", "x-api-key")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,10 @@ def _map_transport_exc(exc: BaseException, secrets: tuple[str, ...]) -> HttpFetc
             return HttpFetchError(reason.error_code, redact_text(str(reason), secrets))
         if isinstance(reason, TimeoutError):
             return HttpFetchError("timeout", "请求超时")
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return HttpFetchError("tls_certificate_error", "站点 TLS 证书验证失败，请检查系统时间或站点证书")
+        if isinstance(reason, ssl.SSLError):
+            return HttpFetchError("service_offline", "站点 TLS 连接中断，请检查网络或切换图书源")
         return HttpFetchError("service_offline", redact_text(f"站点连接失败: {reason}", secrets))
     return HttpFetchError("service_offline", redact_text(f"网络请求失败: {type(exc).__name__}", secrets))
 
@@ -182,10 +187,12 @@ def _sync_fetch_bytes(
     max_bytes: int,
     configured_origins: frozenset[Origin],
     secrets: tuple[str, ...],
+    method: str = "GET",
+    body: bytes | None = None,
 ) -> HttpResponseData:
     safe_url = validate_url(url, configured_origins=configured_origins, resolve_dns=True)
     opener = _build_opener(safe_url, configured_origins, resolve_dns=True)
-    req = urllib.request.Request(safe_url, headers=dict(headers), method="GET")
+    req = urllib.request.Request(safe_url, headers=dict(headers), method=method, data=body)
     deadline = time.monotonic() + max(0.05, timeout_sec)
     try:
         with opener.open(req, timeout=timeout_sec) as resp:
@@ -278,6 +285,8 @@ async def fetch_with_chrome_fallback(
     configured_origins: frozenset[Origin],
     accept: str = "text/html,application/json;q=0.9,*/*;q=0.8",
     prefer_chrome_fetch: bool = False,
+    method: str = "GET",
+    body: str = "",
 ) -> HttpResponseData:
     """Fetch URL with SSRF safety; optionally route or fallback via `web.fetch.v1`."""
     safe_url = validate_url(url, configured_origins=configured_origins, resolve_dns=False)
@@ -289,10 +298,12 @@ async def fetch_with_chrome_fallback(
             "web.fetch.v1",
             {
                 "url": safe_url,
-                "method": "GET",
-                "headers": {"Accept": accept},
-                "body": "",
+                "method": method,
+                "headers": {"Accept": accept, **({"Content-Type": "application/x-www-form-urlencoded"} if method == "POST" else {})},
+                "body": body,
                 "credentials": "include",
+                "open_tab_if_missing": True,
+                "headless": True,
                 "timeout_ms": int(max(1.0, timeout_sec) * 1000),
             },
         )
@@ -324,14 +335,15 @@ async def fetch_with_chrome_fallback(
         return await asyncio.to_thread(
             _sync_fetch_bytes,
             safe_url,
-            headers=auth.build_headers(accept=accept),
+            headers={**auth.build_headers(accept=accept), **({"Content-Type": "application/x-www-form-urlencoded"} if method == "POST" else {})},
+            method=method, body=body.encode("utf-8") if body else None,
             timeout_sec=timeout_sec,
             max_bytes=max_bytes,
             configured_origins=configured_origins,
             secrets=auth.extra_secrets(),
         )
     except HttpFetchError as exc:
-        if exc.error_code == "auth_required" and has_web_fetch:
+        if exc.error_code in {"auth_required", "service_offline", "timeout"} and has_web_fetch:
             return await _via_chrome()
         raise
 

@@ -40,8 +40,9 @@ from zlib_security import (  # noqa: E402
 )
 from zlib_ui import build_zlib_ui_schema, forward_book_handoff  # noqa: E402
 
-_SUPPORTED_ACTIONS = ("search", "detail", "download", "open_in_babeldoc", "open_in_ebook", "send_to_nas", "status")
+_SUPPORTED_ACTIONS = ("mirrors", "configure_mirror", "search", "detail", "download", "open_in_babeldoc", "open_in_ebook", "send_to_nas", "status")
 _MAX_CACHE = 256
+MIRRORS = [{'url': 'https://z-library.sk', 'label': 'z-library.sk'}, {'url': 'https://z-lib.sk', 'label': 'z-lib.sk'}, {'url': 'https://z-lib.fm', 'label': 'z-lib.fm'}, {'url': 'https://z-lib.gd', 'label': 'z-lib.gd'}, {'url': 'https://z-lib.gl', 'label': 'z-lib.gl'}, {'url': 'https://1lib.sk', 'label': '1lib.sk'}, {'url': 'https://z-library.website', 'label': 'z-library.website'}, {'url': 'https://z-library.qa', 'label': 'z-library.qa'}]
 
 
 class ZlibPlugin(BasePlugin):
@@ -138,6 +139,33 @@ class ZlibPlugin(BasePlugin):
         """Dispatch `book.search.v1` actions for Z-Library."""
         payload = dict(req) if req is not None else {}
         action = clean_text(payload.get("action"))
+        if action in {"mirrors", "configure_mirror"}:
+            if self.ctx is None:
+                return CapabilityResult.fail("服务未加载", error_code="service_offline")
+            if action == "configure_mirror":
+                raw = payload.get("mirror_url")
+                if not isinstance(raw, str) or not raw.strip():
+                    return CapabilityResult.fail("请填写镜像地址", error_code="invalid_argument")
+                try:
+                    url = raw.strip().rstrip("/")
+                    parsed = urllib.parse.urlsplit(url)
+                    if parsed.query or parsed.fragment:
+                        return CapabilityResult.fail("镜像地址不能包含查询参数或片段", error_code="invalid_argument")
+                    validate_url(url, configured_origins=frozenset({parse_origin(url)}), resolve_dns=False)
+                    old_url, _ = self._resolve_endpoint(required=False)
+                    patch = {"mirror_url": url}
+                    # Vault credentials belong to the old origin; Chrome cookies are domain scoped.
+                    if old_url and not self._cfg("vault_auth_origin", ""):
+                        old = parse_origin(old_url)
+                        patch["vault_auth_origin"] = f"{old.scheme}://{old.host}:{old.port}"
+                    self.ctx.set_config(patch)
+                    self._search_cache.clear()
+                    self._detail_cache.clear()
+                    self._last_results = []
+                except BookSearchSecurityError as exc:
+                    return self._fail_from_exc(exc)
+            endpoint, _ = self._resolve_endpoint(required=False)
+            return CapabilityResult.ok({"mirror_url": endpoint, "mirrors": MIRRORS})
         if action == "search":
             return await self._handle_search(payload)
         if action == "detail":
@@ -193,20 +221,30 @@ class ZlibPlugin(BasePlugin):
         resp = None
         for idx, candidate_url in enumerate(urls):
             try:
+                parts = urllib.parse.urlsplit(candidate_url)
+                is_eapi = parts.path.rstrip("/").endswith("/eapi/book/search")
+                request_url = urllib.parse.urlunsplit(parts._replace(query="")) if is_eapi else candidate_url
                 resp = await fetch_with_chrome_fallback(
-                    self.ctx, candidate_url, auth=auth, timeout_sec=self._timeout_sec(),
+                    self.ctx, request_url, auth=auth,
+                    method="POST" if is_eapi else "GET", body=parts.query if is_eapi else "", timeout_sec=self._timeout_sec(),
                     max_bytes=8 * 1024 * 1024, configured_origins=origins,
                     prefer_chrome_fetch=bool(self._cfg("prefer_chrome_fetch", False)),
                 )
                 break
             except HttpFetchError as exc:
-                if exc.error_code == "not_found" and idx + 1 < len(urls):
+                if (exc.error_code == "not_found" or exc.status_code in {400, 405}) and idx + 1 < len(urls):
                     continue
                 return self._fail_from_exc(exc, auth)
             except BookSearchSecurityError as exc:
                 return self._fail_from_exc(exc, auth)
 
         assert resp is not None
+        try:
+            envelope = json.loads(resp.body)
+        except (ValueError, UnicodeDecodeError):
+            envelope = None
+        if isinstance(envelope, dict) and envelope.get("success") in (0, False):
+            return CapabilityResult.fail("站点拒绝了搜索请求，请检查该镜像的登录状态", error_code="auth_required")
         results: list[dict[str, Any]] = []
         for item in parse_zlib_search_response(resp.body, resp.content_type, endpoint):
             if fmt and item.get("format") and item["format"] != fmt:

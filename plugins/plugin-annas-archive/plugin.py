@@ -41,8 +41,9 @@ from annas_security import (  # noqa: E402
 )
 from annas_ui import build_annas_ui_schema, forward_book_handoff  # noqa: E402
 
-_SUPPORTED_ACTIONS = ("search", "detail", "download", "open_in_babeldoc", "open_in_ebook", "send_to_nas", "status")
+_SUPPORTED_ACTIONS = ("mirrors", "configure_mirror", "search", "detail", "download", "open_in_babeldoc", "open_in_ebook", "send_to_nas", "status")
 _MAX_CACHE = 256
+MIRRORS = [{'url': 'https://annas-archive.gl', 'label': 'annas-archive.gl'}, {'url': 'https://annas-archive.pk', 'label': 'annas-archive.pk'}, {'url': 'https://annas-archive.gd', 'label': 'annas-archive.gd'}, {'url': 'https://annas-archive.is', 'label': 'annas-archive.is · 未核实归属'}]
 
 
 class AnnasArchivePlugin(BasePlugin):
@@ -139,6 +140,33 @@ class AnnasArchivePlugin(BasePlugin):
         """Dispatch `book.search.v1` actions for Anna's Archive."""
         payload = dict(req) if req is not None else {}
         action = clean_text(payload.get("action"))
+        if action in {"mirrors", "configure_mirror"}:
+            if self.ctx is None:
+                return CapabilityResult.fail("服务未加载", error_code="service_offline")
+            if action == "configure_mirror":
+                raw = payload.get("mirror_url")
+                if not isinstance(raw, str) or not raw.strip():
+                    return CapabilityResult.fail("请填写镜像地址", error_code="invalid_argument")
+                try:
+                    url = raw.strip().rstrip("/")
+                    parsed = urllib.parse.urlsplit(url)
+                    if parsed.query or parsed.fragment:
+                        return CapabilityResult.fail("镜像地址不能包含查询参数或片段", error_code="invalid_argument")
+                    validate_url(url, configured_origins=frozenset({parse_origin(url)}), resolve_dns=False)
+                    old_url, _ = self._resolve_endpoint(required=False)
+                    patch = {"mirror_url": url}
+                    # Vault credentials belong to the old origin; Chrome cookies are domain scoped.
+                    if old_url and not self._cfg("vault_auth_origin", ""):
+                        old = parse_origin(old_url)
+                        patch["vault_auth_origin"] = f"{old.scheme}://{old.host}:{old.port}"
+                    self.ctx.set_config(patch)
+                    self._search_cache.clear()
+                    self._detail_cache.clear()
+                    self._last_results = []
+                except BookSearchSecurityError as exc:
+                    return self._fail_from_exc(exc)
+            endpoint, _ = self._resolve_endpoint(required=False)
+            return CapabilityResult.ok({"mirror_url": endpoint, "mirrors": MIRRORS})
         if action == "search":
             return await self._handle_search(payload)
         if action == "detail":

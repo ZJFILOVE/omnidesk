@@ -47,6 +47,27 @@ def test_network_security_wall_after_large_stylesheet_is_not_parse_error() -> No
     assert reddit_http.classify_http_failure(resp, expect_json=False)[0] == ""
 
 
+@pytest.mark.asyncio
+async def test_extracted_bracketed_text_is_not_mistaken_for_json() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    html = '<html><body><shreddit-post post-id="t3_abc" post-title="A post" subreddit-name="rust"></shreddit-post></body></html>'
+    call = AsyncMock(return_value=CapabilityResult.ok({"text": "[Home] Reddit post text", "html": html}))
+    client = reddit_http.RedditHttpClient()
+    client.set_context(SimpleNamespace(capabilities=SimpleNamespace(has=lambda cap: True, call=call)))
+    response = await client._fetch_via_chrome_extract("https://www.reddit.com/hot.json", 1000, ())
+    assert response.ok and response.transport == "web.extract.v1:html"
+    assert reddit_parser.parse_listing_html(response.body).items[0].title == "A post"
+    call.return_value = CapabilityResult.ok({"text": "[Home]", "html": "<html>You've been blocked by network security</html>"})
+    blocked = await client._fetch_via_chrome_extract("https://www.reddit.com/hot.json", 1000, ())
+    assert blocked.error_code == "cloudflare_blocked"
+
+
+def test_malformed_json_triggers_transport_fallback() -> None:
+    response = reddit_http.HttpResponse(ok=True, status_code=200, body="[not JSON]")
+    assert reddit_http.classify_http_failure(response)[0] == "parse_error"
+
+
 @pytest.mark.parametrize("status", [404, 410])
 def test_missing_api_response_does_not_claim_the_post_was_deleted(status: int) -> None:
     code, message = reddit_http.classify_http_failure(reddit_http.HttpResponse(status_code=status))

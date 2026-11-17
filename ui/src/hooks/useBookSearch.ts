@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { formatRpcError, isTauriAvailable, searchBooks, type BookSearchProvider, type BookSearchResult } from '../api';
 
-export function useBookSearch(query: string, provider: BookSearchProvider, enabled: boolean) {
+export function useBookSearch(query: string, provider: BookSearchProvider, enabled: boolean, refreshKey = 0) {
   const [results, setResults] = useState<BookSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +43,7 @@ export function useBookSearch(query: string, provider: BookSearchProvider, enabl
       }
     }, 320);
     return () => { version.current += 1; window.clearTimeout(timer); };
-  }, [query, provider, enabled]);
+  }, [query, provider, enabled, refreshKey]);
 
   const loadMore = async () => {
     if (pending.current || loading || !hasMore) return;

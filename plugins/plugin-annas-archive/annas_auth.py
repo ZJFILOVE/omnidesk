@@ -64,6 +64,11 @@ async def resolve_auth_material(ctx: PluginContext | None, target_url: str) -> A
     api_key = str(ctx.get_secret("api_key") or "").strip()
     vault_cookie = str(ctx.get_secret("cookie_header") or ctx.get_secret("cookie") or "").strip()
 
+    pinned_origin = str(ctx.get_config("vault_auth_origin", "") or "").strip()
+    if pinned_origin and parse_origin(pinned_origin) != parse_origin(target_url):
+        api_key = ""
+        vault_cookie = ""
+
     cookie_header = ""
     cookie_source = "none"
 

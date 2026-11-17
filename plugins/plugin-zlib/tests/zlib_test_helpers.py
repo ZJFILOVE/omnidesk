@@ -91,13 +91,21 @@ def run_mock_zlib_server(state: MockZlibState) -> Iterator[str]:
     """Start a local 127.0.0.1 HTTP server emulating Z-Library search, detail, and download."""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            assert self.path == "/eapi/book/search"
+            assert self.headers.get("Content-Type") == "application/x-www-form-urlencoded"
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode()
+            assert "message=" in body
+            self.path += "?" + body
+            self.do_GET()
+
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlsplit(self.path)
             state.requests.append({
                 "path": parsed.path,
                 "query": parsed.query,
                 "cookie": self.headers.get("Cookie", ""),
-                "remix_key": self.headers.get("remix-key", ""),
+                "remix_key": self.headers.get("remix-userkey", ""),
                 "remix_userid": self.headers.get("remix-userid", ""),
             })
             if state.mode == "401":

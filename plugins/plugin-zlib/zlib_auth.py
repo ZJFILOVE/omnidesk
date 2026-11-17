@@ -30,7 +30,7 @@ class AuthMaterial:
         if self.cookie_header:
             headers["Cookie"] = self.cookie_header
         if self.api_key:
-            headers["remix-key"] = self.api_key
+            headers["remix-userkey"] = self.api_key
         if self.remix_userid:
             headers["remix-userid"] = self.remix_userid
         return headers
@@ -67,6 +67,12 @@ async def resolve_auth_material(ctx: PluginContext | None, target_url: str) -> A
     api_key = str(ctx.get_secret("api_key") or ctx.get_secret("remix_key") or "").strip()
     remix_userid = str(ctx.get_secret("remix_userid") or "").strip()
     vault_cookie = str(ctx.get_secret("cookie_header") or ctx.get_secret("cookie") or "").strip()
+
+    pinned_origin = str(ctx.get_config("vault_auth_origin", "") or "").strip()
+    if pinned_origin and parse_origin(pinned_origin) != parse_origin(target_url):
+        api_key = ""
+        remix_userid = ""
+        vault_cookie = ""
 
     cookie_header = ""
     cookie_source = "none"

@@ -1,4 +1,5 @@
 import React from 'react';
+import { BookMirrorSettings } from '../../components/BookMirrorSettings';
 import { MediaCover } from '../../components/MediaCover';
 import { AlertTriangle, BookOpen, LoaderCircle, Plus } from 'lucide-react';
 import type { BookSearchProvider } from '../../api';
@@ -17,6 +18,7 @@ export interface BookShelfSidebarProps {
   onFocus: (id: string) => void;
   onTabChange: (tab: 'shelf' | 'search') => void;
   onCatalogQueryChange: (q: string) => void;
+  onMirrorChanged?: () => void;
   searchLoading?: boolean;
   searchError?: string | null;
   searchProvider?: BookSearchProvider;
@@ -39,6 +41,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
   onFocus,
   onTabChange,
   onCatalogQueryChange,
+  onMirrorChanged,
   searchLoading = false,
   searchError = null,
   searchProvider = 'auto',
@@ -106,17 +109,19 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
         <span className="inline-flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
           {searchLoading ? (
             <>
-              <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> 正在调用 book.search.v1
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> 正在搜索图书…
             </>
           ) : (
-            '真实 book.search.v1 结果'
+            'Z-Library / Anna’s Archive'
           )}
         </span>
       </div>
     ) : null}
 
+    {leftTab === 'search' && onMirrorChanged && <BookMirrorSettings onChanged={onMirrorChanged} />}
+
     {leftTab === 'search' && searchError ? (
-      <div className="flex items-start gap-2 rounded-[9px] bg-[var(--status-err-bg)] px-3 py-2 text-[13px] text-[var(--status-err-fg)]">
+      <div role="alert" className="flex items-start gap-2 rounded-[9px] bg-[var(--status-err-bg)] px-3 py-2 text-[13px] text-[var(--status-err-fg)]">
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <span>{searchError}</span>
       </div>
@@ -190,12 +195,14 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
       </div>
     ) : catalog.length === 0 ? (
       <StateView
-        mode="empty"
+        mode={searchLoading ? 'loading' : searchError ? 'error' : 'empty'}
         variant="inline"
-        title={catalogQuery.trim() ? '未找到匹配的图书' : '输入书名、作者或 ISBN 开始检索'}
+        title={searchLoading ? '正在搜索图书…' : searchError ? '图书搜索未完成' : catalogQuery.trim().length >= 2 ? '未找到匹配的图书' : '输入书名、作者或 ISBN 开始检索'}
         description={
-          catalogQuery.trim()
-            ? '正在走真实 book.search.v1；可切换提供方或更换关键词。'
+          searchLoading ? '正在连接图书源，请稍候。'
+            : searchError ? '连接图书源失败，请检查网络或切换提供方后重试。'
+            : catalogQuery.trim().length >= 2
+            ? '可更换关键词或切换图书源继续搜索。'
             : '至少输入 2 个字符，结果来自 Z-Library / Anna’s Archive。'
         }
         activeFocusId={activeFocusId}

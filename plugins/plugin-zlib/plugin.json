@@ -105,6 +105,13 @@
       "type": "secret",
       "default": "",
       "description": "Fallback Cookie header stored exclusively in 0600 SecretVault"
+    },
+    {
+      "key": "vault_auth_origin",
+      "label": "凭据所属站点",
+      "type": "string",
+      "default": "",
+      "description": "切换镜像时固定原站点凭据来源，避免把 Cookie / Key 发送到其他域名"
     }
   ]
 }

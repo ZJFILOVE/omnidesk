@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import ssl
 import tempfile
 import time
 import urllib.error
@@ -170,6 +171,10 @@ def _map_transport_exc(exc: BaseException, secrets: tuple[str, ...]) -> HttpFetc
             return HttpFetchError(reason.error_code, redact_text(str(reason), secrets))
         if isinstance(reason, TimeoutError):
             return HttpFetchError("timeout", "请求超时")
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return HttpFetchError("tls_certificate_error", "站点 TLS 证书验证失败，请检查系统时间或站点证书")
+        if isinstance(reason, ssl.SSLError):
+            return HttpFetchError("service_offline", "站点 TLS 连接中断，请检查网络或切换图书源")
         return HttpFetchError("service_offline", redact_text(f"站点连接失败: {reason}", secrets))
     return HttpFetchError("service_offline", redact_text(f"网络请求失败: {type(exc).__name__}", secrets))
 
@@ -293,6 +298,8 @@ async def fetch_with_chrome_fallback(
                 "headers": {"Accept": accept},
                 "body": "",
                 "credentials": "include",
+                "open_tab_if_missing": True,
+                "headless": True,
                 "timeout_ms": int(max(1.0, timeout_sec) * 1000),
             },
         )
@@ -331,7 +338,7 @@ async def fetch_with_chrome_fallback(
             secrets=auth.extra_secrets(),
         )
     except HttpFetchError as exc:
-        if exc.error_code == "auth_required" and has_web_fetch:
+        if exc.error_code in {"auth_required", "service_offline", "timeout"} and has_web_fetch:
             return await _via_chrome()
         raise
 

@@ -193,6 +193,10 @@ def classify_http_failure(
             if _is_cloudflare_response(status, resp.headers, resp.body):
                 return "cloudflare_blocked", "Reddit 返回了 Cloudflare 验证页而非 JSON"
             return "parse_error", "Reddit 返回了非 JSON 响应（可能是风控或畸形 HTML）"
+        try:
+            json.loads(trimmed)
+        except json.JSONDecodeError:
+            return "parse_error", "Reddit 返回了无效 JSON，无法读取帖子；可切换内嵌网页查看。"
         if '"error": 429' in head or '"error":429' in head or "whoa there, pardner" in head:
             return "rate_limited", "Reddit API 返回 429 限流"
         if '"error": 403' in head or '"error":403' in head:
@@ -603,7 +607,15 @@ class RedditHttpClient:
         html_body = str(res.data.get("html") or "")
         text_body = str(res.data.get("text") or res.data.get("body") or "")
         trimmed_text = text_body.strip()
-        if trimmed_text.startswith(("{", "[")):
+        # Extracted page text may begin with a Markdown link or bracketed label.
+        # Only actual JSON can bypass the HTML parser and its wall detection.
+        json_text = False
+        if trimmed_text.startswith(("{", "[")) and len(trimmed_text.encode("utf-8")) <= MAX_RESPONSE_BYTES:
+            try:
+                json_text = isinstance(json.loads(trimmed_text), (dict, list))
+            except json.JSONDecodeError:
+                pass
+        if json_text:
             return HttpResponse(
                 ok=True,
                 status_code=200,
