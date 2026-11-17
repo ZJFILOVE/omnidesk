@@ -3,6 +3,7 @@ import { CalendarDays, RefreshCw } from 'lucide-react';
 import { FocusButton, HAIRLINE_BORDER } from '../../components/WorkbenchLayout';
 import { PanelSectionHeading } from '../../components/WorkbenchPrimitives';
 import { AI_ARCHIVE_SNAPSHOT, type MagpieRouteState } from '../../data/mock';
+import { isNestedRouteRef } from '../aiWorkbenchHelpers';
 
 const EFFORT_OPTIONS: MagpieRouteState['effort'][] = ['low', 'medium', 'high', 'xhigh'];
 const STRATEGY_OPTIONS: MagpieRouteState['strategy'][] = ['order', 'smart', 'usage', 'pace'];
@@ -68,6 +69,7 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
               onFocus={onFocus}
               onActivate={() => onSelectEffort(effort)}
               selected={route.effort === effort}
+              disabled={isNestedRouteRef(route.primaryModel)}
               tone="core"
               surface="canvas"
               className="py-1.5 font-mono text-[13.5px]"
@@ -76,6 +78,11 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
             </FocusButton>
           ))}
         </div>
+        {isNestedRouteRef(route.primaryModel) ? (
+          <div className="mt-1.5 text-[12.5px] text-[var(--text-muted)]">
+            嵌套 group/auto 路由由组内决定推理档位；切回具体模型后此设置生效。
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-1">

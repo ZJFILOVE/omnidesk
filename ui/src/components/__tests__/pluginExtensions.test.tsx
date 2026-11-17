@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../App';
 import { CompanionDock } from '../CompanionDock';
 import { DeclarativePanel } from '../DeclarativePanel';
+import PluginWorkspace from '../../workbenches/PluginWorkspace';
 
 afterEach(() => {
   cleanup();
@@ -66,7 +67,10 @@ const DOCK_SCHEMA = {
   ],
 };
 
-function installTauriMock(uiActionSchema: unknown = { type: 'Markdown', content: '动作已执行' }) {
+function installTauriMock(
+  uiActionSchema: unknown = { type: 'Markdown', content: '动作已执行' },
+  uiActionExtra: Record<string, unknown> = {},
+) {
   const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
     if (cmd === 'call_capability') {
       const capability = payload?.args?.capability;
@@ -117,7 +121,7 @@ function installTauriMock(uiActionSchema: unknown = { type: 'Markdown', content:
         return {
           ok: true,
           provider_plugin_id: 'plugin-bilibili',
-          data: { ui_schema: uiActionSchema },
+          data: { ...uiActionExtra, ui_schema: uiActionSchema },
           error: '',
         };
       }
@@ -133,6 +137,128 @@ function installTauriMock(uiActionSchema: unknown = { type: 'Markdown', content:
 }
 
 describe('Declarative plugin UI', () => {
+  it('auto-loads a text feed and renders readable entries alongside the control schema', async () => {
+    const invoke = installTauriMock(
+      {
+        type: 'Section',
+        title: '知乎控制台',
+        children: [
+          {
+            type: 'ActionRow',
+            actions: [{ id: 'fetch_feed', label: '刷新栏目', variant: 'primary' }],
+          },
+        ],
+      },
+      {
+        ok: true,
+        result: {
+          ok: true,
+          count: 1,
+          items: [
+            {
+              id: 'zhihu-1',
+              title: '如何评价新版 OmniDesk？',
+              excerpt: '这是一条可见的知乎热榜内容。',
+              source_name: '知乎热榜',
+              author: '测试作者',
+              comment_count: 12,
+              score: 345,
+              tags: ['编程'],
+              url: 'https://www.zhihu.com/question/1',
+            },
+          ],
+        },
+      },
+    );
+
+    render(
+      <PluginWorkspace
+        tab={{
+          tab_id: 'zhihu',
+          plugin_id: 'plugin-zhihu',
+          title: '知乎',
+          domain: 'text',
+          badge: 'ZHIHU',
+          ui_schema: {
+            type: 'Section',
+            title: '知乎控制台',
+            children: [
+              {
+                type: 'ActionRow',
+                actions: [{ id: 'fetch_feed', label: '刷新栏目', variant: 'primary' }],
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(await screen.findByText('如何评价新版 OmniDesk？')).not.toBeNull();
+    expect(screen.getByText('这是一条可见的知乎热榜内容。')).not.toBeNull();
+    expect(screen.getByText('12')).not.toBeNull();
+    expect(screen.getByText('345')).not.toBeNull();
+    expect(screen.getByTestId('plugin-result')).not.toBeNull();
+    expect(invoke).toHaveBeenCalledWith('call', {
+      args: expect.objectContaining({
+        op: 'ui.action',
+        params: expect.objectContaining({
+          kind: 'workspace_tab',
+          spec_id: 'zhihu',
+          action_id: 'fetch_feed',
+          plugin_id: 'plugin-zhihu',
+        }),
+      }),
+    });
+  });
+
+  it('auto-loads plugin actions outside the text domain', async () => {
+    const invoke = installTauriMock(
+      { type: 'Markdown', content: '媒体条目已加载' },
+      {
+        ok: true,
+        result: {
+          ok: true,
+          count: 1,
+          items: [{ id: 'movie-1', title: '测试电影', source_name: 'Radarr' }],
+        },
+      },
+    );
+
+    render(
+      <PluginWorkspace
+        tab={{
+          tab_id: 'arr-imdb',
+          plugin_id: 'plugin-arr-imdb',
+          title: 'IMDb · Arr',
+          domain: 'media',
+          badge: 'ARR',
+          ui_schema: {
+            type: 'Section',
+            children: [
+              {
+                type: 'ActionRow',
+                actions: [{ id: 'fetch_items', label: '拉取条目', variant: 'primary' }],
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(await screen.findByText('测试电影')).not.toBeNull();
+    expect(invoke).toHaveBeenCalledWith('call', {
+      args: expect.objectContaining({
+        op: 'ui.action',
+        params: expect.objectContaining({
+          kind: 'workspace_tab',
+          spec_id: 'arr-imdb',
+          action_id: 'fetch_items',
+          plugin_id: 'plugin-arr-imdb',
+        }),
+      }),
+    });
+  });
+
   it('renders Section, Markdown, KeyValue, Form, ActionRow, and List with form state', () => {
     const onAction = vi.fn();
     render(

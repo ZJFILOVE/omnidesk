@@ -1,11 +1,35 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Blocks, LoaderCircle, RefreshCw } from 'lucide-react';
 import { formatRpcError, invokeWorkspaceAction, type WorkspaceTabSnapshot } from '../api';
 import { DeclarativePanel } from '../components/DeclarativePanel';
 import { FocusItem } from '../components/FocusItem';
 import { DOMAIN_CSS_VARS, DOMAIN_LABELS } from '../theme';
+import { PluginResultView } from './PluginResultView';
 
 type Dict = Record<string, unknown>;
+
+const collectActionIds = (schema: unknown): string[] => {
+  const found: string[] = [];
+  const visit = (node: unknown) => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const record = node as Dict;
+    if (Array.isArray(record.actions)) {
+      for (const action of record.actions) {
+        if (action && typeof action === 'object') {
+          const id = String((action as Dict).id ?? '');
+          if (id) found.push(id);
+        }
+      }
+    }
+    visit(record.children);
+  };
+  visit(schema);
+  return found;
+};
 
 export interface PluginWorkspaceProps {
   tab: WorkspaceTabSnapshot;
@@ -24,6 +48,8 @@ export function PluginWorkspace({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionResult, setActionResult] = useState<Dict | null>(null);
+  const [lastActionId, setLastActionId] = useState('');
+  const autoLoadedRef = useRef<string>('');
 
   useEffect(() => {
     setSchema(tab.ui_schema ?? {});
@@ -38,6 +64,7 @@ export function PluginWorkspace({
       }
       setPendingAction(actionId);
       setActionError(null);
+      setLastActionId(actionId);
       const res = await invokeWorkspaceAction({
         kind: 'workspace_tab',
         specId: tab.tab_id,
@@ -56,6 +83,11 @@ export function PluginWorkspace({
         return;
       }
       setActionResult(res.data);
+      if (res.data.ok === false) {
+        const code = String(res.data.error_code ?? 'plugin_action_failed');
+        const message = String(res.data.error ?? '插件动作执行失败');
+        setActionError(`[${code}] ${message}`);
+      }
       const nextSchema = res.data.ui_schema;
       if (nextSchema && (typeof nextSchema === 'object' || Array.isArray(nextSchema))) {
         setSchema(nextSchema as Record<string, unknown> | Array<Record<string, unknown>>);
@@ -64,10 +96,18 @@ export function PluginWorkspace({
     [isActive, tab.plugin_id, tab.tab_id, tauriAvailable],
   );
 
-  const resultText =
-    actionResult && !actionResult.ui_schema
-      ? JSON.stringify(actionResult.result ?? actionResult.data ?? actionResult, null, 2)
-      : '';
+  useEffect(() => {
+    if (!isActive || !tauriAvailable) return;
+    const actions = collectActionIds(schema);
+    const autoAction = ['fetch_feed', 'fetch_items', 'list_books', 'refresh'].find((id) =>
+      actions.includes(id),
+    );
+    if (!autoAction) return;
+    const key = `${tab.plugin_id}:${tab.tab_id}:${autoAction}`;
+    if (autoLoadedRef.current === key) return;
+    autoLoadedRef.current = key;
+    void handleAction(autoAction, {});
+  }, [handleAction, isActive, schema, tab.plugin_id, tab.tab_id, tauriAvailable]);
 
   return (
     <div
@@ -154,11 +194,7 @@ export function PluginWorkspace({
             正在执行 {pendingAction}…
           </div>
         ) : null}
-        {resultText ? (
-          <pre className="mt-3 max-h-64 overflow-auto rounded-[11px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 font-mono text-[12.5px] leading-[1.55] text-[var(--text-secondary)]">
-            {resultText}
-          </pre>
-        ) : null}
+        <PluginResultView payload={actionResult} actionId={lastActionId} />
       </div>
     </div>
   );

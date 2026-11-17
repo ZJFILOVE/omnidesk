@@ -378,7 +378,8 @@ class RedditHttpClient:
                     allow_private=False,
                     timeout_sec=max(0.05, remaining),
                     max_bytes=MAX_RESPONSE_BYTES,
-                    follow_redirects=False,
+                    follow_redirects=spec.follow_redirects,
+                    max_redirects=spec.max_redirects,
                     raise_for_status=False,
                     secrets=extra_secrets,
                 )
@@ -490,6 +491,8 @@ class RedditHttpClient:
             k: v for k, v in headers.items() if k.lower() not in {"cookie", "cookie2", "authorization", "user-agent"}
         }
         safe_headers["Accept"] = "application/json"
+        parsed = urllib.parse.urlsplit(safe_url)
+        tab_url = f"{parsed.scheme}://{parsed.netloc}/"
 
         res = await self._ctx.capabilities.call(
             "web.fetch.v1",
@@ -500,6 +503,8 @@ class RedditHttpClient:
                 "headers": safe_headers,
                 "body": "",
                 "credentials": "include",
+                "open_tab_if_missing": True,
+                "tab_url": tab_url,
                 "timeout_ms": timeout_ms,
             },
         )

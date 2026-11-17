@@ -14,6 +14,7 @@ import pytest
 from omnidesk_core import (
     FAULT_TOPIC,
     BusEvent,
+    CapabilityRegistry,
     ControlClient,
     ControlRpcError,
     ControlServer,
@@ -25,6 +26,35 @@ from omnidesk_core import (
     SearchIndex,
     scaffold_plugin,
 )
+
+
+@pytest.mark.asyncio
+async def test_capability_call_honors_requested_timeout_beyond_server_default(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    registry = CapabilityRegistry()
+
+    async def slow_handler(payload: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {"ok": True, "payload": payload}
+
+    registry.register("demo.slow.v1", slow_handler, plugin_id="plugin-demo")
+    sock_path = paths.control_socket_path
+    async with ControlServer(
+        socket_path=sock_path,
+        paths=paths,
+        capabilities=registry,
+        request_timeout=0.05,
+    ):
+        client = ControlClient(socket_path=sock_path, timeout=2.0)
+        result = await client.call_capability("demo.slow.v1", {"wait": True}, timeout=0.5)
+        assert result.ok is True
+        assert result.data["payload"] == {"wait": True}
 
 
 @pytest.mark.asyncio
@@ -677,11 +707,25 @@ class BetaText(TextSource):
     async def fetch_feed(self, channel_id="", query="", page=1):
         return [TextFeedItem(id="beta-1", title="Beta Article", channel_id=channel_id, tags=["beta"])]
 
+class GammaText(TextSource):
+    source_id = "gamma-text"
+    display_name = "Gamma"
+    category = "news"
+    priority = 1
+
+    def __init__(self):
+        self.last_error = None
+
+    async def fetch_feed(self, channel_id="", query="", page=1):
+        self.last_error = {"error_code": "auth_required", "error": "Gamma login expired"}
+        return []
+
 class DomRpcPlugin(BasePlugin):
     async def on_load(self, ctx: PluginContext) -> None:
         await super().on_load(ctx)
         ctx.register_text_source(AlphaText())
         ctx.register_text_source(BetaText())
+        ctx.register_text_source(GammaText())
 
 def create_plugin():
     return DomRpcPlugin()
@@ -728,6 +772,22 @@ def create_plugin():
         )
         assert sync_call["ok"] is True, sync_call
         assert sync_call["data"]["result"] == [{"id": "alpha-channel", "name": "Alpha Channel"}]
+
+        # Empty domain results must not hide the source's structured failure behind []
+        expired = await client.request(
+            {
+                "op": "domain.invoke",
+                "params": {
+                    "domain": "text",
+                    "source_id": "gamma-text",
+                    "method": "fetch_feed",
+                },
+            }
+        )
+        assert expired["ok"] is False
+        assert expired["error_code"] == "auth_required"
+        assert expired["error"] == "Gamma login expired"
+        assert expired["error_detail"]["details"]["error_code"] == "auth_required"
 
         # Unknown source / method / argument all fail closed
         missing = await client.request(

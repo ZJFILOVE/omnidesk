@@ -539,6 +539,9 @@ async def test_lifecycle_and_health_check(tmp_path: Path) -> None:
     assert "super_secret_sess" not in health_dump
     assert "super_secret_jwt" not in health_dump
     assert "oauth_bearer_secret_999" not in health_dump
+    tab_status = await plugin.handle_tab_action("status")
+    assert tab_status["ok"] is True
+    assert tab_status["result"]["authenticated"] is True
 
     await invoke_lifecycle_hook(plugin.on_unload)
     await ctx.acleanup()
@@ -918,6 +921,8 @@ async def test_chrome_fetch_and_html_extract_fallback_and_malformed_html(tmp_pat
             nonlocal fetch_calls
             fetch_calls += 1
             if fetch_calls == 1:
+                assert req["open_tab_if_missing"] is True
+                assert req["tab_url"].startswith("http://127.0.0.1:")
                 return CapabilityResult.ok(
                     {
                         "status": 200,

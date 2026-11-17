@@ -371,6 +371,12 @@ def test_six_streams_2026_11_06_anomaly_queries_sources_and_sm2_idempotent(monke
         assert s_tag.ok and s_tag.data["total"] == 1
         s_date = await plugin.handle_recommend_feed({"action": "search_archive", "query": "date:2026-11-06"})
         assert s_date.ok and s_date.data["total"] == 4
+        # Multi-term queries fall back to OR matching instead of requiring one exact substring.
+        s_terms = await plugin.handle_recommend_feed({"action": "search_archive", "query": "Sampha Muerte", "domain": "music"})
+        assert s_terms.ok and s_terms.data["total"] == 2
+        # Plural `domains` is honored when callers do not send the singular `domain`.
+        s_domains = await plugin.handle_recommend_feed({"action": "search_archive", "query": "Sampha", "domains": ["media"]})
+        assert s_domains.ok and s_domains.data["total"] == 1
 
         # MediaSource, TextSource (category=multi), BookSource (format=english_daily)
         media_src = next(s for s in ctx.domains.media_sources() if s.source_id == "plugin-ai-curator")

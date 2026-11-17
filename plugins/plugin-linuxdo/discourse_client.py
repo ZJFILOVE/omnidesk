@@ -355,6 +355,7 @@ class DiscourseClient:
         ):
             return None, st
 
+        tab_url = f"{parsed.scheme}://{parsed.netloc}/"
         res = await ctx.capabilities.call(
             "web.fetch.v1",
             {
@@ -363,6 +364,8 @@ class DiscourseClient:
                 "headers": {"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
                 "body": "",
                 "credentials": "include",
+                "open_tab_if_missing": True,
+                "tab_url": tab_url,
                 "timeout_ms": min(int(self._timeout_sec * 1000), 12000),
             },
         )

@@ -20,6 +20,7 @@ import {
 } from '../data/mock';
 import {
   buildOfflineDemoReply,
+  isNestedRouteRef,
   nowHHMM,
   parseMemberAndEffort,
   probeMagpieRouterState,
@@ -27,17 +28,23 @@ import {
 import type { RepeatPolicy } from './panels/AiChatPane';
 
 const CURATION_INTENT_RE =
-  /推荐|来几首|来点|歌单|最火|热门|榜单|听什么|找.{0,6}(歌|曲|专辑|论文|书|视频)|recommend|playlist|top\s*songs?/i;
+  /推荐|来几首|来点|歌单|最火|热门|榜单|听什么|灵感电台|重温|往期|历史库|找.{0,6}(歌|曲|专辑|论文|书|视频)|recommend|playlist|top\s*songs?/i;
 
 function looksLikeCurationPrompt(text: string): boolean {
   return CURATION_INTENT_RE.test(text);
 }
 
 function curationDomains(text: string): string[] | undefined {
-  if (/歌|曲|音乐|专辑|歌单|听|playlist|song|music/i.test(text)) return ['media'];
-  if (/论文|期刊|paper|journal|研究/i.test(text)) return ['text'];
-  if (/书|book|阅读/i.test(text)) return ['book'];
-  return undefined;
+  const wantsMedia =
+    /歌|曲|音乐|专辑|歌单|听|爵士|器乐|jazz|playlist|song|music/i.test(text) ||
+    /视频|讲解|youtube|bilibili|video|podcast/i.test(text);
+  const wantsText = /论文|期刊|paper|journal|研究/i.test(text);
+  const wantsBook = /书|book|阅读/i.test(text);
+  const domains: string[] = [];
+  if (wantsMedia) domains.push('media');
+  if (wantsText) domains.push('text');
+  if (wantsBook) domains.push('book');
+  return domains.length > 0 ? domains : undefined;
 }
 
 function cardsFromCuration(data: Record<string, unknown>): AiStructuredCard[] {
@@ -375,14 +382,18 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
       nextEffort: MagpieRouteState['effort'],
       nextStrategy: MagpieRouteState['strategy'],
     ) => {
+      const nestedRoute = isNestedRouteRef(nextModel);
+      const routeEffort = nestedRoute ? undefined : nextEffort;
       if (!isTauriAvailable()) {
         setRoute((prev) => ({
           ...prev,
           primaryModel: nextModel,
-          effort: nextEffort,
+          effort: nestedRoute ? prev.effort : nextEffort,
           strategy: nextStrategy,
         }));
-        appendLog(`离线预览：本地切换示例路由 → ${nextModel}:${nextEffort}`);
+        appendLog(
+          `离线预览：本地切换示例路由 → ${nextModel}${routeEffort ? `:${routeEffort}` : ''}`,
+        );
         return;
       }
       const groupId = route.activeGroup.replace(/^group\//, '');
@@ -392,7 +403,7 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
           action: 'set_route',
           group_id: groupId,
           model_id: nextModel,
-          effort: nextEffort,
+          effort: routeEffort,
           routing: nextStrategy,
           stays: 'turn',
           fallbacks: route.fallbackChain,
@@ -410,10 +421,12 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
         ...prev,
         gatewayHealthy: true,
         primaryModel: nextModel,
-        effort: nextEffort,
+        effort: nestedRoute ? prev.effort : nextEffort,
         strategy: nextStrategy,
       }));
-      appendLog(`${nowHHMM()} · llm.router.v1 set_route → ${nextModel}:${nextEffort}`);
+      appendLog(
+        `${nowHHMM()} · llm.router.v1 set_route → ${nextModel}${routeEffort ? `:${routeEffort}` : ''}`,
+      );
     },
     [appendLog, route.activeGroup, route.fallbackChain],
   );

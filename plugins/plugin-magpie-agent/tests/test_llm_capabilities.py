@@ -33,6 +33,14 @@ def _load_plugin_module() -> Any:
     return module
 
 
+def test_parse_structured_json_accepts_fenced_and_embedded_objects() -> None:
+    chat_mod = _load_plugin_module()._chat_mod
+    parse = chat_mod._parse_structured_json
+    assert parse('```json\n{"status": "ok"}\n```') == {"status": "ok"}
+    assert parse('结果如下：{"status": "ok"} 请查收') == {"status": "ok"}
+    assert parse("没有 JSON") is None
+
+
 class _MockGatewayState:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
@@ -109,6 +117,11 @@ def _start_mock_gateway(state: _MockGatewayState) -> tuple[http.server.Threading
 
             if "response_format" in body:
                 reply = json.dumps({"status": "ok", "items": ["alpha"], "count": 1})
+            elif "Return ONLY a JSON array" in last_user:
+                payload = json.loads(last_user.strip().splitlines()[-1])
+                texts = [str(seg.get("text") or "") for seg in payload.get("segments") or []]
+                prefix = "译文:" if "OmniDesk => OmniDesk" in sys_msg else "RAW:"
+                reply = json.dumps([f"{prefix}{text}" for text in texts], ensure_ascii=False)
             elif "<target_text>" in last_user:
                 seg = last_user.split("<target_text>\n", 1)[1].split("\n</target_text>", 1)[0]
                 if "OmniDesk => OmniDesk" in sys_msg:
@@ -314,6 +327,7 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
         assert len(tr1.data["glossary_applied"]) == 2
 
         # Translate batch
+        batch_calls_before = len(state.requests)
         tr_batch = await ctx.capabilities.call(
             "llm.translate.v1",
             {
@@ -325,7 +339,8 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
         assert tr_batch.ok is True
         assert tr_batch.data["count"] == 2
         assert tr_batch.data["translations"] == ["译文:First OmniDesk sentence.", "译文:Second sentence."]
-        assert tr_batch.data["usage"]["total_tokens"] == 30
+        assert tr_batch.data["usage"]["total_tokens"] == 15
+        assert len(state.requests) - batch_calls_before == 1
 
         # Agent actions: summarize / qa / etymology / parse_sentence
         for act in ("summarize", "qa", "etymology", "parse_sentence"):

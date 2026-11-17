@@ -295,7 +295,21 @@ class ChromeWebPlugin(BasePlugin):
 
         try:
             targets = await self._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
-            target = select_same_origin_target(targets, url)
+            navigate_url: str | None = None
+            try:
+                target = select_same_origin_target(targets, url)
+            except CdpError as exc:
+                if not payload.get("open_tab_if_missing") or exc.error_code != "permission_denied":
+                    raise
+                tab_url = str(payload.get("tab_url") or f"{origin_string(url)}/")
+                tab_url = validate_http_url(tab_url, field_name="tab_url")
+                if origin_string(tab_url) != origin_string(url):
+                    raise CdpError(
+                        "tab_url 与目标 URL 不同源，拒绝跨域 fetch",
+                        error_code="permission_denied",
+                    ) from None
+                target, needs_nav = select_extract_target(targets, tab_url)
+                navigate_url = tab_url if needs_nav else None
             js_expr = build_fetch_js(
                 url=url,
                 expected_origin=origin_string(url),
@@ -311,7 +325,7 @@ class ChromeWebPlugin(BasePlugin):
                 js_expr,
                 await_promise=True,
                 return_by_value=True,
-                navigate_url=None,
+                navigate_url=navigate_url,
                 timeout_sec=timeout_sec,
             )
             raw_val = extract_eval_value(eval_resp)

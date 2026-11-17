@@ -359,7 +359,17 @@ class CurationEngine:
         q_date, kw = parse_query_filter(raw_query)
         if not date_filter:
             date_filter = q_date
-        domain = str(req.get("domain") or req.get("kind") or "all").strip().lower() or "all"
+        domain = str(req.get("domain") or req.get("kind") or "").strip().lower()
+        if not domain:
+            requested_domains = {
+                str(d).strip().lower() for d in (req.get("domains") or []) if isinstance(d, str)
+            }
+            if not requested_domains:
+                domain = "all"
+            elif "media" in requested_domains or len(requested_domains) > 1:
+                domain = "all"
+            else:
+                domain = "text"
         limit = max(1, int(req.get("limit") or 50))
 
         media_out: list[dict[str, Any]] = []

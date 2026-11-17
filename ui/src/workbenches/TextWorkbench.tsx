@@ -229,16 +229,25 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
             tone="text"
             ariaLabel="文章频道筛选"
           />
-          <span className="text-[14px] text-[var(--text-muted)]">
-            {liveFeed.live ? (
-              <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
-                LIVE ·{' '}
-                {liveFeed.sources.find((s) => s.sourceId === liveFeed.sourceId)?.title ??
-                  liveFeed.sourceId}
-              </span>
-            ) : null}
-            {actionBanner}
-          </span>
+          {liveFeed.error ? (
+            <span
+              role="alert"
+              className="rounded-[8px] bg-[var(--status-err-bg)] px-2.5 py-1.5 text-[13.5px] text-[var(--status-err-fg)]"
+            >
+              实时源失败：{liveFeed.error}
+            </span>
+          ) : (
+            <span className="text-[14px] text-[var(--text-muted)]">
+              {liveFeed.live ? (
+                <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
+                  LIVE ·{' '}
+                  {liveFeed.sources.find((s) => s.sourceId === liveFeed.sourceId)?.title ??
+                    liveFeed.sourceId}
+                </span>
+              ) : null}
+              {actionBanner}
+            </span>
+          )}
         </div>
       }
       leftPane={

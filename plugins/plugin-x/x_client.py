@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,15 +49,15 @@ _DEFAULT_USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 _DEFAULT_QUERY_IDS: dict[str, str] = {
-    "HomeLatestTimeline": "DiTkXJgLqBBxCs7ZAYsbtA",
-    "HomeTimeline": "HJFjzBgCs16TqxewQOeLNg",
-    "ListLatestTweetsTimeline": "Pa45JvqZuKcW1plybfgBlQ",
+    "HomeLatestTimeline": "GjleyyGw4xvWe5tn8EQt9w",
+    "HomeTimeline": "fedFLLzmiCAuzPgA8lyh8Q",
+    "ListLatestTweetsTimeline": "dCYL1r8KgXjvgV6t1vtSZA",
     "ListsManagementPageTimeline": "nhYp4n09Hi5n2hQW0Q2v6g",
-    "Bookmarks": "qToeLeMs43Q8cr7tRYXmaQ",
-    "TweetDetail": "QuBlQ6SxNAQCt6-kBiCXCQ",
-    "TweetResultByRestId": "V3vfsYzNEyD9tsf4xoFRgw",
-    "SearchTimeline": "UN1i3zUiCWa-6r-Uaho4fw",
-    "UserTweets": "E3opETHurmVJflFsUBVuUQ",
+    "Bookmarks": "jbqsfdzI0EMFHAtpEC6vyA",
+    "TweetDetail": "qpemjmVMoTWDvcRT43JIVQ",
+    "TweetResultByRestId": "U8lc5aomF5krJzZ9vJ9wxg",
+    "SearchTimeline": "3fEctOs2-FvTB7_mvm1hrQ",
+    "UserTweets": "7_KBXBpG0zBPRN6UCIV0-w",
 }
 _CHROME_FORBIDDEN_HEADERS: frozenset[str] = frozenset(
     {
@@ -78,6 +78,20 @@ _CHROME_FORBIDDEN_HEADERS: frozenset[str] = frozenset(
 )
 _QID_RE_1 = re.compile(r'queryId\s*:\s*"([A-Za-z0-9_-]{12,40})"\s*,\s*operationName\s*:\s*"([A-Za-z0-9_]+)"')
 _QID_RE_2 = re.compile(r'operationName\s*:\s*"([A-Za-z0-9_]+)"\s*,\s*queryId\s*:\s*"([A-Za-z0-9_-]{12,40})"')
+_CHUNK_NAME_RE = re.compile(r'(\d{4,6}):"([^"\\]{3,200})"')
+_CHUNK_HASH_RE = re.compile(r'(\d{4,6}):"([0-9a-f]{16})"')
+_CHUNK_BASE_URL = "https://abs.twimg.com/responsive-web/client-web/"
+_OPERATION_CHUNK_HINTS: dict[str, tuple[str, ...]] = {
+    "HomeLatestTimeline": ("HomeTimeline", "LoggedInMain"),
+    "HomeTimeline": ("HomeTimeline", "LoggedInMain"),
+    "Bookmarks": ("Bookmarks",),
+    "SearchTimeline": ("Search", "Explore"),
+    "TweetDetail": ("TweetDetail", "Conversation"),
+    "TweetResultByRestId": ("Tweet", "Conversation"),
+    "UserTweets": ("UserTweets", "Profile"),
+    "ListLatestTweetsTimeline": ("List",),
+    "ListsManagementPageTimeline": ("List",),
+}
 _MAIN_JS_RE = re.compile(r"https://abs\.twimg\.com/responsive-web/client-web/main\.[A-Za-z0-9._-]+\.js")
 _CF_BODY_MARKERS = (
     "cf-browser-verification",
@@ -174,6 +188,37 @@ def extract_query_ids_from_js(text: str) -> dict[str, str]:
     for m in _QID_RE_2.finditer(text):
         out[m.group(1)] = m.group(2)
     return out
+
+
+def extract_chunk_urls_for_operations(html: str, operations: Sequence[str]) -> list[str]:
+    """Resolve X webpack chunk URLs that may contain queryIds for ``operations``."""
+    if not html or not operations:
+        return []
+    names = {
+        m.group(1): m.group(2)
+        for m in _CHUNK_NAME_RE.finditer(html)
+        if not re.fullmatch(r"[0-9a-f]{16}", m.group(2))
+    }
+    hashes = {m.group(1): m.group(2) for m in _CHUNK_HASH_RE.finditer(html)}
+    hints = {
+        hint.lower()
+        for operation in operations
+        for hint in _OPERATION_CHUNK_HINTS.get(operation, (operation,))
+    }
+    urls: list[str] = []
+    seen: set[str] = set()
+    for chunk_id, name in names.items():
+        digest = hashes.get(chunk_id)
+        if not digest:
+            continue
+        low = name.lower()
+        if not any(hint in low for hint in hints):
+            continue
+        url = f"{_CHUNK_BASE_URL}{name}.{digest}a.js"
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls[:8]
 
 
 def is_cloudflare_challenge(status_code: int, headers: Mapping[str, str], body: str) -> bool:
@@ -787,8 +832,33 @@ class XClient:
             transport="web.extract.v1",
         )
 
-    async def refresh_query_ids_from_bundle(self, auth: AuthManager) -> bool:
-        """Fetch X home HTML and JS bundle to refresh rotated GraphQL queryIds."""
+    async def _fetch_js_text(
+        self,
+        url: str,
+        *,
+        timeout_sec: float,
+        timeout_ms: int,
+        extra_secrets: tuple[str, ...] = (),
+    ) -> str:
+        if self._has_cap("web.fetch.v1"):
+            resp = await self.fetch_via_chrome_web_fetch(
+                url, "GET", {"Accept": "*/*"}, "", timeout_ms, "", extra_secrets=extra_secrets
+            )
+            if resp.ok and resp.body:
+                return resp.body
+        resp = await self.perform_direct(
+            HttpRequest(url=url, method="GET", timeout_sec=timeout_sec),
+            extra_secrets=extra_secrets,
+        )
+        return resp.body if resp.ok and resp.body else ""
+
+    async def refresh_query_ids_from_bundle(
+        self,
+        auth: AuthManager,
+        *,
+        operations: Sequence[str] = (),
+    ) -> bool:
+        """Fetch X home HTML, main JS, and hinted chunks to refresh rotated queryIds."""
         timeout_sec = self._default_timeout_sec
         timeout_ms = int(timeout_sec * 1000)
         home_url = f"{self._base_url}/home"
@@ -802,6 +872,13 @@ class XClient:
                 home_url,
                 extra_secrets=auth.extra_secrets(),
             )
+            if not html_resp.ok:
+                auth_res = await auth.resolve_for_url(home_url)
+                hdrs = {"Cookie": auth_res.cookie_header} if auth_res.cookie_header else {}
+                html_resp = await self.perform_direct(
+                    HttpRequest(url=home_url, method="GET", headers=hdrs, timeout_sec=timeout_sec),
+                    extra_secrets=auth.extra_secrets(),
+                )
         else:
             auth_res = await auth.resolve_for_url(home_url)
             hdrs = {"Cookie": auth_res.cookie_header} if auth_res.cookie_header else {}
@@ -813,25 +890,35 @@ class XClient:
             return False
 
         discovered = extract_query_ids_from_js(html_resp.body)
-        if not discovered:
-            if m := _MAIN_JS_RE.search(html_resp.body):
-                bundle_url = m.group(0)
-                if self._has_cap("web.fetch.v1"):
-                    js_resp = await self.fetch_via_chrome_web_fetch(
-                        bundle_url, "GET", {"Accept": "*/*"}, "", timeout_ms, ""
-                    )
-                else:
-                    js_resp = await self.perform_direct(
-                        HttpRequest(url=bundle_url, method="GET", timeout_sec=timeout_sec)
-                    )
-                if js_resp.ok and js_resp.body:
-                    discovered = extract_query_ids_from_js(js_resp.body)
+        if m := _MAIN_JS_RE.search(html_resp.body):
+            main_js = await self._fetch_js_text(
+                m.group(0),
+                timeout_sec=timeout_sec,
+                timeout_ms=timeout_ms,
+                extra_secrets=auth.extra_secrets(),
+            )
+            if main_js:
+                discovered.update(extract_query_ids_from_js(main_js))
+
+        wanted = {op for op in operations if op}
+        for chunk_url in extract_chunk_urls_for_operations(html_resp.body, sorted(wanted - set(discovered))):
+            chunk_js = await self._fetch_js_text(
+                chunk_url,
+                timeout_sec=timeout_sec,
+                timeout_ms=timeout_ms,
+                extra_secrets=auth.extra_secrets(),
+            )
+            if chunk_js:
+                discovered.update(extract_query_ids_from_js(chunk_js))
+            if wanted and wanted.issubset(discovered):
+                break
+
         if not discovered:
             return False
         for op, qid in discovered.items():
             if op and qid:
                 self._query_ids[op] = qid
-        return True
+        return wanted.issubset(discovered) if wanted else True
 
     async def fetch_graphql(
         self,
@@ -867,12 +954,16 @@ class XClient:
                         url, "GET", headers, "", timeout_ms, effective_tab_url, extra_secrets=secrets
                     )
             blocked, stale_qid = self.is_blocked_or_stale_response(resp)
-            if blocked and stale_qid and await self.refresh_query_ids_from_bundle(auth):
+            if blocked and stale_qid and await self.refresh_query_ids_from_bundle(
+                auth, operations=(operation,)
+            ):
                 url = self.build_graphql_url(operation, variables, features_override, field_toggles_override)
                 resp = await self.fetch_via_chrome_web_fetch(
                     url, "GET", headers, "", timeout_ms, effective_tab_url, extra_secrets=secrets
                 )
-            if resp.ok or self._transport_override is None:
+            if resp.ok:
+                return resp
+            if self._transport_override is not None:
                 return resp
 
         direct_req = HttpRequest(
@@ -886,7 +977,9 @@ class XClient:
         if not blocked:
             return direct_resp
 
-        if stale_qid and await self.refresh_query_ids_from_bundle(auth):
+        if stale_qid and await self.refresh_query_ids_from_bundle(
+            auth, operations=(operation,)
+        ):
             direct_req.url = self.build_graphql_url(operation, variables, features_override, field_toggles_override)
             direct_resp = await self.perform_direct(direct_req, extra_secrets=secrets)
             blocked2, _ = self.is_blocked_or_stale_response(direct_resp)
@@ -944,7 +1037,7 @@ class XClient:
         vars_obj: dict[str, Any] = {
             "count": max(1, min(100, count)),
             "includePromotedContent": False,
-            "latestControlAvailable": True,
+            "enableRanking": False,
             "requestContext": "launch",
             "seenTweetIds": [],
         }
@@ -956,7 +1049,6 @@ class XClient:
         vars_obj: dict[str, Any] = {
             "count": max(1, min(100, count)),
             "includePromotedContent": False,
-            "latestControlAvailable": True,
             "requestContext": "launch",
             "withCommunity": True,
             "seenTweetIds": [],

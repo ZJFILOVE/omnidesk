@@ -31,14 +31,23 @@ def _parse_structured_json(reply: str) -> Any:
     raw = reply.strip()
     if not raw:
         return None
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if len(lines) >= 3 and lines[-1].strip().startswith("```"):
-            raw = "\n".join(lines[1:-1]).strip()
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return None
+    candidates = [raw, *[block.strip() for block in re.findall(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)]]
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(raw):
+        if char not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return None
 
 
 def _build_response_format(req: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -77,6 +86,81 @@ def _format_glossary(raw: Any) -> tuple[list[tuple[str, str]], str]:
     if not pairs:
         return [], ""
     return pairs, "\n".join(f"- {src} => {dst}" for src, dst in pairs)
+
+
+def _parse_batch_translations(reply: str, expected: int) -> list[str] | None:
+    """Parse a single-call batch translation reply as an ordered string array."""
+    parsed = _parse_structured_json(reply)
+    if isinstance(parsed, Mapping):
+        for key in ("translations", "translated_texts", "results", "segments"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                parsed = value
+                break
+    if not isinstance(parsed, list) or len(parsed) != expected:
+        return None
+    out: list[str] = []
+    for item in parsed:
+        if isinstance(item, Mapping):
+            text = item.get("translation") or item.get("translated") or item.get("text")
+        else:
+            text = item
+        value = str(text or "").strip()
+        if not value:
+            return None
+        out.append(value)
+    return out
+
+
+def _build_batch_translate_request(
+    segments: list[dict[str, Any]],
+    *,
+    sys_prompt: str,
+    target_lang: str,
+    source_lang: str,
+    shared_ctx: str,
+    before_global: str,
+    after_global: str,
+    req: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload_segments: list[dict[str, Any]] = []
+    for i, seg in enumerate(segments):
+        entry: dict[str, Any] = {"text": seg["text"]}
+        seg_ctx = seg.get("context") or shared_ctx
+        before = seg.get("context_before") or (segments[i - 1]["text"] if i > 0 else before_global)
+        after = (
+            seg.get("context_after")
+            or (segments[i + 1]["text"] if i + 1 < len(segments) else after_global)
+        )
+        if seg_ctx:
+            entry["context"] = seg_ctx
+        if before:
+            entry["context_before"] = before
+        if after:
+            entry["context_after"] = after
+        payload_segments.append(entry)
+    payload = {
+        "source_language": source_lang,
+        "target_language": target_lang,
+        "segments": payload_segments,
+    }
+    user_lines = [
+        "Translate the `text` field of every segment.",
+        f"Return ONLY a JSON array of {len(segments)} translated strings in the same order.",
+        "Do not translate the JSON keys and do not add commentary or code fences.",
+        json.dumps(payload, ensure_ascii=False),
+    ]
+    chat_req: dict[str, Any] = {
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": "\n".join(user_lines)},
+        ],
+        "temperature": req.get("temperature", 0.2),
+    }
+    for opt_key in ("max_tokens", "reasoning_effort", "route_override", "model", "timeout_ms", "timeout_sec"):
+        if req.get(opt_key) is not None:
+            chat_req[opt_key] = req[opt_key]
+    return chat_req
 
 
 def _resolve_timeout_sec(req: Mapping[str, Any], default_timeout_ms: int) -> tuple[float | None, str | None]:
@@ -241,41 +325,99 @@ async def handle_translate(
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     served_model = route_group = last_notes = ""
 
-    for i, seg in enumerate(segments):
-        seg_before = seg.get("context_before") or (segments[i - 1]["text"] if is_batch and i > 0 else before_global)
-        seg_after = seg.get("context_after") or (segments[i + 1]["text"] if is_batch and i + 1 < len(segments) else after_global)
-        seg_ctx = seg.get("context") or shared_ctx
-        user_lines = [f"Source language: {source_lang}", f"Target language: {target_lang}"]
-        if seg_ctx:
-            user_lines.append(f"<context>\n{seg_ctx}\n</context>")
-        if seg_before:
-            user_lines.append(f"<context_before>\n{seg_before}\n</context_before>")
-        user_lines.append(f"<target_text>\n{seg['text']}\n</target_text>")
-        if seg_after:
-            user_lines.append(f"<context_after>\n{seg_after}\n</context_after>")
+    if is_batch and len(segments) > 1 and not bilingual_notes:
+        batch_sys_parts = ["You are a precise technical and literary translator."]
+        if bool(req.get("preserve_formatting", True)):
+            batch_sys_parts.append(
+                "Preserve paragraph breaks, inline markup, code/identifiers, and punctuation."
+            )
+        batch_sys_parts.append(
+            "Output ONLY a JSON array of translated strings in the same order and length "
+            "as the input segments. No commentary, no markdown fences."
+        )
+        batch_sys_prompt = " ".join(batch_sys_parts)
+        if glossary_str:
+            batch_sys_prompt += (
+                "\n\nMandatory Glossary (lock these terms strictly to the exact target strings below):\n"
+                + glossary_str
+            )
+        batch_res = await call_chat(
+            _build_batch_translate_request(
+                segments,
+                sys_prompt=batch_sys_prompt,
+                target_lang=target_lang,
+                source_lang=source_lang,
+                shared_ctx=shared_ctx,
+                before_global=before_global,
+                after_global=after_global,
+                req=req,
+            ),
+            None,
+        )
+        if not batch_res.ok:
+            return batch_res
+        parsed_batch = _parse_batch_translations(
+            str(batch_res.data.get("reply") or ""), len(segments)
+        )
+        if parsed_batch is not None:
+            if isinstance(batch_res.data.get("usage"), Mapping):
+                for ukey in total_usage:
+                    if isinstance(batch_res.data["usage"].get(ukey), int):
+                        total_usage[ukey] += batch_res.data["usage"][ukey]
+            served_model = str(
+                batch_res.data.get("served_model") or batch_res.data.get("model") or served_model
+            )
+            route_group = str(
+                batch_res.data.get("route_group")
+                or batch_res.data.get("route_used")
+                or route_group
+            )
+            results = [
+                {
+                    "index": seg["index"],
+                    "id": seg["id"],
+                    "source": seg["text"],
+                    "translation": translated,
+                }
+                for seg, translated in zip(segments, parsed_batch)
+            ]
 
-        chat_req: dict[str, Any] = {
-            "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": "\n".join(user_lines)}],
-            "temperature": req.get("temperature", 0.2),
-        }
-        for opt_key in ("max_tokens", "reasoning_effort", "route_override", "model", "timeout_ms", "timeout_sec"):
-            if req.get(opt_key) is not None:
-                chat_req[opt_key] = req[opt_key]
+    if not results:
+        for i, seg in enumerate(segments):
+            seg_before = seg.get("context_before") or (segments[i - 1]["text"] if is_batch and i > 0 else before_global)
+            seg_after = seg.get("context_after") or (segments[i + 1]["text"] if is_batch and i + 1 < len(segments) else after_global)
+            seg_ctx = seg.get("context") or shared_ctx
+            user_lines = [f"Source language: {source_lang}", f"Target language: {target_lang}"]
+            if seg_ctx:
+                user_lines.append(f"<context>\n{seg_ctx}\n</context>")
+            if seg_before:
+                user_lines.append(f"<context_before>\n{seg_before}\n</context_before>")
+            user_lines.append(f"<target_text>\n{seg['text']}\n</target_text>")
+            if seg_after:
+                user_lines.append(f"<context_after>\n{seg_after}\n</context_after>")
 
-        chat_res = await call_chat(chat_req, None)
-        if not chat_res.ok:
-            return chat_res
-        raw_reply = str(chat_res.data.get("reply") or "")
-        translated = _extract_tag(raw_reply, "translation") or raw_reply.strip()
-        if bilingual_notes:
-            last_notes = _extract_tag(raw_reply, "notes")
-        served_model = str(chat_res.data.get("served_model") or chat_res.data.get("model") or served_model)
-        route_group = str(chat_res.data.get("route_group") or chat_res.data.get("route_used") or route_group)
-        if isinstance(chat_res.data.get("usage"), Mapping):
-            for ukey in total_usage:
-                if isinstance(chat_res.data["usage"].get(ukey), int):
-                    total_usage[ukey] += chat_res.data["usage"][ukey]
-        results.append({"index": seg["index"], "id": seg["id"], "source": seg["text"], "translation": translated})
+            chat_req: dict[str, Any] = {
+                "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": "\n".join(user_lines)}],
+                "temperature": req.get("temperature", 0.2),
+            }
+            for opt_key in ("max_tokens", "reasoning_effort", "route_override", "model", "timeout_ms", "timeout_sec"):
+                if req.get(opt_key) is not None:
+                    chat_req[opt_key] = req[opt_key]
+
+            chat_res = await call_chat(chat_req, None)
+            if not chat_res.ok:
+                return chat_res
+            raw_reply = str(chat_res.data.get("reply") or "")
+            translated = _extract_tag(raw_reply, "translation") or raw_reply.strip()
+            if bilingual_notes:
+                last_notes = _extract_tag(raw_reply, "notes")
+            served_model = str(chat_res.data.get("served_model") or chat_res.data.get("model") or served_model)
+            route_group = str(chat_res.data.get("route_group") or chat_res.data.get("route_used") or route_group)
+            if isinstance(chat_res.data.get("usage"), Mapping):
+                for ukey in total_usage:
+                    if isinstance(chat_res.data["usage"].get(ukey), int):
+                        total_usage[ukey] += chat_res.data["usage"][ukey]
+            results.append({"index": seg["index"], "id": seg["id"], "source": seg["text"], "translation": translated})
 
     joined = "\n".join(seg["text"] for seg in segments)
     applied = [{"source": s, "target": d} for s, d in glossary_pairs if s in joined]

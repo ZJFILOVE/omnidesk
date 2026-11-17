@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,20 @@ def book_identity_key(item: BookItem) -> str:
     return f"title:{item.title.strip().lower()}|{item.author.strip().lower()}"
 
 
+_ASCII_TERM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+#/_-]*$")
+
+
+def _keyword_in_haystack(term: str, hay: str) -> bool:
+    """Match CJK terms as substrings and Latin terms on word boundaries."""
+    term = term.strip()
+    if not term:
+        return False
+    if _ASCII_TERM_RE.match(term):
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])"
+        return re.search(pattern, hay, re.IGNORECASE) is not None
+    return term in hay
+
+
 def media_matches(item: MediaItem, date_filter: str, kw: str) -> bool:
     """Return True if a MediaItem matches optional date and keyword filters."""
     bdate = str(item.business_date or item.extra.get("business_date") or "")
@@ -114,7 +129,10 @@ def media_matches(item: MediaItem, date_filter: str, kw: str) -> bool:
             bdate,
         )
     ).lower()
-    return kw in hay
+    if _keyword_in_haystack(kw, hay):
+        return True
+    terms = [term for term in kw.split() if term]
+    return len(terms) > 1 and any(_keyword_in_haystack(term, hay) for term in terms)
 
 
 def text_matches(item: TextFeedItem, article: TextArticle | None, date_filter: str, kw: str) -> bool:
@@ -136,7 +154,11 @@ def text_matches(item: TextFeedItem, article: TextArticle | None, date_filter: s
     ]
     if article:
         parts.extend([article.summary_zh, article.subtitle, " ".join(p.original for p in article.paragraphs)])
-    return kw in " ".join(parts).lower()
+    hay = " ".join(parts).lower()
+    if _keyword_in_haystack(kw, hay):
+        return True
+    terms = [term for term in kw.split() if term]
+    return len(terms) > 1 and any(_keyword_in_haystack(term, hay) for term in terms)
 
 
 def parse_incoming_media_item(raw: Mapping[str, Any], default_mode: str) -> MediaItem:

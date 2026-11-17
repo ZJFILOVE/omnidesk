@@ -53,6 +53,7 @@ def test_manifest_matches_spec_and_schema() -> None:
     }
     assert set(manifest["consumes"]) == {
         "recommend.feed.v1",
+        "media.charts.v1",
         "media.playlist.v1",
         "web.extract.v1",
         "web.fetch.v1",

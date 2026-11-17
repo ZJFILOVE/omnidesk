@@ -297,6 +297,60 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
     expect(invokedCapabilities).not.toContain('llm.chat.v1');
   });
 
+  it('requests media and text domains for paper + YouTube prompts', async () => {
+    let capturedPayload: Record<string, unknown> | undefined;
+    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call_capability') {
+        const cap = String(payload?.args?.capability ?? '');
+        if (cap === 'llm.router.v1') {
+          return {
+            ok: true,
+            provider_plugin_id: 'plugin-magpie-agent',
+            data: { gateway_running: true, online: true, group_id: 'omnidesk-active', primary_member: 'gemini/carbon:high', routing: 'order' },
+            error: '',
+          };
+        }
+        if (cap === 'ai.curation.v1') {
+          capturedPayload = payload?.args?.payload as Record<string, unknown>;
+          return {
+            ok: true,
+            provider_plugin_id: 'plugin-magpie-agent',
+            data: {
+              mode: 'interactive_ephemeral',
+              session_id: 'ix-mixed-test',
+              feed_written: true,
+              playlist_synced: false,
+              media_items: [{ id: 'yt-1', title: 'KV Cache video', creator: 'YouTube', kind: 'video' }],
+              text_items: [{ id: 'paper-1', title: 'KV Cache paper', author: 'Researcher' }],
+            },
+            error: '',
+          };
+        }
+      }
+      return { ok: true, data: {}, error: '' };
+    });
+
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'],
+      },
+    };
+
+    render(<AiWorkbench />);
+    await waitFor(() => {
+      expect(screen.getByTestId('ai-gateway-badge').textContent).toContain('ONLINE');
+    });
+
+    fireEvent.change(screen.getByLabelText('AI 策展对话输入框'), {
+      target: { value: '结合 KV Cache 淘汰边界论文，推荐 2 篇同主题实证工作和对应 YouTube 讲解。' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '发送执行' }));
+
+    await waitFor(() => {
+      expect(capturedPayload?.domains).toEqual(['media', 'text']);
+    });
+  });
+
   it('sends llm.chat.v1 in AiWorkbench and surfaces real reply or real backend error', async () => {
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
       if (cmd === 'call_capability') {
@@ -361,6 +415,82 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
     await waitFor(() => {
       expect(screen.getByTestId('ai-error-banner').textContent).toContain('[quota_exceeded] 订阅配额已耗尽');
     });
+  });
+
+  it('selects nested auto route without sending an unsupported effort suffix', async () => {
+    const setRoutePayloads: Array<Record<string, unknown>> = [];
+    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call_capability') {
+        const cap = payload?.args?.capability;
+        const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
+        if (cap === 'llm.router.v1') {
+          if (capPayload?.action === 'current_route') {
+            return {
+              ok: true,
+              provider_plugin_id: 'plugin-magpie-agent',
+              data: {
+                gateway_running: true,
+                online: true,
+                group_id: 'omnidesk-active',
+                primary_member: 'codex/gpt-6-luna:high',
+                routing: 'order',
+              },
+              error: '',
+            };
+          }
+          if (capPayload?.action === 'list_models') {
+            return {
+              ok: true,
+              provider_plugin_id: 'plugin-magpie-agent',
+              data: {
+                models: [{ id: 'auto/glm-5.3-flash' }, { id: 'codex/gpt-6-luna' }],
+                groups: [],
+              },
+              error: '',
+            };
+          }
+          if (capPayload?.action === 'set_route') {
+            setRoutePayloads.push(capPayload);
+            return {
+              ok: true,
+              provider_plugin_id: 'plugin-magpie-agent',
+              data: { primary_member: capPayload.model_id, routing: 'order' },
+              error: '',
+            };
+          }
+          return {
+            ok: true,
+            provider_plugin_id: 'plugin-magpie-agent',
+            data: { quotas: [] },
+            error: '',
+          };
+        }
+      }
+      return { ok: true, data: {}, error: '' };
+    });
+
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'],
+      },
+    };
+
+    render(<AiWorkbench />);
+    await waitFor(() => {
+      expect(screen.getByTestId('ai-gateway-badge').textContent).toContain('ONLINE');
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: /auto\/glm-5\.3-flash/ }));
+    await waitFor(() => {
+      expect(setRoutePayloads).toHaveLength(1);
+      expect((screen.getByRole('button', { name: /^high$/ }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    });
+
+    expect(setRoutePayloads[0].model_id).toBe('auto/glm-5.3-flash');
+    expect(setRoutePayloads[0].effort).toBeUndefined();
+    expect(screen.queryByTestId('ai-error-banner')).toBeNull();
   });
 
   it('sends ai.agent.v1 in CompanionDock and surfaces real error on failure', async () => {

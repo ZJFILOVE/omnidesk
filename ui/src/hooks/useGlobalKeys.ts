@@ -105,7 +105,7 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
         !event.ctrlKey &&
         !event.metaKey &&
         !event.shiftKey &&
-        /^[a-z]$/.test(lowerKey)
+        /^[a-z0-9]$/.test(lowerKey)
       ) {
         if (lowerKey === 't') {
           event.preventDefault();

@@ -44,11 +44,106 @@ _CHART_INTENT_RE = re.compile(
     r"最火|热门|热歌|热榜|榜单|排行榜|排行|流行榜|trending|top\s*(?:songs?|tracks?|hits?)",
     re.IGNORECASE,
 )
-_GENRE_RE = re.compile(r"爵士|摇滚|古典|钢琴|氛围|民谣|电子|说唱|嘻哈|lo-?fi|jazz|rock|classical|piano|ambient|folk", re.IGNORECASE)
+_GENRE_RE = re.compile(
+    r"爵士|摇滚|古典|钢琴|氛围|民谣|电子|说唱|嘻哈|器乐|lo-?fi|jazz|rock|classical|piano|ambient|folk|instrumental",
+    re.IGNORECASE,
+)
 _NON_MUSIC_MEDIA_RE = re.compile(r"视频|电影|影视|剧集|播客|video|movie|film|podcast|youtube|bilibili|b站", re.IGNORECASE)
-_COUNT_ARABIC_RE = re.compile(r"(\d{1,2})\s*(?:首|个|条|支|tracks?|songs?)", re.IGNORECASE)
-_COUNT_CN_RE = re.compile(r"([一二两三四五六七八九十]{1,3})\s*(?:首|个|条|支)")
+_COUNT_UNITS = r"首|篇|本|部|个|条|支|tracks?|songs?"
+_COUNT_ARABIC_RE = re.compile(rf"(\d{{1,2}})\s*(?:{_COUNT_UNITS})", re.IGNORECASE)
+_COUNT_CN_RE = re.compile(rf"([一二两三四五六七八九十]{{1,3}})\s*(?:{_COUNT_UNITS})", re.IGNORECASE)
+_RECOMMEND_HINT_RE = re.compile(r"推荐|重温|选|挑|来|要|给我|找|生成|整理|列")
+_ARCHIVE_SIZE_RE = re.compile(r"每日|每天|往期|历史|库里|档案|一共|总共")
 _CN_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_ARCHIVE_GENRE_HINTS = (
+    "爵士",
+    "jazz",
+    "古典",
+    "classical",
+    "摇滚",
+    "rock",
+    "民谣",
+    "folk",
+    "氛围",
+    "ambient",
+    "电子",
+    "electronic",
+    "钢琴",
+    "piano",
+    "器乐",
+    "instrumental",
+    "说唱",
+    "嘻哈",
+    "hip-hop",
+    "lofi",
+    "lo-fi",
+)
+_LATIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9+#._-]{1,}(?:\s+[A-Za-z][A-Za-z0-9+#._-]{1,})*")
+_ARCHIVE_QUERY_NOISE = frozenset(
+    {
+        "youtube",
+        "video",
+        "videos",
+        "music",
+        "song",
+        "songs",
+        "track",
+        "tracks",
+        "playlist",
+        "playlists",
+        "recommend",
+        "recommendation",
+        "recommendations",
+        "top",
+        "paper",
+        "papers",
+        "journal",
+        "article",
+        "articles",
+        "book",
+        "books",
+        "podcast",
+        "bilibili",
+    }
+)
+
+
+def _archive_domain(allowed_domains: set[str], prompt: str) -> str:
+    """Map requested domains onto `search_archive`'s singular domain filter."""
+    if not allowed_domains:
+        return "all"
+    if "media" in allowed_domains and "text" in allowed_domains:
+        return "all"
+    if "media" in allowed_domains:
+        return "video" if _NON_MUSIC_MEDIA_RE.search(prompt) else "music"
+    return "text"
+
+
+def _derive_archive_query(prompt: str, domain: str) -> str:
+    """Build a focused archive keyword from a natural-language instruction.
+
+    Passing the whole Chinese sentence as one substring never matches an
+    archive row. Prefer a small set of high-signal genre or Latin terms, and
+    fall back to an empty query (recent items) when nothing can be extracted.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return ""
+    if domain in {"music", "video"}:
+        lowered = text.lower()
+        for term in _ARCHIVE_GENRE_HINTS:
+            if term in lowered:
+                return term
+    terms: list[str] = []
+    for match in _LATIN_TERM_RE.finditer(text):
+        phrase = re.sub(r"\s+", " ", match.group(0)).strip()
+        if not phrase or phrase.lower() in _ARCHIVE_QUERY_NOISE:
+            continue
+        if phrase.lower() not in {t.lower() for t in terms}:
+            terms.append(phrase)
+        if len(terms) >= 3:
+            break
+    return " ".join(terms)
 
 
 def _chinese_count(raw: str) -> int:
@@ -64,14 +159,22 @@ def _chinese_count(raw: str) -> int:
 
 def _requested_count(prompt: str, default: int = 5) -> int:
     """Parse a bounded track count such as 五首 / 5 songs; never invent a huge batch."""
+    candidates: list[tuple[int, int]] = []
     for match in _COUNT_ARABIC_RE.finditer(prompt):
-        count = int(match.group(1))
-        if 1 <= count <= 15:
-            return count
+        candidates.append((match.start(), int(match.group(1))))
     for match in _COUNT_CN_RE.finditer(prompt):
-        count = _chinese_count(match.group(1))
-        if 1 <= count <= 15:
-            return count
+        candidates.append((match.start(), _chinese_count(match.group(1))))
+    scored: list[tuple[int, int, int]] = []
+    for start, count in candidates:
+        if not (1 <= count <= 15):
+            continue
+        before = prompt[max(0, start - 12) : start]
+        score = 10 if _RECOMMEND_HINT_RE.search(before) else 0
+        if _ARCHIVE_SIZE_RE.search(before):
+            score -= 6
+        scored.append((score, start, count))
+    if scored:
+        return max(scored)[2]
     return default
 
 
@@ -333,10 +436,13 @@ async def _handle_curate_interactive(
         and not _GENRE_RE.search(prompt)
         and not _NON_MUSIC_MEDIA_RE.search(prompt)
     )
-    chart_count = _requested_count(prompt) if chart_requested else 0
+    requested_count = _requested_count(prompt)
+    chart_count = requested_count if chart_requested else 0
     chart_items: list[dict[str, Any]] = []
     chart_error = ""
     chart_fast = False
+    llm_used = True
+    llm_reason = ""
 
     if chart_requested:
         await emit_progress(ctx, session_id, "interactive_ephemeral", "fetching_charts", "正在拉取 Apple Music 国区实时榜单")
@@ -361,6 +467,8 @@ async def _handle_curate_interactive(
 
     if chart_items:
         chart_fast = True
+        llm_used = False
+        llm_reason = "chart_fast_path"
         cand_media = chart_items
         cand_texts, cand_books = [], []
         llm_title = f"Apple Music 国区实时热门 · {chart_count} 首"
@@ -370,23 +478,61 @@ async def _handle_curate_interactive(
         archive_texts: list[dict[str, Any]] = []
         archive_books: list[dict[str, Any]] = []
         if ctx.capabilities.has("recommend.feed.v1"):
-            search_res = await ctx.capabilities.call(
-                "recommend.feed.v1",
-                {
-                    "action": "search_archive",
-                    "query": str(req.get("query") or prompt),
-                    "domains": list(req.get("domains") or []),
-                    "limit": int(req.get("limit") or 20),
-                },
+            archive_domain = _archive_domain(allowed_domains, prompt)
+            search_domains = (
+                ["video" if _NON_MUSIC_MEDIA_RE.search(prompt) else "music", "text"]
+                if archive_domain == "all"
+                else [archive_domain]
             )
-            if search_res.ok:
-                archive_media, archive_texts, archive_books = collect_archive_buckets(search_res.data)
+            explicit_query = str(req.get("query") or "").strip()
+            search_query = explicit_query or _derive_archive_query(prompt, archive_domain)
+            seen_media: set[str] = set()
+            seen_texts: set[str] = set()
+            seen_books: set[str] = set()
+            for search_domain in search_domains:
+                search_payload: dict[str, Any] = {
+                    "action": "search_archive",
+                    "query": search_query,
+                    "domain": search_domain,
+                    "limit": int(req.get("limit") or 20),
+                }
+                search_res = await ctx.capabilities.call("recommend.feed.v1", search_payload)
+                found_media: list[dict[str, Any]] = []
+                found_texts: list[dict[str, Any]] = []
+                found_books: list[dict[str, Any]] = []
+                if search_res.ok:
+                    found_media, found_texts, found_books = collect_archive_buckets(search_res.data)
+                if search_res.ok and search_query and not (found_media or found_texts or found_books):
+                    search_payload["query"] = ""
+                    search_res = await ctx.capabilities.call("recommend.feed.v1", search_payload)
+                    if search_res.ok:
+                        found_media, found_texts, found_books = collect_archive_buckets(search_res.data)
+                for hint, bucket, target, seen in (
+                    ("media", found_media, archive_media, seen_media),
+                    ("text", found_texts, archive_texts, seen_texts),
+                    ("book", found_books, archive_books, seen_books),
+                ):
+                    for item in bucket:
+                        ident = item_identity(item, hint)
+                        if ident in seen:
+                            continue
+                        seen.add(ident)
+                        target.append(item)
 
         pool_media, pool_texts, pool_books = req_media + archive_media, req_texts + archive_texts, req_books + archive_books
         auth_m, auth_t, auth_b = build_auth_index(pool_media), build_auth_index(pool_texts), build_auth_index(pool_books)
-        llm_ok, llm_m, llm_t, llm_b, llm_title = await llm_select_interactive(
-            skill_dir, prompt, repeat_policy, pool_media, pool_texts, pool_books, req.get("active_entity"), call_chat
+        llm_ok, llm_m, llm_t, llm_b, llm_title, llm_reason = await llm_select_interactive(
+            skill_dir,
+            prompt,
+            repeat_policy,
+            pool_media,
+            pool_texts,
+            pool_books,
+            req.get("active_entity"),
+            call_chat,
+            limit=requested_count,
         )
+        llm_used = llm_ok
         if llm_ok:
             cand_media = [
                 matched if (matched := match_authentic(m, auth_m)) is not None else dict(m)
@@ -405,8 +551,6 @@ async def _handle_curate_interactive(
         final_media = final_media if "media" in allowed_domains else []
         final_texts = final_texts if "text" in allowed_domains else []
         final_books = final_books if "book" in allowed_domains else []
-    if chart_fast:
-        final_media = final_media[:chart_count]
 
     await _attach_provenance(ctx, final_media + final_texts + final_books)
 
@@ -429,12 +573,25 @@ async def _handle_curate_interactive(
 
         final_media, final_texts, final_books = _dedup(final_media, "media"), _dedup(final_texts, "text"), _dedup(final_books, "book")
 
+    final_media = final_media[:requested_count]
+    final_texts = final_texts[:requested_count]
+    final_books = final_books[:requested_count]
+    if chart_fast:
+        final_media = final_media[:chart_count]
+
     if not (final_media or final_texts or final_books):
         return fail_result(
             "未找到经过核验的真实候选条目（禁止生成占位推荐）",
             error_code="no_verified_candidates",
             secret=secret,
-            data={"mode": "interactive_ephemeral", "skipped_session_duplicates": skipped_dups, "feed_written": False, "playlist_synced": False},
+            data={
+                "mode": "interactive_ephemeral",
+                "requested_count": requested_count,
+                "llm_selection": {"used": llm_used, "reason": redact_secret(llm_reason, secret)},
+                "skipped_session_duplicates": skipped_dups,
+                "feed_written": False,
+                "playlist_synced": False,
+            },
         )
     if not ctx.capabilities.has("recommend.feed.v1"):
         return fail_result(
@@ -502,6 +659,8 @@ async def _handle_curate_interactive(
         "feed_written": True,
         "playlist_synced": playlist_synced,
         "partial_success": False,
+        "requested_count": requested_count,
+        "llm_selection": {"used": llm_used, "reason": redact_secret(llm_reason, secret)},
         "skipped_session_duplicates": skipped_dups,
         "verified_ids": final_track_ids,
         "media_items": final_media,

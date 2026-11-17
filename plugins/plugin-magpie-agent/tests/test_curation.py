@@ -50,7 +50,7 @@ def _closed_loopback_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _start_curation_llm_server(response_obj: dict[str, Any]) -> tuple[http.server.ThreadingHTTPServer, str, threading.Thread]:
+def _start_curation_llm_server(response_obj: Any) -> tuple[http.server.ThreadingHTTPServer, str, threading.Thread]:
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length") or "0")
@@ -257,6 +257,217 @@ async def test_curate_interactive_order_partial_success_and_session_dedup(tmp_pa
 
     await invoke_lifecycle_hook(plugin.on_unload)
     assert plugin._session_seen == {}
+    await ctx.acleanup()
+
+
+@pytest.mark.asyncio
+async def test_curate_interactive_derives_focused_archive_query(tmp_path: Path) -> None:
+    module = _load_plugin_module()
+    plugin = module.create_plugin()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path, config_schema=manifest["config_schema"])
+    ctx.set_config("skill_dir", str(_create_skill_fixture(tmp_path)))
+    ctx.set_config("gateway_url", _closed_loopback_url())
+
+    search_reqs: list[dict[str, Any]] = []
+
+    def handle_feed(req: dict[str, Any]) -> CapabilityResult:
+        act = req.get("action")
+        if act == "search_archive":
+            search_reqs.append(dict(req))
+            return CapabilityResult.ok(
+                {
+                    "media_items": [
+                        {
+                            "id": f"am-cn-{2000 + index}",
+                            "title": f"Jazz Track {index}",
+                            "creator": "Bill Evans",
+                            "kind": "music",
+                            "play_url": f"https://music.apple.com/cn/song/{2000 + index}",
+                            "extra": {"apple_music_song_id": str(2000 + index)},
+                        }
+                        for index in range(1, 7)
+                    ]
+                }
+            )
+        if act == "lookup_provenance":
+            return CapabilityResult.ok({"read_only": True, "matches": []})
+        if act == "push_interactive_set":
+            return CapabilityResult.ok({"pushed": True})
+        return CapabilityResult.fail("unexpected", error_code="invalid_argument")
+
+    def handle_playlist(req: dict[str, Any]) -> CapabilityResult:
+        if req.get("action") == "preflight_cn_catalog":
+            return CapabilityResult.ok({"verified_ids": [str(2000 + index) for index in range(1, 7)]})
+        return CapabilityResult.ok({})
+
+    ctx.capabilities.register("recommend.feed.v1", handle_feed, plugin_id="plugin-ai-curator")
+    ctx.capabilities.register("media.playlist.v1", handle_playlist, plugin_id="plugin-music")
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    prompt = "从往期每日 5 首历史库里重温 3 首最适合深夜编码的冷静器乐爵士，写到灵感电台。"
+    res = await ctx.capabilities.call(
+        "ai.curation.v1",
+        {
+            "action": "curate_interactive",
+            "prompt": prompt,
+            "domains": ["media"],
+            "session_id": "ix-focused-query",
+            "sync_apple_music": "none",
+        },
+    )
+
+    assert res.ok is True
+    assert res.data["feed_written"] is True
+    assert res.data["requested_count"] == 3
+    assert len(res.data["media_items"]) == 3
+    assert res.data["llm_selection"]["used"] is False
+    assert search_reqs
+    assert search_reqs[0]["query"] == "爵士"
+    assert search_reqs[0]["domain"] == "music"
+    assert search_reqs[0]["query"] != prompt
+
+    await invoke_lifecycle_hook(plugin.on_unload)
+    await ctx.acleanup()
+
+
+@pytest.mark.asyncio
+async def test_curate_interactive_recovers_markdown_selected_ids(tmp_path: Path) -> None:
+    module = _load_plugin_module()
+    plugin = module.create_plugin()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path, config_schema=manifest["config_schema"])
+    ctx.set_config("skill_dir", str(_create_skill_fixture(tmp_path)))
+    server, url, thread = _start_curation_llm_server("我推荐 am-cn-1002，适合深夜单曲循环。")
+    try:
+        ctx.set_config("gateway_url", url)
+
+        def handle_feed(req: dict[str, Any]) -> CapabilityResult:
+            act = req.get("action")
+            if act == "search_archive":
+                return CapabilityResult.ok(
+                    {
+                        "media_items": [
+                            {
+                                "id": f"am-cn-{sid}",
+                                "title": f"Track {sid}",
+                                "kind": "music",
+                                "play_url": f"https://music.apple.com/cn/song/{sid}",
+                                "extra": {"apple_music_song_id": sid},
+                            }
+                            for sid in ("1001", "1002")
+                        ]
+                    }
+                )
+            if act == "lookup_provenance":
+                return CapabilityResult.ok({"read_only": True, "matches": []})
+            if act == "push_interactive_set":
+                return CapabilityResult.ok({"pushed": True})
+            return CapabilityResult.fail("unexpected", error_code="invalid_argument")
+
+        def handle_playlist(req: dict[str, Any]) -> CapabilityResult:
+            if req.get("action") == "preflight_cn_catalog":
+                return CapabilityResult.ok({"verified_ids": ["1001", "1002"]})
+            return CapabilityResult.ok({})
+
+        ctx.capabilities.register("recommend.feed.v1", handle_feed, plugin_id="plugin-ai-curator")
+        ctx.capabilities.register("media.playlist.v1", handle_playlist, plugin_id="plugin-music")
+        await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+        res = await ctx.capabilities.call(
+            "ai.curation.v1",
+            {
+                "action": "curate_interactive",
+                "prompt": "推荐 1 首适合深夜的曲子",
+                "domains": ["media"],
+                "session_id": "ix-markdown-fallback",
+                "sync_apple_music": "none",
+            },
+        )
+
+        assert res.ok is True
+        assert [item["id"] for item in res.data["media_items"]] == ["am-cn-1002"]
+        assert res.data["llm_selection"]["used"] is True
+        assert "markdown" in res.data["llm_selection"]["reason"]
+
+        await invoke_lifecycle_hook(plugin.on_unload)
+        await ctx.acleanup()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_curate_interactive_searches_video_and_text_for_mixed_prompts(tmp_path: Path) -> None:
+    module = _load_plugin_module()
+    plugin = module.create_plugin()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path, config_schema=manifest["config_schema"])
+    ctx.set_config("skill_dir", str(_create_skill_fixture(tmp_path)))
+    ctx.set_config("gateway_url", _closed_loopback_url())
+
+    searches: list[dict[str, Any]] = []
+
+    def handle_feed(req: dict[str, Any]) -> CapabilityResult:
+        act = req.get("action")
+        if act == "search_archive":
+            searches.append(dict(req))
+            if req.get("domain") == "video":
+                return CapabilityResult.ok(
+                    {
+                        "media_items": [
+                            {
+                                "id": "yt-kv-cache-001",
+                                "title": "KV Cache eviction explained",
+                                "kind": "video",
+                                "play_url": "https://www.youtube.com/watch?v=abcdefghijk",
+                                "extra": {"youtube_video_id": "abcdefghijk"},
+                            }
+                        ]
+                    }
+                )
+            return CapabilityResult.ok(
+                {
+                    "text_items": [
+                        {
+                            "id": "paper-kv-cache-001",
+                            "title": "KV Cache Eviction Boundaries",
+                            "doi": "10.1000/kv-cache",
+                            "url": "https://doi.org/10.1000/kv-cache",
+                        }
+                    ]
+                }
+            )
+        if act == "lookup_provenance":
+            return CapabilityResult.ok({"read_only": True, "matches": []})
+        if act == "push_interactive_set":
+            return CapabilityResult.ok({"pushed": True})
+        return CapabilityResult.fail("unexpected", error_code="invalid_argument")
+
+    ctx.capabilities.register("recommend.feed.v1", handle_feed, plugin_id="plugin-ai-curator")
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    res = await ctx.capabilities.call(
+        "ai.curation.v1",
+        {
+            "action": "curate_interactive",
+            "prompt": "结合 KV Cache 淘汰边界论文，推荐 2 篇同主题实证工作和对应 YouTube 讲解。",
+            "domains": ["media", "text"],
+            "session_id": "ix-mixed",
+            "sync_apple_music": "none",
+        },
+    )
+
+    assert res.ok is True
+    assert [(s.get("domain"), s.get("query")) for s in searches] == [
+        ("video", "KV Cache"),
+        ("text", "KV Cache"),
+    ]
+    assert [item["id"] for item in res.data["media_items"]] == ["yt-kv-cache-001"]
+    assert [item["id"] for item in res.data["text_items"]] == ["paper-kv-cache-001"]
+
+    await invoke_lifecycle_hook(plugin.on_unload)
     await ctx.acleanup()
 
 

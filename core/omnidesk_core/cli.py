@@ -26,6 +26,7 @@ from .errors import (
     redact_secrets,
 )
 from .installer import PluginInstaller
+from .legacy_config import import_v1_config
 from .manifest import scaffold_plugin
 from .paths import OmnideskPaths, validate_plugin_id
 from .plugins import PluginManager
@@ -374,6 +375,7 @@ def _cmd_rpc(args: argparse.Namespace, paths: OmnideskPaths) -> int:
         "capability": args.capability,
         "caller": args.caller,
         "payload": payload,
+        "timeout": args.timeout,
     }
     if getattr(args, "provider", None):
         req["provider_plugin_id"] = args.provider
@@ -952,6 +954,29 @@ def _cmd_config(args: argparse.Namespace, paths: OmnideskPaths) -> int:
     return 0
 
 
+def _cmd_migrate_v1_config(args: argparse.Namespace, paths: OmnideskPaths) -> int:
+    """Import v1 flat plugin configs into v2 ConfigStore/SecretVault."""
+    report = import_v1_config(
+        ConfigStore(paths.config_dir),
+        SecretVault(paths=paths),
+        paths=paths,
+        dry_run=bool(args.dry_run),
+        backup=not bool(args.no_backup),
+    )
+    if args.json:
+        _emit_json(report)
+        return 0
+    action = "Will import" if report["dry_run"] else "Imported"
+    print(f"{action} {report['changed_count']} plugin configuration(s).")
+    for entry in report["plugins"]:
+        keys = ", ".join(sorted(entry["config_keys"])) or "-"
+        secrets = ", ".join(entry["secret_keys"]) or "-"
+        print(f"  {entry['plugin_id']}: config [{keys}], secrets [{secrets}]")
+    if report.get("backup_dir"):
+        print(f"  backup: {report['backup_dir']}")
+    return 0
+
+
 async def serve_mcp_stdio(
     *,
     paths: OmnideskPaths,
@@ -1511,6 +1536,14 @@ def build_parser(*, json_requested: bool = False) -> argparse.ArgumentParser:
     p_config.add_argument("--live", action="store_true", help="Use live control.sock")
     p_config.add_argument("--json", action="store_true", help="Output JSON")
 
+    p_migrate = sub.add_parser(
+        "migrate-v1-config",
+        help="Import v1 flat plugin configs into v2 ConfigStore/SecretVault (idempotent)",
+    )
+    p_migrate.add_argument("--dry-run", action="store_true", help="Report changes without writing")
+    p_migrate.add_argument("--no-backup", action="store_true", help="Skip the pre-import backup")
+    p_migrate.add_argument("--json", action="store_true", help="Output JSON")
+
     p_mcp = sub.add_parser("mcp-serve", help="Run minimal stdio JSON-RPC 2.0 MCP server (no arbitrary shell)")
     p_mcp.add_argument("--plugins-dir", action="append", help="Plugin root directory for offline fallback")
     p_mcp.add_argument("--socket", "-s", help="Optional path to live control.sock")
@@ -1612,6 +1645,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_toggle(args, paths, enabled=False)
         if args.command == "config":
             return _cmd_config(args, paths)
+        if args.command == "migrate-v1-config":
+            return _cmd_migrate_v1_config(args, paths)
         if args.command == "mcp-serve":
             return asyncio.run(
                 serve_mcp_stdio(

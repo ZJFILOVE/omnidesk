@@ -7,6 +7,11 @@ export function nowHHMM(): string {
   return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 }
 
+export function isNestedRouteRef(model: string): boolean {
+  const ref = model.trim();
+  return ref.startsWith('group/') || ref.startsWith('auto/');
+}
+
 export function parseMemberAndEffort(
   rawMember: string,
 ): { model: string; effort?: MagpieRouteState['effort'] } {

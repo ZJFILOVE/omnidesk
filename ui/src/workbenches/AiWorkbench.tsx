@@ -11,6 +11,7 @@ import { SegmentedPills, TagChip } from '../components/WorkbenchPrimitives';
 import AiChatPane from './panels/AiChatPane';
 import AiLedgerPanel from './panels/AiLedgerPanel';
 import AiRouteSidebar from './panels/AiRouteSidebar';
+import { isNestedRouteRef } from './aiWorkbenchHelpers';
 import { useAiWorkbenchController } from './useAiWorkbenchController';
 
 type AiDrawerTab = 'route' | 'ledger';
@@ -33,6 +34,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
   const [drawerTab, setDrawerTab] = useState<AiDrawerTab>('route');
   const ctrl = useAiWorkbenchController(lastBusEvent);
   const { route, curationMode } = ctrl;
+  const nestedRoute = isNestedRouteRef(route.primaryModel);
 
   useEffect(() => {
     onContextChange?.({
@@ -40,10 +42,10 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
       workbench: 'ai',
       itemId: route.activeGroup,
       title: `Magpie · ${route.primaryModel}`,
-      subtitle: `${curationMode} · ${route.effort}`,
+      subtitle: `${curationMode} · ${nestedRoute ? '组内路由' : route.effort}`,
       sourceId: 'plugin-magpie-agent',
     });
-  }, [curationMode, onContextChange, route.activeGroup, route.effort, route.primaryModel]);
+  }, [curationMode, nestedRoute, onContextChange, route.activeGroup, route.effort, route.primaryModel]);
 
   return (
     <WorkbenchLayout
@@ -75,7 +77,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
               : `Magpie ${route.gatewayHealthy ? 'ONLINE' : 'OFFLINE'} · ${route.activeGroup}`}
           </span>
           <TagChip tone="neutral" mono>
-            {route.primaryModel} ({route.effort})
+            {route.primaryModel} ({nestedRoute ? '组内路由' : route.effort})
           </TagChip>
           <FocusButton
             focusId="ai:drawer:toggle"

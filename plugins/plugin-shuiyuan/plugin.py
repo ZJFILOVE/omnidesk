@@ -598,7 +598,8 @@ class ShuiyuanPlugin(BasePlugin):
         action_id: str,
         state: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload = {**(dict(state) if state is not None else {}), "action": action_id}
+        action = {"status": "auth_status", "refresh": "fetch_feed"}.get(action_id, action_id)
+        payload = {**(dict(state) if state is not None else {}), "action": action}
         result = await self.handle_text_source_rpc(payload)
         return {
             "ok": result.ok,

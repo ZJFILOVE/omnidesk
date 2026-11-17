@@ -251,6 +251,57 @@ async def test_extract_cdp_rendered_dom_translate_offline_and_timeout(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_fetch_open_tab_if_missing_navigates_same_origin(tmp_path: Path) -> None:
+    async def _eval(_path: str, params: dict[str, Any]) -> dict[str, Any]:
+        assert params.get("awaitPromise") is True
+        return {
+            "result": {
+                "type": "object",
+                "value": {
+                    "ok": True,
+                    "status": 200,
+                    "url": "https://x.example/home",
+                    "headers": {"content-type": "application/json"},
+                    "body": '{"data":{}}',
+                },
+            }
+        }
+
+    plugin, ctx = await _setup_plugin(tmp_path)
+    async with FakeCdpServer([{"id": "p1", "type": "page", "url": "about:blank"}], _eval) as srv:
+        res = await ctx.capabilities.call(
+            "web.fetch.v1",
+            {
+                "action": "fetch",
+                "url": "https://x.example/i/api/graphql/HomeTimeline",
+                "tab_url": "https://x.example/home",
+                "open_tab_if_missing": True,
+                "cdp_port": srv.port,
+            },
+        )
+        assert res.ok is True
+        navigations = [rpc for rpc in srv.recorded_rpcs if rpc["method"] == "Page.navigate"]
+        assert navigations
+        assert navigations[-1]["params"]["url"] == "https://x.example/home"
+
+        cross = await ctx.capabilities.call(
+            "web.fetch.v1",
+            {
+                "action": "fetch",
+                "url": "https://x.example/i/api/graphql/HomeTimeline",
+                "tab_url": "https://other.example/home",
+                "open_tab_if_missing": True,
+                "cdp_port": srv.port,
+            },
+        )
+        assert cross.ok is False
+        assert cross.data["error_code"] == "permission_denied"
+
+    await invoke_lifecycle_hook(plugin.on_unload)
+    await ctx.acleanup()
+
+
+@pytest.mark.asyncio
 async def test_fetch_same_origin_methods_size_cap_and_fail_closed(tmp_path: Path) -> None:
     delay_sec = 0.0
     oversize_mode = False

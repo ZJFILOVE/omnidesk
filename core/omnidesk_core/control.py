@@ -442,6 +442,25 @@ class ControlServer:
     def _redact(self, text: str) -> str:
         return redact_secrets(text, self._extra_secrets())
 
+    def _operation_timeout(self, op: str, params: Mapping[str, Any]) -> float:
+        """Return the server-side guard timeout for one dispatched operation.
+
+        Capability calls may legitimately run longer than the generic request
+        guard (for example, interactive curation with a 180s budget). Honour the
+        caller's validated timeout with a small grace period so the capability
+        registry can emit its own structured timeout first.
+        """
+        if op not in {"capability.call", "ui.action", "domain.invoke"}:
+            return self._request_timeout
+        raw = params.get("timeout")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return self._request_timeout
+        requested = float(raw)
+        if not math.isfinite(requested) or requested <= 0.0:
+            return self._request_timeout
+        guarded = min(requested + 1.0, MAX_STREAM_TIMEOUT_SEC)
+        return max(self._request_timeout, guarded)
+
     def _prepare_socket_path(self) -> None:
         if self._socket_path.is_symlink():
             raise PathSafetyError(f"Refusing symlinked control socket: {self._socket_path}")
@@ -591,8 +610,10 @@ class ControlServer:
 
             await self._dispatch_request(ndjson_reader, writer, raw, peer_pid, peer_uid)
         except asyncio.CancelledError:
+            logger.warning("control.sock client task cancelled")
             raise
         except Exception as exc:
+            logger.exception("control.sock dispatch failed")
             await self._write_error_safe(
                 writer, self._error_envelope(None, f"Internal control server error: {exc}", error_code=ErrorCode.INTERNAL_ERROR)
             )
@@ -663,7 +684,7 @@ class ControlServer:
             return
 
         try:
-            async with asyncio.timeout(self._request_timeout):
+            async with asyncio.timeout(self._operation_timeout(op_name, params)):
                 resp = await self._execute_op(op_name, req_id, params, req, is_jsonrpc, caller)
         except TimeoutError:
             resp = self._error_envelope(req_id, "Control request timed out", error_code=ErrorCode.TIMEOUT, jsonrpc=is_jsonrpc)
@@ -673,8 +694,19 @@ class ControlServer:
             resp = self._error_envelope(req_id, str(exc) or type(exc).__name__, error_code=ErrorCode.INTERNAL_ERROR, jsonrpc=is_jsonrpc)
 
         try:
-            await self._write_frame(writer, resp)
+            written = await self._write_frame(writer, resp)
+            if not written:
+                logger.warning(
+                    "control.sock response write failed op=%s req_id=%s",
+                    op_name,
+                    self._redact(str(req_id)),
+                )
         except _FrameTooLargeError:
+            logger.warning(
+                "control.sock response exceeded payload limit op=%s req_id=%s",
+                op_name,
+                self._redact(str(req_id)),
+            )
             err = self._error_envelope(
                 req_id,
                 f"Response exceeds {self._max_payload_bytes} byte limit",
@@ -1398,6 +1430,22 @@ class ControlServer:
                 jsonrpc=is_jsonrpc,
             )
         data = _sanitize_json_value(result, self._extra_secrets())
+        last_error = getattr(entry.source, "last_error", None)
+        if (
+            isinstance(result, (list, tuple))
+            and len(result) == 0
+            and isinstance(last_error, Mapping)
+            and last_error
+        ):
+            details = _sanitize_json_value(dict(last_error), self._extra_secrets())
+            return self._error_envelope(
+                req_id,
+                str(details.get("error") or f"{domain}.{method} returned no data"),
+                error_code=str(details.get("error_code") or ErrorCode.PLUGIN_FAULT),
+                provider_plugin_id=entry.plugin_id,
+                jsonrpc=is_jsonrpc,
+                details=details,
+            )
         return self._ok_envelope(
             req_id,
             {

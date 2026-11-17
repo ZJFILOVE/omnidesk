@@ -700,7 +700,8 @@ class RedditPlugin(BasePlugin):
 
     async def handle_tab_action(self, action_id: str, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Route declarative workspace tab actions to `handle_text_source_rpc`."""
-        payload = {**(dict(state) if state is not None else {}), "action": action_id}
+        action = {"status": "auth_status", "refresh": "fetch_feed"}.get(action_id, action_id)
+        payload = {**(dict(state) if state is not None else {}), "action": action}
         res = await self.handle_text_source_rpc(payload)
         return {"ok": res.ok, "result": res.data, "error": res.error, "ui_schema": self._build_ui_schema()}
 

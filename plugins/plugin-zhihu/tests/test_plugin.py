@@ -1228,6 +1228,8 @@ async def test_web_extract_fallback_json_cookies_v4_comments_and_domain_source(t
     assert bad_act.ok is False and bad_act.data["error_code"] == "invalid_argument"
     tab_res = await plugin.handle_tab_action("auth_status")
     assert tab_res["ok"] is True and tab_res["result"]["authenticated"] is True
+    tab_status = await plugin.handle_tab_action("status")
+    assert tab_status["ok"] is True and tab_status["result"]["authenticated"] is True
 
     await plugin.on_unload()
     await ctx.acleanup()

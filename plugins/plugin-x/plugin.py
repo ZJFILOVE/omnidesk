@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sys
@@ -84,6 +85,14 @@ _TEXT_SOURCE_ACTIONS = (
 _COMMENT_ACTIONS = ("fetch_comments", "fetch_thread")
 _SKIP_TRANSLATION_KINDS = frozenset({"code", "formula", "image"})
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+# Keep auto-translation responsive: X timelines often return far more entries
+# than the requested page size, and translating all of them blows past the
+# desktop UI request timeout. Only the visible head of the feed is translated.
+_MAX_AUTO_TRANSLATE_ITEMS = 5
+# Hard ceiling for automatic translation so the desktop UI never times out on
+# a slow LLM; untranslated text is a better outcome than missing feed data.
+_AUTO_TRANSLATE_BUDGET_SEC = 12.0
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -418,22 +427,33 @@ class XPlugin(BasePlugin):
     def target_lang(self) -> str:
         return self.auth.config.target_lang or "zh-CN"
 
-    async def translate_feed_items(self, items: Sequence[TextFeedItem]) -> list[TextFeedItem]:
+    async def translate_feed_items(
+        self,
+        items: Sequence[TextFeedItem],
+        *,
+        limit: int = _MAX_AUTO_TRANSLATE_ITEMS,
+    ) -> list[TextFeedItem]:
         targets = [
             idx
             for idx, item in enumerate(items)
             if item.title.strip()
             and not item.title_zh
             and not _CJK_RE.search(item.title)
-        ]
+        ][: max(0, limit)]
         if not targets:
             return list(items)
-        translated = await _translate_texts(
-            self.ctx,
-            [items[idx].title for idx in targets],
-            target_lang=self.target_lang(),
-            title="X timeline",
-        )
+        try:
+            translated = await asyncio.wait_for(
+                _translate_texts(
+                    self.ctx,
+                    [items[idx].title for idx in targets],
+                    target_lang=self.target_lang(),
+                    title="X timeline",
+                ),
+                timeout=_AUTO_TRANSLATE_BUDGET_SEC,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            translated = None
         if translated is None:
             return list(items)
         out = list(items)
@@ -441,8 +461,19 @@ class XPlugin(BasePlugin):
             out[idx] = out[idx].model_copy(update={"title_zh": text, "bilingual_cached": True})
         return out
 
-    async def translate_article(self, article: TextArticle) -> TextArticle:
-        return await _translate_article(self.ctx, article, self.target_lang())
+    async def translate_article(
+        self,
+        article: TextArticle,
+        *,
+        budget: float | None = _AUTO_TRANSLATE_BUDGET_SEC,
+    ) -> TextArticle:
+        try:
+            return await asyncio.wait_for(
+                _translate_article(self.ctx, article, self.target_lang()),
+                timeout=budget,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            return article
 
     def _fail(
         self,
@@ -638,7 +669,7 @@ class XPlugin(BasePlugin):
                 if not article_id:
                     return self._fail("invalid_argument", "article_id is required")
                 article, _meta = await self.fetch_article(article_id)
-                article = await self.translate_article(article)
+                article = await self.translate_article(article, budget=None)
                 return CapabilityResult.ok({"article": article.model_dump(), "translated": True})
 
             if action == "translate_text":

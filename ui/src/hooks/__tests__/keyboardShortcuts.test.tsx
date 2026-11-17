@@ -54,6 +54,9 @@ describe('useGlobalKeys shortcuts and IME isolation', () => {
     fireEvent.keyDown(window, { key: 'p', altKey: true });
     expect(onAltShortcut).toHaveBeenCalledWith('p');
 
+    fireEvent.keyDown(window, { key: '3', altKey: true });
+    expect(onAltShortcut).toHaveBeenCalledWith('3');
+
     fireEvent.keyDown(window, { key: 't', altKey: true });
     expect(onToggleTheme).toHaveBeenCalledTimes(1);
 
@@ -69,7 +72,7 @@ describe('useGlobalKeys shortcuts and IME isolation', () => {
     expect(onToggleHelp).toHaveBeenCalledTimes(1);
     expect(onCycleZone).toHaveBeenCalledTimes(1);
     expect(onSpace).toHaveBeenCalledTimes(1);
-    expect(onAltShortcut).toHaveBeenCalledTimes(1);
+    expect(onAltShortcut).toHaveBeenCalledTimes(2);
 
     act(() => {
       window.dispatchEvent(new Event('compositionend'));

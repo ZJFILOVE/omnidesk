@@ -50,6 +50,9 @@ async def test_lifecycle_registers_source_comments_and_tab() -> None:
         health = await plugin.on_health_check()
         assert health["plugin_id"] == "plugin-shuiyuan"
         assert health["ok"] is True
+        tab_status = await plugin.handle_tab_action("status")
+        assert tab_status["ok"] is True
+        assert tab_status["result"]["auth"]["authenticated"] is False
     finally:
         await plugin.on_unload()
         await ctx.acleanup("plugin-shuiyuan")

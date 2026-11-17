@@ -257,17 +257,22 @@ class DiscourseClient:
     ) -> dict[str, Any] | None:
         if self._ctx is None or not self._ctx.capabilities.has("web.fetch.v1"):
             return None
+        parsed = urllib.parse.urlsplit(url)
+        request_payload: dict[str, Any] = {
+            "url": url,
+            "method": "GET",
+            "headers": {"Accept": "application/json"},
+            "body": "",
+            "credentials": "include",
+            "timeout_ms": int(max(100, self._timeout_sec * 1000)),
+        }
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            request_payload["open_tab_if_missing"] = True
+            request_payload["tab_url"] = f"{parsed.scheme}://{parsed.netloc}/"
         try:
             res = await self._ctx.capabilities.call(
                 "web.fetch.v1",
-                {
-                    "url": url,
-                    "method": "GET",
-                    "headers": {"Accept": "application/json"},
-                    "body": "",
-                    "credentials": "include",
-                    "timeout_ms": int(max(100, self._timeout_sec * 1000)),
-                },
+                request_payload,
             )
         except Exception:
             return None

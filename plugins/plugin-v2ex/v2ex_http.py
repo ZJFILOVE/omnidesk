@@ -454,17 +454,22 @@ class HttpClient:
             for k, v in headers.items()
             if k.lower() not in {"cookie", "authorization", "host", "connection", "content-length"}
         }
+        parsed = urllib.parse.urlsplit(safe_url)
+        request_payload: dict[str, Any] = {
+            "action": "fetch",
+            "url": safe_url,
+            "method": "GET",
+            "headers": safe_headers,
+            "body": "",
+            "credentials": "include",
+            "timeout_ms": max(100, int(timeout_ms)),
+        }
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            request_payload["open_tab_if_missing"] = True
+            request_payload["tab_url"] = f"{parsed.scheme}://{parsed.netloc}/"
         res = await self._ctx.capabilities.call(
             "web.fetch.v1",
-            {
-                "action": "fetch",
-                "url": safe_url,
-                "method": "GET",
-                "headers": safe_headers,
-                "body": "",
-                "credentials": "include",
-                "timeout_ms": max(100, int(timeout_ms)),
-            },
+            request_payload,
         )
         if not res.ok or not isinstance(res.data, Mapping):
             out.error = redact_sensitive(res.error or "web.fetch.v1 请求失败", secrets)

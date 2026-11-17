@@ -223,7 +223,9 @@ async def llm_select_interactive(
     pool_books: list[dict[str, Any]],
     active_entity: Any,
     call_chat: ChatCallable,
-) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
+    *,
+    limit: int = 5,
+) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, str]:
     """Use `llm.chat.v1` with Skill rules to rank candidates and compose Chinese guidance."""
     skill_rules = (skill_dir / "references" / "interactive-repeatable-rules.md").read_text(encoding="utf-8")[:2400]
     snapshot = {
@@ -245,27 +247,60 @@ async def llm_select_interactive(
         {
             "role": "system",
             "content": (
-                "你是 OmniDesk 策展编排助手，严格遵守以下 Skill 规则且严禁编造任何 ID、URL、DOI 或曲目：\n"
+                "你是 OmniDesk 策展编排助手。输出协议（最高优先级）：只输出一个 JSON 对象，"
+                "禁止 Markdown、标题、代码围栏或任何解释。JSON 顶层必须包含 title(string)、"
+                "media_items(array)、text_items(array)、book_items(array)；每个条目必须包含从 "
+                "candidates 原样复制的 id，以及具体中文 why_recommended 与 "
+                f"listening_or_reading_cue。最多挑选 {limit} 条。严禁编造任何 ID、URL、DOI 或曲目，"
+                "只能从 candidates 中挑选；若没有契合条目，三个数组都返回空数组，不要硬凑。\n"
                 + skill_rules
-                + "\n只能从 candidates 中挑选条目，或给出需经 Apple Music preflight 核验的真实 song_id；"
-                "必须为每条附上具体中文 why_recommended 与 listening_or_reading_cue。"
             ),
         },
         {
             "role": "user",
-            "content": json.dumps({"prompt": prompt, "repeat_policy": repeat_policy, "candidates": snapshot}, ensure_ascii=False),
+            "content": json.dumps(
+                {
+                    "prompt": prompt,
+                    "repeat_policy": repeat_policy,
+                    "max_items": limit,
+                    "candidates": snapshot,
+                },
+                ensure_ascii=False,
+            ),
         },
     ]
     res = await call_chat({"messages": messages, "json_schema": schema, "temperature": 0.2})
     if not res.ok:
-        return False, [], [], [], ""
+        return False, [], [], [], "", str(res.error or "llm.chat.v1 failed")
     parsed = res.data.get("structured")
     if not isinstance(parsed, Mapping):
-        return False, [], [], [], ""
+        reply = str(res.data.get("reply") or "")
+        mentioned_song_ids = {
+            match.group(1) for match in re.finditer(r"(?:am-cn-|/song/)(\d+)", reply)
+        }
+        found: list[tuple[int, str, dict[str, Any]]] = []
+        for hint, pool in (("media", pool_media), ("text", pool_texts), ("book", pool_books)):
+            for item in pool:
+                cid = str(item.get("id") or "").strip()
+                pos = reply.find(cid) if cid else -1
+                if pos < 0 and (sid := extract_song_id(item)) and sid in mentioned_song_ids:
+                    pos = reply.find(f"am-cn-{sid}")
+                    if pos < 0:
+                        pos = reply.find(f"/song/{sid}")
+                if pos >= 0:
+                    found.append((pos, hint, {"id": cid} if cid else dict(item)))
+        if found:
+            found.sort(key=lambda row: row[0])
+            media = [cand for _, hint, cand in found if hint == "media"][:limit]
+            texts = [cand for _, hint, cand in found if hint == "text"][:limit]
+            books = [cand for _, hint, cand in found if hint == "book"][:limit]
+            return True, media, texts, books, "", "llm markdown id fallback"
+        return False, [], [], [], "", "llm.chat.v1 returned no valid JSON object"
     return (
         True,
         [dict(x) for x in (parsed.get("media_items") or []) if isinstance(x, Mapping)],
         [dict(x) for x in (parsed.get("text_items") or []) if isinstance(x, Mapping)],
         [dict(x) for x in (parsed.get("book_items") or []) if isinstance(x, Mapping)],
         str(parsed.get("title") or "").strip(),
+        "",
     )
