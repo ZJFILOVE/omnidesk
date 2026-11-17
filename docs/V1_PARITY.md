@@ -90,7 +90,7 @@ MCP 侧已有统一入口：`omnidesk_list_plugins`、`omnidesk_list_capabilitie
 
 ## 五、剩余差距
 
-- `ui/`：在线源不可用（浏览器直连 / daemon 未启动）时回退 `data/mock.ts` 示例数据，属预期行为。
+- `ui/`：仅独立浏览器预览使用 `data/mock.ts` 示例数据。Tauri 桌面模式下，daemon 不可用、数据源为空或抓取失败均显示真实状态，不回退示例；工作台支持来源切换、手动刷新、写回事件刷新与重连恢复。
 - `ui/`：笔记暂存于 `localStorage`（键 `omnidesk.notes.v1`），尚未抽象为独立 capability。
 - `shell-tauri/`：真实 libmpv 出帧测试需要 `OMNIDESK_MPV_E2E=1` + `libmpv` + `ffmpeg`，已在 `.github/workflows/ci.yml` 中强制执行。
 - Agent 上下文：`context.collect.v1` 已落地；Text/Book/Media 伴读栏会按当前条目自动附带 `context_refs`。网页/字幕等更细粒度引用仍由对应工作台继续补齐。

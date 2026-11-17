@@ -23,7 +23,7 @@
 - `core/`：`omnidesk_core` Python 微内核（`CapabilityRegistry`、`EntityBus`、`DomainRegistry`、`JobCenter`、`0600` `ConfigStore`/`SecretVault`、SQLite FTS5 `SearchIndex`、`ControlServer` `control.sock` 与 `omnidesk-pm` CLI）
 - `omnidesk_sdk/`：纯 Python 插件 SDK（`BasePlugin`、`PluginContext`、`MediaSource`/`TextSource`/`BookSource`、Pydantic 模型、`LocalConfigStore`/`LocalSecretVault`、`exec_subprocess`；统一 `SafeHttpClient` / `CookieSessionResolver` 已实现，含 SSRF/DNS rebinding 防护、跨源重定向脱敏与 HTTP CONNECT 环境代理）
 - `plugins/`：v2 纯 Python 插件集合（`plugin.json` + `plugin.py`）。当前共 25 个插件目录，全部完成 v2 迁移/新建并通过 `omnidesk-pm verify`；其中 `plugin-music` 直接复用 `/home/zhu/Projects/qwen-translator` 模块
-- `ui/`：React 19 + TypeScript + Tailwind v4 全键盘前端（2D 空间焦点引擎、Paper/Graphite 主题、五大工作台与 `F8` 伴读栏；通过 Tauri IPC 连接 `shell-tauri`，独立浏览器启动时提供离线示例预览）
+- `ui/`：React 19 + TypeScript + Tailwind v4 全键盘前端（2D 空间焦点引擎、Paper/Graphite 主题、五大工作台与 `F8` 伴读栏；通过 Tauri IPC 连接 `shell-tauri`，独立浏览器启动时提供离线示例预览）。桌面模式下可在媒体、文章、书籍工作台切换已启用来源；空结果与连接/鉴权失败显示真实状态，可手动刷新，策展写回及后端重连会自动刷新。
 - `shell-tauri/`：Rust / Tauri v2 原生桌面壳（已实现 `control.sock` NDJSON 客户端、`EntityBus` 事件转发桥、真实 mpv 播放控制、libmpv 软件渲染画布与 MPRIS2 D-Bus 服务）
 - `docs/`：跨插件能力协议、Web 登录会话规范、AI 双模策展协议与 `docs/schemas/` JSON Schema
 - `tests/`：Python 微内核、SDK、`control.sock` RPC/流式协议与插件管理集成测试
@@ -60,6 +60,12 @@ npm --prefix ui run build
 # 3. 编译并测试 Tauri 原生桌面壳
 cargo build --manifest-path shell-tauri/Cargo.toml
 cargo test --manifest-path shell-tauri/Cargo.toml
+
+# 桌面发行版：先嵌入最新前端，再运行原生壳接入真实数据
+npm --prefix ui run build
+cargo build --release --features custom-protocol --manifest-path shell-tauri/Cargo.toml
+./shell-tauri/target/release/omnidesk
+# 注意：npm run dev 的独立浏览器页面仅用于示例预览，没有 Tauri IPC。
 
 # 4. 使用 omnidesk-pm（实际已实现命令：list / init / verify / install / update / rollback / enable / disable / config / mcp-serve / reload / rpc / emit / ping）
 uv run omnidesk-pm list

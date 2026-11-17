@@ -28,6 +28,7 @@ import {
 } from '../data/mock';
 import { useLiveBooks, useLiveSpread, usePersistentVocab } from '../hooks/useLiveDomain';
 import BookShelfSidebar from './panels/BookShelfSidebar';
+import { LiveSourceControls } from './LiveSourceControls';
 import BookSpreadReader from './panels/BookSpreadReader';
 import VocabSm2Panel, { type Sm2Grade } from './panels/VocabSm2Panel';
 
@@ -129,8 +130,9 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     onFocus,
     focusedItemId,
   );
-  const [books, setBooks] = useState<BookItem[]>(BOOK_ITEMS);
-  const liveBooks = useLiveBooks();
+  const [books, setBooks] = useState<BookItem[]>(() => isTauriAvailable() ? [] : BOOK_ITEMS);
+  const [activeSourceId, setActiveSourceId] = useState('');
+  const liveBooks = useLiveBooks(activeSourceId);
   const vocabPersist = usePersistentVocab(INITIAL_VOCAB_CARDS);
   const [leftTab, setLeftTab] = useState<'shelf' | 'search'>('shelf');
   // Compact spine strip by default so the dual-page book spread maximizes above the fold at 1280x800
@@ -145,19 +147,19 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const [selectedBookId, setSelectedBookId] = useState<string>(BOOK_ITEMS[0]?.id ?? '');
   const [spreadIndexByBook, setSpreadIndexByBook] = useState<Record<string, number>>({});
   const [glossaryLocked, setGlossaryLocked] = useState<boolean>(true);
-  const [vocabCards, setVocabCards] = useState<VocabCard[]>(INITIAL_VOCAB_CARDS);
+  const [vocabCards, setVocabCards] = useState<VocabCard[]>(() => isTauriAvailable() ? [] : INITIAL_VOCAB_CARDS);
   const [activeVocabId, setActiveVocabId] = useState<string>(INITIAL_VOCAB_CARDS[0]?.id ?? '');
   const [vocabRevealed, setVocabRevealed] = useState<boolean>(true);
   const [statusMessage, setStatusMessage] = useState<string>('BabelDOC 双栏对照 + SM-2 生词台已同步');
 
   useEffect(() => {
-    if (liveBooks.live && liveBooks.items.length > 0) {
+    if (isTauriAvailable()) {
       setBooks(liveBooks.items);
     }
   }, [liveBooks.items, liveBooks.live]);
 
   useEffect(() => {
-    if (vocabPersist.live && vocabPersist.cards.length > 0) {
+    if (isTauriAvailable()) {
       setVocabCards(vocabPersist.cards);
     }
   }, [vocabPersist.cards, vocabPersist.live]);
@@ -525,7 +527,8 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
         </div>
       }
       toolbar={
-        <div className="flex w-full items-center justify-between gap-2 text-[14px] text-[var(--text-muted)]">
+        <div className="flex w-full flex-wrap items-center justify-between gap-2 text-[14px] text-[var(--text-muted)]">
+          <LiveSourceControls domain="book" feed={liveBooks} onSourceChange={setActiveSourceId} activeFocusId={activeFocusId} onFocus={emitFocus} />
           <span>双栏原版对照 · 划词支持词源拆解与生词入库</span>
           <span data-testid="book-status-message" className="truncate font-medium">
             {statusMessage}

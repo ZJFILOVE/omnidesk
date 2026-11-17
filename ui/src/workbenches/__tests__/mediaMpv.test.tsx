@@ -56,6 +56,21 @@ const playingState: MpvPlaybackState = {
   title: 'Attention Is All You Need',
 };
 
+// Playback tests supply a real-shaped domain response rather than relying on demo fallback.
+function mediaSourceResponse(args?: Record<string, unknown>) {
+  if (args?.op === 'domain.snapshot') return {
+    ok: true, data: { media_sources: [{ source_id: 'plugin-youtube', title: 'YouTube' }] }, error: '',
+  };
+  const params = args?.params as Record<string, unknown> | undefined;
+  if (args?.op === 'domain.invoke') return {
+    ok: true, error: '', data: { result: params?.method === 'fetch_items' ? [{
+      id: playingState.itemId, source_id: 'plugin-youtube', title: playingState.title,
+      kind: 'video', play_url: playingState.currentUrl, duration_sec: 600,
+    }] : [] },
+  };
+  return { ok: true, data: {}, error: '' };
+}
+
 afterEach(() => {
   cleanup();
   delete window.__TAURI__;
@@ -172,6 +187,7 @@ describe('MediaWorkbench real mpv integration', () => {
     let state = stoppedState;
     const handlers = new Map<string, (event: TauriEvent<unknown>) => void>();
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call') return mediaSourceResponse(payload?.args);
       if (cmd === 'mpv_status') {
         return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
       }
@@ -223,7 +239,7 @@ describe('MediaWorkbench real mpv integration', () => {
       expect(invoke).toHaveBeenCalledWith('mpv_status');
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '开始播放' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开始播放' }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('mpv_open', {
         args: expect.objectContaining({
@@ -277,7 +293,8 @@ describe('MediaWorkbench real mpv integration', () => {
 
   it('switches to the embedded libmpv canvas when the render API is available', async () => {
     const handlers = new Map<string, (event: TauriEvent<unknown>) => void>();
-    const invoke = vi.fn(async (cmd: string) => {
+    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call') return mediaSourceResponse(payload?.args);
       if (cmd === 'mpv_status') {
         return { ok: true, provider_plugin_id: 'mpv', data: stoppedState, error: '' };
       }

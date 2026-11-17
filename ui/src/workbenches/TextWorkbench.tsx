@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { isTauriAvailable } from '../api';
+import { LiveSourceControls } from './LiveSourceControls';
 import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
 import WorkbenchLayout, {
@@ -18,7 +20,6 @@ import {
   TEXT_ARTICLES,
   TEXT_CHANNELS,
   type TextArticle,
-  type TextChannelId,
 } from '../data/mock';
 import { useLiveArticleDetail, useLiveTextFeed, usePersistentNotes } from '../hooks/useLiveDomain';
 import CommentTreePanel, { type BilingualMode } from './panels/CommentTreePanel';
@@ -45,7 +46,8 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
     onFocus,
     focusedItemId,
   );
-  const [activeChannel, setActiveChannel] = useState<TextChannelId>('all');
+  const [activeChannel, setActiveChannel] = useState<string>(() => isTauriAvailable() ? '' : 'all');
+  const [activeSourceId, setActiveSourceId] = useState('');
   const [dailyOnly, setDailyOnly] = useState<boolean>(false);
   // Default false so 1280x800 opens as a serene 2-column 68-76ch reading sanctuary + margin notes
   const [tocOpen, setTocOpen] = useState<boolean>(false);
@@ -62,8 +64,8 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const [noteDraft, setNoteDraft] = useState<string>('');
   const [actionBanner, setActionBanner] = useState<string>('双语精读排版就绪');
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const liveFeed = useLiveTextFeed('', activeChannel === 'all' ? '' : activeChannel);
-  const articles = liveFeed.live && liveFeed.items.length > 0 ? liveFeed.items : TEXT_ARTICLES;
+  const liveFeed = useLiveTextFeed('', activeChannel, activeSourceId);
+  const articles = isTauriAvailable() ? liveFeed.items : TEXT_ARTICLES;
   const { notesByItem, addNote } = usePersistentNotes('text');
 
   useEffect(() => {
@@ -73,7 +75,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const filteredArticles = useMemo(() => {
     const q = query.trim().toLowerCase();
     return articles.filter((article) => {
-      if (activeChannel !== 'all' && article.channelId !== activeChannel) return false;
+      if (!isTauriAvailable() && activeChannel !== 'all' && article.channelId !== activeChannel) return false;
       if (dailyOnly && article.curationMode !== 'daily_immutable') return false;
       if (!q) return true;
       return (
@@ -156,7 +158,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
 
   const resetFilters = () => {
     setQuery('');
-    setActiveChannel('all');
+    setActiveChannel(isTauriAvailable() ? '' : 'all');
     setDailyOnly(false);
   };
 
@@ -215,8 +217,10 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
       }
       toolbar={
         <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
+          <LiveSourceControls domain="text" feed={liveFeed} activeFocusId={activeFocusId} onFocus={emitFocus}
+            onSourceChange={(sourceId) => { setActiveSourceId(sourceId); setActiveChannel(''); }} />
           <SegmentedPills
-            options={TEXT_CHANNELS}
+            options={isTauriAvailable() ? [{ id: '', label: '默认频道' }, ...liveFeed.channels] : TEXT_CHANNELS}
             value={activeChannel}
             onChange={setActiveChannel}
             focusPrefix="text:channel:"

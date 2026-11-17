@@ -18,6 +18,7 @@ import { MEDIA_ITEMS, type ChapterSegment, type MediaItem } from '../data/mock';
 import { useLiveMedia } from '../hooks/useLiveDomain';
 import { enqueueEphemeralTrack, runMediaInspectorCapability } from './mediaActions';
 import { MediaSourceToolbar } from './MediaSourceToolbar';
+import { LiveSourceControls } from './LiveSourceControls';
 import MediaInspector from './panels/MediaInspector';
 import { useMediaLyrics } from './useMediaLyrics';
 import { useMpvPlayback, type MpvPlaybackController } from './useMpvPlayback';
@@ -71,7 +72,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       ? activeCategory
       : (categoryOptions[0] ?? activeCategory);
   const mediaItems = useMemo(
-    () => (liveMedia.live && liveMedia.items.length > 0 ? liveMedia.items : MEDIA_ITEMS),
+    () => (isTauriAvailable() ? liveMedia.items : MEDIA_ITEMS),
     [liveMedia.items, liveMedia.live],
   );
   const [previewPlaying, setPreviewPlaying] = useState<boolean>(false);
@@ -491,6 +492,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       }
       toolbar={
         <div className="flex w-full flex-col gap-2.5">
+          <LiveSourceControls domain="media" feed={liveMedia} activeFocusId={activeFocusId} onFocus={emitFocus} />
           <MediaSourceToolbar
             sources={liveMedia.sources}
             sourceId={activeSourceId || liveMedia.sourceId}

@@ -4,6 +4,9 @@ import {
   domainSources,
   invokeDomain,
   isTauriAvailable,
+  listenTauriEvent,
+  type BusEventEnvelope,
+  type EventBridgeSnapshot,
   type DomainSourceDescriptor,
   type RpcResult,
 } from '../api';
@@ -278,6 +281,7 @@ export interface LiveFeed<T> {
   items: T[];
   sources: DomainSourceDescriptor[];
   categories: string[];
+  channels: { id: string; label: string }[];
   sourceId: string;
   live: boolean;
   loading: boolean;
@@ -296,6 +300,7 @@ function useLiveSource<T>(
   const [items, setItems] = useState<T[]>([]);
   const [sources, setSources] = useState<DomainSourceDescriptor[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
+  const [channels, setChannels] = useState<{ id: string; label: string }[]>([]);
   const [sourceId, setSourceId] = useState('');
   const [live, setLive] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -313,6 +318,34 @@ function useLiveSource<T>(
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
+    let disposed = false;
+    const unlisteners: (() => void | Promise<void>)[] = [];
+    const register = async (subscription: Promise<(() => void | Promise<void>) | null>) => {
+      try {
+        const unlisten = await subscription;
+        if (!unlisten) return;
+        if (disposed) await unlisten();
+        else unlisteners.push(unlisten);
+      } catch {
+        // Manual refresh remains available if the event bridge is unavailable.
+      }
+    };
+    void register(listenTauriEvent<BusEventEnvelope>('omnidesk:bus', (event) => {
+      const domains = event.payload?.domains;
+      if (event.topic === 'plugin.state_changed' ||
+          (event.topic === 'entity.recommend.updated' &&
+            (!Array.isArray(domains) || domains.includes(domain)))) reload();
+    }));
+    void register(listenTauriEvent<EventBridgeSnapshot>('omnidesk:bridge-status', (event) => {
+      if (event.status === 'connected') reload();
+    }));
+    return () => {
+      disposed = true;
+      for (const unlisten of unlisteners) void Promise.resolve().then(unlisten).catch(() => {});
+    };
+  }, [domain, reload]);
+
+  useEffect(() => {
     if (!isTauriAvailable()) {
       setLive(false);
       setLoading(false);
@@ -321,6 +354,8 @@ function useLiveSource<T>(
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setItems([]);
+    setLive(false);
     (async () => {
       const sourcesRes = await domainSources(domain);
       if (cancelled || !mounted.current) return;
@@ -334,17 +369,31 @@ function useLiveSource<T>(
       setSources(list);
       if (list.length === 0) {
         setCategories([]);
+        setChannels([]);
+        setSourceId('');
+        setError('尚无已启用的数据源，请在插件中心启用对应插件后刷新。');
         setLive(false);
         setLoading(false);
         return;
       }
-      const preferred = preferredSourceId && list.some((s) => s.sourceId === preferredSourceId)
-        ? preferredSourceId
-        : '';
-      const chosen = preferred || (
-        sourceId && list.some((s) => s.sourceId === sourceId) ? sourceId : list[0].sourceId
-      );
+      const chosen = preferredSourceId || list[0].sourceId;
+      setSourceId(chosen);
+      if (!list.some((s) => s.sourceId === chosen)) {
+        setCategories([]);
+        setChannels([]);
+        setError('所选数据源已停用，请切换来源或在插件中心重新启用。');
+        setLoading(false);
+        return;
+      }
       setCategories(list.find((source) => source.sourceId === chosen)?.categories ?? []);
+      if (domain === 'text') {
+        const channelResult = await invokeDomain<unknown[]>({ domain, sourceId: chosen, method: 'channels' });
+        if (cancelled || !mounted.current) return;
+        setChannels(channelResult.ok ? arr(channelResult.data).map((entry) => {
+          const channel = dict(entry);
+          return { id: str(channel.id), label: str(channel.name, str(channel.id)) };
+        }).filter((channel) => channel.id) : []);
+      }
       const res: RpcResult<unknown> = await invokeDomain({
         domain,
         sourceId: chosen,
@@ -368,9 +417,8 @@ function useLiveSource<T>(
         .filter((entry): entry is T => entry !== null);
       setSourceId(chosen);
       setItems(mapped);
-      // An empty payload means the source is reachable but has nothing configured yet;
-      // keep the workbench on its offline sample data instead of showing an empty LIVE view.
-      setLive(mapped.length > 0);
+      // A successful empty response is still live data, never a request for demo content.
+      setLive(true);
     })().catch((err: unknown) => {
       if (cancelled || !mounted.current) return;
       setLoading(false);
@@ -381,23 +429,27 @@ function useLiveSource<T>(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [domain, method, payloadKey, sourceId, nonce, preferredSourceId, ...deps]);
+  }, [domain, method, payloadKey, nonce, preferredSourceId, ...deps]);
 
-  return { items, sources, categories, sourceId, live, loading, error, reload };
+  return { items, sources, categories, channels, sourceId, live, loading, error, reload };
 }
 
-export function useLiveTextFeed(query = '', channelId = ''): LiveFeed<TextArticle> {
+export function useLiveTextFeed(query = '', channelId = '', sourceId = ''): LiveFeed<TextArticle> {
   return useLiveSource<TextArticle>(
     'text',
     'fetch_feed',
     { query, channel_id: channelId, page: 1 },
     (raw, sid) => toTextArticle(raw, sid),
     [query, channelId],
+    sourceId,
   );
 }
 
-export function useLiveBooks(): LiveFeed<BookItem> {
-  return useLiveSource<BookItem>('book', 'list_books', {}, (raw) => toBookItem(raw), []);
+export function useLiveBooks(sourceId = ''): LiveFeed<BookItem> {
+  return useLiveSource<BookItem>('book', 'list_books', {}, (raw, sid) => {
+    const book = toBookItem(raw);
+    return book ? { ...book, sourcePlugin: sid } : null;
+  }, [], sourceId);
 }
 
 export function useLiveMedia(
@@ -440,6 +492,8 @@ export function useLiveArticleDetail(
       return;
     }
     let cancelled = false;
+    setBlocks([]);
+    setComments([]);
     setLoading(true);
     setError(null);
     (async () => {
@@ -492,6 +546,7 @@ export function useLiveSpread(bookId: string, page = 1, sourceId?: string): Live
       return;
     }
     let cancelled = false;
+    setSpreads([]);
     setLoading(true);
     setError(null);
     (async () => {
@@ -546,6 +601,7 @@ export function usePersistentVocab(fallback: VocabCard[]): VocabPersistence {
       return;
     }
     let cancelled = false;
+    setError(null);
     (async () => {
       const res = await callCapability<{ cards?: unknown[] }>({
         capability: 'vocab.sm2.v1',
@@ -553,23 +609,26 @@ export function usePersistentVocab(fallback: VocabCard[]): VocabPersistence {
       });
       if (cancelled) return;
       if (!res.available) {
-        setCards(fallback);
+        setCards([]);
         setLive(false);
         return;
       }
       if (!res.ok) {
         setError(res.error.message);
-        setCards(fallback);
+        setCards([]);
         setLive(false);
         return;
       }
       const mapped = arr(res.data.cards)
         .map(toVocabCard)
         .filter((c): c is VocabCard => c !== null);
-      setCards(mapped.length > 0 ? mapped : fallback);
+      setCards(mapped);
       setLive(true);
-    })().catch(() => {
-      if (!cancelled) setCards(fallback);
+    })().catch((err: unknown) => {
+      if (cancelled) return;
+      setCards([]);
+      setLive(false);
+      setError(err instanceof Error ? err.message : String(err));
     });
     return () => {
       cancelled = true;
