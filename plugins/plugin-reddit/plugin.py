@@ -727,7 +727,8 @@ class RedditPlugin(BasePlugin):
         action = {"status": "auth_status", "refresh": "fetch_feed"}.get(action_id, action_id)
         payload = {**(dict(state) if state is not None else {}), "action": action}
         res = await self.handle_text_source_rpc(payload)
-        return {"ok": res.ok, "result": res.data, "error": res.error, "ui_schema": self._build_ui_schema()}
+        return {"ok": res.ok, "result": res.data, "error": res.error,
+                "error_code": (res.data or {}).get("error_code", ""), "ui_schema": self._build_ui_schema()}
 
 
 def create_plugin() -> BasePlugin:

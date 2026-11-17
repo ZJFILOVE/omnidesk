@@ -44,7 +44,7 @@ export interface StreamResolverDescriptor {
 }
 
 export type TextChannelId = 'all' | 'journal' | 'news' | 'reddit' | 'linuxdo' | 'zhihu';
-export interface ArticleBlock { id: string; kind: 'heading' | 'paragraph' | 'quote' | 'code' | 'formula' | 'image'; original: string; translated?: string; language?: string; }
+export interface ArticleBlock { id: string; kind: 'heading' | 'paragraph' | 'quote' | 'code' | 'formula' | 'image'; original: string; translated?: string; language?: string; imageUrl?: string; alt?: string; caption?: string; }
 export interface CommentNode { id: string; author: string; roleBadge?: string; timeAgo: string; score: number; original: string; translated?: string; children?: CommentNode[]; }
 
 export interface TextArticle {

@@ -33,6 +33,30 @@ def _load_plugin_module() -> Any:
     return mod
 
 
+def test_rich_images_preserve_caption_inline_order_and_answer_boundaries() -> None:
+    from zhihu_parser import parse_question_with_answers_api_json, parse_rich_html_to_paragraphs
+
+    content = '''<p>图片之前<span><img src="data:image/gif;base64,AAAA" data-actualsrc="//pic1.zhimg.com/test.jpg" alt="插图"></span>图片之后</p>
+      <figure><img data-original="https://pic1.zhimg.com/full.jpg" src="https://pic1.zhimg.com/thumb.jpg"><figcaption>这是图注</figcaption></figure>
+      <p><img class="ztext-math" data-tex="x^2" src="https://www.zhihu.com/equation"></p>
+      <img src="javascript:alert(1)"><img src="file:///etc/passwd">'''
+    blocks = parse_rich_html_to_paragraphs(content)
+    assert [p.kind for p in blocks] == ["paragraph", "image", "paragraph", "image", "formula"]
+    assert [p.original for p in blocks if p.kind == "paragraph"] == ["图片之前", "图片之后"]
+    assert blocks[1].image_url == "https://pic1.zhimg.com/test.jpg"
+    assert blocks[1].alt == "插图"
+    assert blocks[3].image_url.endswith("/full.jpg")
+    assert blocks[3].caption == "这是图注"
+    assert blocks[4].original == "x^2"
+    article = parse_question_with_answers_api_json({"id": "123", "title": "问题"}, {"data": [
+        {"author": {"name": "甲"}, "content": content},
+        {"author": {"name": "乙"}, "content": "<p>第二条回答</p>"},
+    ]})
+    assert article is not None
+    assert [p.id for p in article.paragraphs if p.kind == "heading"] == ["ans-1-hdr", "ans-2-hdr"]
+    assert article.paragraphs[-1].original == "第二条回答"
+
+
 def _make_ctx(tmp_path: Path, *, manifest_data: dict[str, Any] | None = None) -> PluginContext:
     manifest = manifest_data or json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     return PluginContext(

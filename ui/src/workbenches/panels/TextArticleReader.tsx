@@ -1,5 +1,6 @@
 import React, { useRef } from 'react';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
+import { ArticleImage } from '../../components/ArticleImage';
 import SelectionBubble, { type SelectionActionEvent } from '../../components/SelectionBubble';
 import {
   FocusButton,
@@ -59,6 +60,9 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
   const blocksRef = useRef<HTMLDivElement | null>(null);
 
   const renderBlock = (block: ArticleBlock) => {
+    if (block.kind === 'image' && block.imageUrl) {
+      return <ArticleImage key={block.id} url={block.imageUrl} alt={block.alt} caption={block.caption} />;
+    }
     const blockFocusId = `text:block:${article.id}:${block.id}`;
     const isFocused = activeFocusId === blockFocusId;
     const translatedKind =
@@ -85,7 +89,9 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
               ? 'px-4 py-3.5'
               : block.kind === 'quote'
                 ? 'border-l-[3px] py-2 pr-3 pl-4'
-                : 'px-3 py-2.5 hover:bg-[var(--hover-fill)]'
+                : block.kind === 'heading'
+                  ? 'mt-8 border-t border-[var(--border-subtle)] px-3 pt-6 pb-3'
+                  : 'px-3 py-2.5 hover:bg-[var(--hover-fill)]'
           }`,
         )}
         style={{

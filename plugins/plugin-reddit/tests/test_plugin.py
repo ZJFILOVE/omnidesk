@@ -39,6 +39,50 @@ def _load_plugin_module() -> Any:
     return mod
 
 
+def test_network_security_wall_after_large_stylesheet_is_not_parse_error() -> None:
+    body = '<html><style>' + '/* stylesheet */' * 2000 + "</style><body>You've been blocked by network security.</body></html>"
+    resp = reddit_http.HttpResponse(ok=True, status_code=200, body=body)
+    assert reddit_http.classify_http_failure(resp, expect_json=False)[0] == "cloudflare_blocked"
+    resp.body = '<shreddit-post id="t3_abc123" post-title="Help">' + body + '</shreddit-post>'
+    assert reddit_http.classify_http_failure(resp, expect_json=False)[0] == ""
+
+
+def test_reddit_gallery_single_image_and_markdown_images() -> None:
+    post = _sample_listing_page1("rust")
+    data = post["data"]["children"][0]["data"]
+    data.update({
+        "gallery_data": {"items": [{"media_id": "second", "caption": "Figure 2"}, {"media_id": "first"}]},
+        "media_metadata": {
+            "first": {"status": "valid", "e": "Image", "s": {"u": "https://i.redd.it/one.png"}},
+            "second": {"status": "valid", "e": "Image", "s": {"u": "https://preview.redd.it/two.png?width=900&amp;format=png"}},
+        },
+    })
+    feed = reddit_parser.parse_listing_feed(json.dumps(post))
+    article = reddit_parser.parse_post_and_comments(json.dumps([post])).article
+    images = [p for p in article.paragraphs if p.kind == "image"]
+    assert [p.image_url for p in images] == ["https://preview.redd.it/two.png?width=900&format=png", "https://i.redd.it/one.png"]
+    assert images[0].caption == "Figure 2"
+    assert feed.items[0].cover_url == article.cover_url == images[0].image_url
+    data.pop("gallery_data")
+    data["url_overridden_by_dest"] = "https://i.redd.it/single.jpg"
+    assert reddit_parser.parse_listing_feed(json.dumps(post)).items[0].cover_url.endswith("/single.jpg")
+    blocks = reddit_parser.parse_markdown_to_paragraphs("before\n\n![diagram](https://i.redd.it/diagram.png)\n\nafter")
+    assert [p.kind for p in blocks] == ["paragraph", "image", "paragraph"]
+    assert blocks[1].alt == "diagram"
+
+
+def test_shreddit_images_and_text_body() -> None:
+    page = '''<html><body><shreddit-post post-id="t3_img123" post-title="Image post" subreddit-name="rust">
+      <img class="avatar" src="https://example.com/avatar.png">
+      <img id="post-image" src="https://i.redd.it/picture.png" alt="Plot">
+      <div slot="text-body"><p>Body text</p><img src="https://i.redd.it/inline.png"></div>
+    </shreddit-post></body></html>'''
+    article = reddit_parser.parse_post_html(page).article
+    assert article.paragraphs[0].original == "Body text"
+    assert [p.image_url for p in article.paragraphs if p.kind == "image"] == ["https://i.redd.it/picture.png", "https://i.redd.it/inline.png"]
+    assert reddit_parser.parse_listing_html(page).items[0].cover_url == article.cover_url
+
+
 def _sample_listing_page1(sub: str = "cpp", after: str = "t3_page2") -> dict[str, Any]:
     return {
         "kind": "Listing",

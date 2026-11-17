@@ -195,6 +195,9 @@ class TextParagraph(BaseModel):
     original: str = ""
     translated: str = ""
     language: str = ""
+    image_url: str = Field(default="", validation_alias=AliasChoices("image_url", "imageUrl"))
+    alt: str = ""
+    caption: str = ""
 
 
 class CommentNode(BaseModel):

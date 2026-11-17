@@ -337,7 +337,7 @@ def _extract_code_language(pre_node: _Node) -> str:
 
 def _extract_formula(node: _Node) -> str:
     if node.tag == "img":
-        df = node.attrs.get("data-formula", "").strip()
+        df = (node.attrs.get("data-formula") or node.attrs.get("data-tex") or "").strip()
         if df:
             return df
     if node.tag == "span" and node.has_class("ztext-math"):
@@ -427,6 +427,48 @@ def _walk_rich_nodes(node: _Node, out: list[TextParagraph], id_prefix: str) -> N
         _emit_paragraph(out, id_prefix, "formula", direct_formula)
         return
 
+    if node.tag == "img":
+        for key in ("data-original", "data-actualsrc", "data-src", "src"):
+            url = decode_html_entities(node.attrs.get(key, "")).strip()
+            if url.startswith("//"):
+                url = "https:" + url
+            try:
+                parsed = urllib.parse.urlsplit(url)
+            except ValueError:
+                continue
+            if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password:
+                continue
+            alt = node.attrs.get("alt", "").strip()
+            out.append(TextParagraph(id=f"{id_prefix}-{len(out) + 1}", kind="image", image_url=url, alt=alt))
+            break
+        return
+
+    # Keep prose on either side of inline images in its original order.
+    if node.tag in {"p", "blockquote"} and _has_content_image(node):
+        parts: list[str] = []
+        kind = "quote" if node.tag == "blockquote" else "paragraph"
+
+        def flush() -> None:
+            _emit_paragraph(out, id_prefix, kind, "".join(parts))
+            parts.clear()
+
+        def visit(child: _Node) -> None:
+            if child.tag in {"script", "style", "noscript"}:
+                return
+            if child.tag == "img" and not _extract_formula(child):
+                flush()
+                _walk_rich_nodes(child, out, id_prefix)
+            elif _has_content_image(child):
+                for nested in child.children:
+                    visit(nested)
+            else:
+                _collect_inline(child, parts, [])
+
+        for child in node.children:
+            visit(child)
+        flush()
+        return
+
     if node.tag in _HEADING_TAGS:
         parts: list[str] = []
         formulas: list[str] = []
@@ -462,16 +504,14 @@ def _walk_rich_nodes(node: _Node, out: list[TextParagraph], id_prefix: str) -> N
         return
 
     if node.tag == "figure":
-        formulas: list[str] = []
-        caption = ""
+        caption = " ".join(_collapse_spaces(_collect_raw_text(ch)) for ch in node.children if ch.tag == "figcaption").strip()
+        start = len(out)
         for ch in node.children:
-            if ch.tag == "figcaption":
-                caption = _collapse_spaces(_collect_raw_text(ch))
-            else:
-                _collect_inline(ch, [], formulas)
-        if formulas:
-            for f in formulas:
-                _emit_paragraph(out, id_prefix, "formula", f)
+            if ch.tag != "figcaption":
+                _walk_rich_nodes(ch, out, id_prefix)
+        images = [p for p in out[start:] if p.kind == "image"]
+        if images:
+            images[-1].caption = caption
         elif caption:
             _emit_paragraph(out, id_prefix, "paragraph", f"[图注] {caption}")
         return
@@ -495,6 +535,12 @@ def _walk_rich_nodes(node: _Node, out: list[TextParagraph], id_prefix: str) -> N
 
     for ch in node.children:
         _walk_rich_nodes(ch, out, id_prefix)
+
+
+def _has_content_image(node: _Node) -> bool:
+    if node.tag in {"script", "style", "noscript"}:
+        return False
+    return (node.tag == "img" and not _extract_formula(node)) or any(_has_content_image(ch) for ch in node.children)
 
 
 def extract_initial_data(html_text: str) -> dict[str, Any] | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping
@@ -61,7 +62,6 @@ _CLOUDFLARE_MARKERS = (
     "/cdn-cgi/challenge-platform",
     "enable javascript and cookies to continue",
     "checking your browser before accessing",
-    "you've been blocked by network security",
 )
 _LOGIN_MARKERS = (
     "log in to reddit",
@@ -121,6 +121,13 @@ def _is_cloudflare_response(status_code: int, headers: Mapping[str, str], body: 
         return True
     head = body[:8192].lower()
     if any(marker in head for marker in _CLOUDFLARE_MARKERS):
+        return True
+    # The network-security message follows a large inline stylesheet. A real
+    # post discussing that message must still remain readable.
+    bounded = body[:MAX_RESPONSE_BYTES].lower()
+    if "you've been blocked by network security" in bounded and not re.search(
+        r'<shreddit-post\b|<div\b[^>]*\bdata-fullname=[\"\']t3_', bounded
+    ):
         return True
     if status_code in {403, 503} and "cloudflare" in head and ("ray id" in head or "cf-ray" in headers):
         return True
@@ -624,7 +631,7 @@ class RedditHttpClient:
                 status_code=403,
                 final_url=final_url,
                 body=html_body[:2048],
-                error="web.extract.v1 页面仍处于 Cloudflare 验证拦截状态",
+                error="Reddit 页面被网络安全验证拦截，请通过 Chrome 登录完成验证，关闭登录窗口后同步 Cookie 并重试",
                 error_code="cloudflare_blocked",
                 transport="web.extract.v1",
             )

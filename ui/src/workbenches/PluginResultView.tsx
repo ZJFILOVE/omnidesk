@@ -1,6 +1,8 @@
 import { ExternalLink as ExternalLinkIcon, FileText, MessageSquare, Star } from 'lucide-react';
 import { MarkdownRenderer } from '../components/MarkdownRenderer';
 import { ExternalLink } from '../components/ExternalLink';
+import { ArticleImage } from '../components/ArticleImage';
+import { MediaCover } from '../components/MediaCover';
 
 type Dict = Record<string, unknown>;
 
@@ -48,6 +50,7 @@ function FeedItemCard({ item, index, onOpenItem }: { item: Dict; index: number; 
   return (
     <article className="rounded-[11px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 transition-colors hover:border-[var(--border-line)]">
       <div className="flex items-start gap-3">
+        {text(item.cover_url || item.coverUrl) ? <div className="relative h-20 w-24 shrink-0 overflow-hidden rounded-lg"><MediaCover url={text(item.cover_url || item.coverUrl)} /></div> : null}
         <span className="mt-0.5 inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-[var(--bg-soft)] font-mono text-[12px] text-[var(--text-muted)]">
           {index + 1}
         </span>
@@ -145,7 +148,16 @@ function ArticleView({ article }: { article: Dict }) {
             const kind = text(block.kind).toLowerCase();
             const original = text(block.original || block.text || block.content);
             const translated = text(block.translated);
+            if (kind === 'image' && text(block.image_url || block.imageUrl)) {
+              return <ArticleImage key={text(block.id) || index} url={text(block.image_url || block.imageUrl)} alt={text(block.alt)} caption={text(block.caption)} />;
+            }
             if (!original && !translated) return null;
+            if (kind === 'heading') {
+              return <header key={text(block.id) || index} className="mt-8 border-t border-[var(--border-line)] pt-6 pb-2">
+                <h3 className="text-lg font-semibold leading-relaxed text-[var(--text-primary)]">{original}</h3>
+                {translated ? <p className="mt-2 text-sm text-[var(--text-muted)]">{translated}</p> : null}
+              </header>;
+            }
             if (kind === 'code') {
               return (
                 <pre
@@ -161,6 +173,7 @@ function ArticleView({ article }: { article: Dict }) {
                 {original ? (
                   <MarkdownRenderer
                     content={original}
+                    blockKind={kind === 'quote' || kind === 'formula' || kind === 'image' ? kind : 'paragraph'}
                     compact
                     className="text-[14px] leading-[1.72] text-[var(--text-primary)]"
                   />

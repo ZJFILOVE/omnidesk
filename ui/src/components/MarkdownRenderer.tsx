@@ -198,6 +198,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             alt={alt ?? ''}
             title={title}
             loading="lazy"
+            referrerPolicy="no-referrer"
             className="my-3 max-w-full rounded-[12px]"
             style={{ boxShadow: 'var(--shadow-soft)' }}
           />

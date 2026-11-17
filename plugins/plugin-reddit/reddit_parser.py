@@ -163,6 +163,53 @@ def _safe_external_or_reddit_url(raw_url: str, fallback: str = "") -> str:
     return fallback
 
 
+def _post_images(data: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Extract galleries in display order, then single images/previews."""
+    images: list[tuple[str, str]] = []
+
+    def add(raw: str, caption: str = "") -> None:
+        url = _safe_external_or_reddit_url(raw)
+        if url and url not in {item[0] for item in images}:
+            images.append((url, decode_html_entities(caption)))
+
+    gallery = data.get("gallery_data")
+    metadata = data.get("media_metadata")
+    if isinstance(gallery, Mapping) and isinstance(metadata, Mapping):
+        entries = gallery.get("items")
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, Mapping):
+                continue
+            media = metadata.get(_read_str(entry, "media_id"))
+            if not isinstance(media, Mapping) or media.get("status") != "valid":
+                continue
+            source = media.get("s")
+            if isinstance(source, Mapping) and media.get("e") in {"Image", "AnimatedImage"}:
+                add(_read_str(source, "gif") or _read_str(source, "u"), _read_str(entry, "caption"))
+    if not images:
+        direct = _read_str(data, "url_overridden_by_dest") or _read_str(data, "url")
+        if re.search(r"\.(?:png|jpe?g|gif|webp|avif)$", urllib.parse.urlsplit(direct).path, re.I):
+            add(direct)
+    if not images:
+        preview = data.get("preview")
+        entries = preview.get("images") if isinstance(preview, Mapping) else None
+        for entry in entries if isinstance(entries, list) else []:
+            source = entry.get("source") if isinstance(entry, Mapping) else None
+            if isinstance(source, Mapping):
+                add(_read_str(source, "url"))
+    if not images:
+        parents = data.get("crosspost_parent_list")
+        if isinstance(parents, list) and parents and isinstance(parents[0], Mapping):
+            # Only one parent hop; malformed nested crossposts must stay bounded.
+            parent = {k: v for k, v in parents[0].items() if k != "crosspost_parent_list"}
+            images.extend(_post_images(parent))
+    return images
+
+
+def _image_paragraphs(images: list[tuple[str, str]], prefix: str = "image") -> list[TextParagraph]:
+    return [TextParagraph(id=f"{prefix}-{idx}", kind="image", image_url=url, caption=caption, alt=caption)
+            for idx, (url, caption) in enumerate(images, start=1)]
+
+
 def resolve_article_target(
     article_id_or_url: str,
     *,
@@ -351,6 +398,15 @@ def parse_markdown_to_paragraphs(markdown: str, id_prefix: str = "p") -> list[Te
         if trimmed in {"---", "***", "___"}:
             _flush_text()
             continue
+
+        image_match = re.fullmatch(r'!\[([^\]]*)\]\(<?(https?://[^\s>]+?)>?(?:\s+"[^"]*")?\)', trimmed)
+        if image_match:
+            image_url = _safe_external_or_reddit_url(image_match[2])
+            if image_url:
+                _flush_text()
+                out.append(TextParagraph(id=f"{id_prefix}{seq}", kind="image", image_url=image_url, alt=image_match[1]))
+                seq += 1
+                continue
 
         heading_match = _ATX_HEADING_RE.match(trimmed)
         if heading_match:
@@ -570,6 +626,7 @@ def parse_listing_feed(json_text: str, fallback_subreddit: str = "") -> FeedList
         if not is_self and domain and not domain.startswith("self."):
             tags.append(domain)
 
+        images = _post_images(d)
         items.append(
             TextFeedItem(
                 id=f"reddit:{sub}:{post_id}" if sub else f"reddit:t3_{post_id}",
@@ -582,6 +639,7 @@ def parse_listing_feed(json_text: str, fallback_subreddit: str = "") -> FeedList
                 author=author,
                 published_at=published_at,
                 url=url,
+                cover_url=images[0][0] if images else _safe_external_or_reddit_url(_read_str(d, "thumbnail")),
                 tags=tags,
                 comment_count=max(0, _read_int(d, "num_comments", 0)),
                 score=_read_int(d, "score", _read_int(d, "ups", 0)),
@@ -667,6 +725,9 @@ def parse_post_and_comments(json_text: str, fallback_post_id: str = "") -> Artic
         selftext = decode_html_entities(_read_str(post_data, "selftext"))
         is_self = _read_bool(post_data, "is_self", bool(selftext))
         paragraphs = parse_markdown_to_paragraphs(selftext, "p") if selftext.strip() else []
+        images = _post_images(post_data)
+        existing_image_urls = {p.image_url for p in paragraphs if p.kind == "image"}
+        paragraphs.extend(_image_paragraphs([image for image in images if image[0] not in existing_image_urls]))
 
         safe_ext = _safe_external_or_reddit_url(ext_url)
         if not is_self and safe_ext and safe_ext != article_url:
@@ -701,6 +762,7 @@ def parse_post_and_comments(json_text: str, fallback_post_id: str = "") -> Artic
             authors=author_prefixed,
             published_at=published,
             url=article_url,
+            cover_url=images[0][0] if images else "",
             tags=tags,
             paragraphs=paragraphs,
             comments=comments,
@@ -881,6 +943,17 @@ class _OldRedditHtmlParser(HTMLParser):
             return
         if t == "br" and self._capture == "body":
             self._buf.append("\n")
+        if t == "img":
+            cur = self._current_thing()
+            attrs_dict = dict(attrs)
+            # Avatars and award icons are not post content.
+            if cur is not None and not cur["is_comment"] and (
+                self._capture == "body" or attrs_dict.get("id") == "post-image"
+                or attrs_dict.get("slot") == "post-media"
+            ):
+                url = _safe_external_or_reddit_url(attrs_dict.get("data-src") or attrs_dict.get("src") or "")
+                if url and url not in {image[0] for image in cur.get("images", [])}:
+                    cur.setdefault("images", []).append((url, attrs_dict.get("alt") or ""))
         if t in _VOID_HTML_TAGS:
             return
 
@@ -909,7 +982,7 @@ class _OldRedditHtmlParser(HTMLParser):
                 return
 
         if t == "shreddit-post":
-            fullname = attr_map.get("id", "").strip()
+            fullname = (attr_map.get("id") or attr_map.get("post-id") or "").strip()
             pid = strip_thing_prefix(fullname)
             if pid:
                 score_raw = attr_map.get("score", "0").strip()
@@ -959,7 +1032,7 @@ class _OldRedditHtmlParser(HTMLParser):
                 self._buf = []
                 if not cur["url"]:
                     cur["url"] = attr_map.get("href", "").strip()
-            elif t == "div" and "md" in cls_tokens and not cur["body"]:
+            elif t == "div" and ("md" in cls_tokens or attr_map.get("slot") in {"text-body", "comment"}) and not cur["body"]:
                 self._capture = "body"
                 self._capture_depth = len(self.stack)
                 self._capture_thing = cur
@@ -1073,6 +1146,7 @@ def parse_listing_html(html_text: str, fallback_subreddit: str = "") -> FeedList
                 excerpt=_make_excerpt(t.get("body") or f"{sub_prefixed} · {author}"),
                 author=author,
                 url=url,
+                cover_url=(t.get("images") or [("", "")])[0][0],
                 tags=["Reddit", sub_prefixed],
                 score=int(t.get("score") or 0),
             )
@@ -1100,6 +1174,7 @@ def parse_post_html(html_text: str, fallback_post_id: str = "") -> ArticleParseR
     author_prefixed = author if author.startswith("u/") else f"u/{author}"
     body = p.get("body") or p["title"]
     paragraphs = parse_markdown_to_paragraphs(body, "p")
+    paragraphs.extend(_image_paragraphs(p.get("images") or []))
     comments = [
         _build_comment_node_from_html(c)
         for c in things
@@ -1114,6 +1189,7 @@ def parse_post_html(html_text: str, fallback_post_id: str = "") -> ArticleParseR
         title=p["title"],
         subtitle=f"{sub_prefixed} · {author_prefixed} · ▲ {int(p.get('score') or 0)}",
         authors=author_prefixed,
+        cover_url=(p.get("images") or [("", "")])[0][0],
         url=_safe_external_or_reddit_url(
             p.get("permalink") or p.get("url") or "",
             f"https://www.reddit.com/comments/{pid}",

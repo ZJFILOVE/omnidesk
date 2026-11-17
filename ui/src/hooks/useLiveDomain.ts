@@ -137,6 +137,9 @@ function toBlocks(raw: unknown): TextArticle['blocks'] {
       original: str(block.original, str(block.text)),
       translated: str(block.translated) || undefined,
       language: str(block.language) || undefined,
+      imageUrl: str(block.image_url, str(block.imageUrl)) || undefined,
+      alt: str(block.alt) || undefined,
+      caption: str(block.caption) || undefined,
     };
   });
 }
