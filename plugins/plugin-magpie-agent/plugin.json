@@ -40,10 +40,37 @@
     "config:read",
     "config:write",
     "secret:vault",
-    "process:codex"
+    "process:codex",
+    "process:agy"
   ],
   "verify_cmd": "uv run pytest -q",
   "config_schema": [
+    {
+      "key": "translation_gateway_url",
+      "label": "翻译接口 / 端口（可选）",
+      "type": "string",
+      "default": "",
+      "description": "本地 OpenAI 兼容网关地址；留空沿用 Magpie 网关"
+    },
+    {
+      "key": "translation_models",
+      "label": "独立翻译模型",
+      "type": "string",
+      "default": "",
+      "description": "模型 ID，多个用英文逗号分隔并按批次轮流使用；留空沿用当前路由"
+    },
+    {
+      "key": "translation_concurrency",
+      "label": "翻译并发数（1–8）",
+      "type": "int",
+      "default": 4
+    },
+    {
+      "key": "translation_batch_size",
+      "label": "每批翻译段数（1–32）",
+      "type": "int",
+      "default": 4
+    },
     {
       "key": "magpie_bin",
       "label": "Magpie CLI 路径",
@@ -120,6 +147,41 @@
       "type": "string",
       "default": "",
       "description": "留空使用 Codex CLI 自身默认模型；独立于 Magpie 路由"
+    },
+    {
+      "key": "translation_backend",
+      "label": "翻译后端",
+      "type": "select",
+      "default": "magpie",
+      "options": [
+        "magpie",
+        "codex",
+        "agy"
+      ]
+    },
+    {
+      "key": "translation_codex_models",
+      "label": "Codex 独立翻译模型（逗号分隔）",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "key": "translation_agy_models",
+      "label": "AGY 独立翻译模型（逗号分隔）",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "key": "agy_bin",
+      "label": "AGY CLI 路径（留空自动检测）",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "key": "agy_model",
+      "label": "AGY Agent 模型（留空使用 CLI 默认）",
+      "type": "string",
+      "default": ""
     }
   ]
 }

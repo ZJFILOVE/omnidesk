@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { invokeDomain, isTauriAvailable } from '../api';
+import { callCapability, invokeDomain, isTauriAvailable } from '../api';
 import type { LyricLine, MediaItem } from '../data/mock';
 
 interface LyricLinePayload {
   time_sec?: number;
+  start_ms?: number;
   original?: string;
   translation?: string;
   note?: string;
@@ -15,19 +16,21 @@ type LyricsPayload =
       count?: number;
       reason?: string;
       lines?: LyricLinePayload[];
+      cues?: LyricLinePayload[];
     };
 
 export interface MediaLyricsState {
   lines: LyricLine[];
   loading: boolean;
   message: string;
+  reload: () => void;
 }
 
 function toLyricLines(payload: LyricsPayload | undefined): LyricLine[] {
-  const rawLines = Array.isArray(payload) ? payload : (payload?.lines ?? []);
+  const rawLines = Array.isArray(payload) ? payload : (payload?.lines ?? payload?.cues ?? []);
   return rawLines
     .map((line) => ({
-      timeSec: typeof line.time_sec === 'number' ? line.time_sec : 0,
+      timeSec: typeof line.time_sec === 'number' ? line.time_sec : typeof line.start_ms === 'number' ? line.start_ms / 1000 : 0,
       original: line.original ?? '',
       translation: line.translation ?? '',
       note: line.note,
@@ -39,50 +42,58 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
   const [lines, setLines] = useState<LyricLine[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [revision, setRevision] = useState(0);
   const songId = item?.appleMusicSongId ?? '';
+  const youtube = item?.kind === 'video' && (item.sourceId === 'plugin-youtube' || item.streamResolver?.providerPluginId === 'plugin-youtube');
+  const videoId = youtube ? String(item?.streamResolver?.payload?.video_id ?? item?.streamResolver?.payload?.item_id ?? item?.id ?? '') : '';
+  const kind = item?.kind;
 
   useEffect(() => {
-    if (!item || item.kind !== 'music' || !songId || !isTauriAvailable()) {
+    if ((!songId && !videoId) || !isTauriAvailable()) {
       setLines([]);
       setLoading(false);
-      setMessage(item?.kind === 'music' ? '当前曲目没有可查询的 Apple Music 编号' : '');
+      setMessage(kind === 'music' ? '当前曲目没有可查询的 Apple Music 编号' : '');
       return undefined;
     }
 
     let cancelled = false;
     setLines([]);
     setLoading(true);
-    setMessage('正在从 Apple Music / Adam 拉取歌词…');
-    void invokeDomain<LyricsPayload>({
+    const label = videoId ? '字幕' : '歌词';
+    setMessage(videoId ? '正在拉取 YouTube 原始字幕…' : '正在从 Apple Music / Adam 拉取歌词…');
+    const fetch = videoId ? callCapability<LyricsPayload>({ capability: 'media.youtube.v1', providerPluginId: 'plugin-youtube',
+      payload: { action: 'fetch_subtitles', video_id: videoId, bilingual: false }, timeoutMs: 60000,
+    }) : invokeDomain<LyricsPayload>({
       domain: 'media',
       sourceId: 'plugin-music',
       method: 'fetch_lyrics',
       payload: { item_id: songId },
       timeoutMs: 45000,
-    })
+    });
+    void fetch
       .then((result) => {
         if (cancelled) return;
         if (!result.available) {
-          setMessage('歌词接口不可用：核心守护进程未连接');
+          setMessage(`${label}接口不可用：核心守护进程未连接`);
           return;
         }
         if (!result.ok) {
-          setMessage(`歌词拉取失败：${result.error.message}`);
+          setMessage(`${label}拉取失败：${result.error.message}`);
           return;
         }
         const parsed = toLyricLines(result.data);
         setLines(parsed);
         setMessage(
           parsed.length > 0
-            ? `${parsed.length} 行歌词 · 来源 Apple Music / Adam / LRCLIB`
+            ? `${parsed.length} 行${label} · 来源 ${videoId ? 'YouTube' : 'Apple Music / Adam / LRCLIB'}`
             : !Array.isArray(result.data) && result.data?.reason === 'no_lyrics_available'
               ? '该曲目没有可用歌词（已尝试本地缓存、Adam 原生歌词与 LRCLIB）'
-              : '该曲目没有可用歌词',
+              : `没有可用${label}`,
         );
       })
       .catch((error: unknown) => {
         if (!cancelled) {
-          setMessage(`歌词拉取失败：${error instanceof Error ? error.message : String(error)}`);
+          setMessage(`${label}拉取失败：${error instanceof Error ? error.message : String(error)}`);
         }
       })
       .finally(() => {
@@ -92,7 +103,7 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
     return () => {
       cancelled = true;
     };
-  }, [item, songId]);
+  }, [songId, videoId, kind, revision]);
 
-  return { lines, loading, message };
+  return { lines, loading, message, reload: () => setRevision(value => value + 1) };
 }

@@ -11,6 +11,7 @@ import {
   HardDrive,
   HelpCircle,
   Library,
+  Languages,
   ListTodo,
   Moon,
   Music,
@@ -56,6 +57,7 @@ export interface AppShellProps {
   onToggleHelp?: () => void;
   onOpenAuth?: () => void;
   onOpenSettings?: () => void;
+  onOpenTranslation?: () => void;
   onOpenJobs?: () => void;
   onOpenCuration?: () => void;
   activeJobCount?: number;
@@ -107,6 +109,7 @@ export function AppShell({
   onToggleHelp,
   onOpenAuth,
   onOpenSettings,
+  onOpenTranslation,
   onOpenJobs,
   onOpenCuration,
   activeJobCount = 0,
@@ -383,6 +386,10 @@ export function AppShell({
                 </FocusItem>
               ) : null}
 
+              {onOpenTranslation ? <FocusItem as="button" id="shell-translation" zone="nav" label="翻译中心" onActivate={onOpenTranslation}
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm hover:bg-[var(--hover-fill)]">
+                <Languages className="h-4 w-4" aria-hidden="true" /><span>翻译</span>
+              </FocusItem> : null}
               {onOpenSettings ? (
                 <FocusItem
                   as="button"

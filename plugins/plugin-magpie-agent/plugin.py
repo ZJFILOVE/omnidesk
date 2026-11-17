@@ -32,8 +32,10 @@ _router = _import_sibling("magpie_router")
 _router_actions = _import_sibling("magpie_router_actions")
 _gateway_mod = _import_sibling("magpie_gateway")
 _chat_mod = _import_sibling("magpie_chat")
+_translation_mod = _import_sibling("magpie_translation")
 _agent_mod = _import_sibling("magpie_agent_actions")
 _runtime_mod = _import_sibling("agent_runtime")
+_cli_mod = _import_sibling("cli_chat")
 _curation_mod = _import_sibling("magpie_curation")
 _context_mod = _import_sibling("magpie_context")
 _sessions_mod = _import_sibling("magpie_sessions")
@@ -255,7 +257,81 @@ class MagpieAgentPlugin(BasePlugin):
         secret = self._gateway_key()
         if self._unloaded:
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
-        return await _chat_mod.handle_translate(req, call_chat=self._call_chat_via_ctx, secret=secret)
+        if not isinstance(req, Mapping):
+            return _common.fail_result("翻译请求必须为对象", error_code="invalid_argument", secret=secret)
+        if req.get("action") in {"settings", "configure"}:
+            if self.ctx is None:
+                return _common.fail_result("翻译服务未加载", error_code="service_offline", secret=secret)
+            if req.get("action") == "configure":
+                patch = {}
+                if "translation_backend" in req:
+                    if req["translation_backend"] not in ("magpie", "codex", "agy"):
+                        return CapabilityResult.fail("未知翻译后端", error_code="invalid_argument")
+                    patch["translation_backend"] = req["translation_backend"]
+                for key in ("translation_codex_models", "translation_agy_models", "codex_bin", "agy_bin", "agy_model"):
+                    if key in req:
+                        value = req[key]
+                        if not isinstance(value, str) or len(value) > 3200 or any(c in value for c in "\x00\n\r"):
+                            return CapabilityResult.fail("CLI 设置格式无效", error_code="invalid_argument")
+                        if key.endswith("models") and (len(value.split(",")) > 16 or any(len(m.strip()) > 200 for m in value.split(","))):
+                            return CapabilityResult.fail("翻译模型 ID 格式无效", error_code="invalid_argument")
+                        patch[key] = value.strip()
+                for key, upper in (("translation_concurrency", 8), ("translation_batch_size", 32)):
+                    if key in req:
+                        value = req[key]
+                        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper:
+                            return _common.fail_result(f"{key} 须为 1–{upper} 的整数", error_code="invalid_argument", secret=secret)
+                        patch[key] = value
+                if "translation_models" in req:
+                    models = req["translation_models"]
+                    if not isinstance(models, str) or len(models) > 3200 or any(len(m.strip()) > 200 for m in models.split(",")) or len(models.split(",")) > 16:
+                        return _common.fail_result("翻译模型 ID 格式无效", error_code="invalid_argument", secret=secret)
+                    patch["translation_models"] = models.strip()
+                if "translation_gateway_url" in req:
+                    url = req["translation_gateway_url"]
+                    if not isinstance(url, str) or (url.strip() and not _is_loopback_url(url.strip())):
+                        return _common.fail_result("翻译接口须为本地回环 URL", error_code="invalid_argument", secret=secret)
+                    patch["translation_gateway_url"] = url.strip().rstrip("/")
+                if patch:
+                    self.ctx.set_config(patch)
+            gw_url, _ = self._configured_gateway_url()
+            return CapabilityResult.ok({
+                **{key: self.ctx.get_config(key, "magpie" if key == "translation_backend" else "") for key in (
+                    "translation_backend", "translation_codex_models", "translation_agy_models", "codex_bin", "agy_bin", "agy_model")},
+                "cli_available": {name: bool(_cli_mod.binary(name, self.ctx.get_config(f"{name}_bin", ""))) for name in ("codex", "agy")},
+                "translation_gateway_url": self.ctx.get_config("translation_gateway_url", ""),
+                "effective_gateway_url": self.ctx.get_config("translation_gateway_url", "") or gw_url,
+                "translation_models": self.ctx.get_config("translation_models", ""),
+                "translation_concurrency": self.ctx.get_config("translation_concurrency", 4),
+                "translation_batch_size": self.ctx.get_config("translation_batch_size", 4),
+            })
+        payload = dict(req)
+        backend = payload.get("backend") or (self.ctx.get_config("translation_backend", "magpie") if self.ctx else "magpie")
+        if backend not in ("magpie", "codex", "agy"):
+            return CapabilityResult.fail("未知翻译后端", error_code="invalid_argument")
+        model_key = "translation_models" if backend == "magpie" else f"translation_{backend}_models"
+        if self.ctx is not None:
+            payload.setdefault("concurrency", self.ctx.get_config("translation_concurrency", 4))
+            payload.setdefault("batch_size", self.ctx.get_config("translation_batch_size", 4))
+            if "models" not in payload and not payload.get("model") and not payload.get("route_override"):
+                payload["models"] = [m.strip() for m in str(self.ctx.get_config(model_key, "")).split(",") if m.strip()]
+        async def translate(batch):
+            chat_caller = self._call_chat_via_ctx
+            translation_url = str(self.ctx.get_config("translation_gateway_url", "") or "").strip() if self.ctx else ""
+            if backend != "magpie":
+                async def chat_caller(chat_req, stream):
+                    return await _cli_mod.chat(chat_req, ctx=self.ctx, backend=backend, translation=True)
+            elif translation_url:
+                async def chat_caller(chat_req, stream):
+                    current_url, _ = self._configured_gateway_url()
+                    return await _chat_mod.handle_chat(
+                        chat_req, gateway=self._gateway, gateway_url=translation_url,
+                        gateway_url_error=None if _is_loopback_url(translation_url) else "翻译接口须为本地回环 URL",
+                        default_group=self._default_group(), default_timeout_ms=self._request_timeout_ms(),
+                        secret=secret if translation_url.rstrip("/") == current_url.rstrip("/") else None,
+                    )
+            return await _chat_mod.handle_translate(batch, call_chat=chat_caller, secret=secret)
+        return await _translation_mod.translate_with_pool(payload, translate=translate, normalize=_chat_mod._normalize_translate_segments)
 
     async def handle_agent_stream(self, req: Mapping[str, Any], stream: Any = None) -> CapabilityResult:
         """Handle `ai.agent.v1` domain-contextual actions backed by `llm.chat.v1`."""
@@ -263,11 +339,17 @@ class MagpieAgentPlugin(BasePlugin):
         if self._unloaded:
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
         if req.get("action") == "list_agents":
-            return CapabilityResult.ok({"agents": _runtime_mod.agents(self.ctx)})
+            return CapabilityResult.ok({"agents": _runtime_mod.agents(self.ctx) + [{
+                "id": "agy", "name": "AGY CLI · 上下文助手", "tools": False,
+                "available": bool(_cli_mod.binary("agy", self.ctx.get_config("agy_bin", ""))),
+                "reason": "需安装并登录 AGY CLI",
+            }]})
         agent_id = str(req.get("agent_id") or "builtin")
-        if agent_id not in {"builtin", "codex"}:
+        if agent_id not in {"builtin", "codex", "agy"}:
             return CapabilityResult.fail("未知 Agent", error_code="invalid_argument")
         async def call_selected(payload: dict[str, Any], sink: Any) -> CapabilityResult:
+            if agent_id == "agy":
+                return await _cli_mod.chat(payload, ctx=self.ctx, backend="agy", stream=sink)
             if agent_id == "codex":
                 return await _runtime_mod.chat(payload, ctx=self.ctx, stream=sink)
             return await self._call_chat_via_ctx(payload, sink)

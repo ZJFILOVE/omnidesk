@@ -44,7 +44,7 @@ async def translate_lyric_lines(
             ),
             "source_lang": "auto",
             "target_lang": "zh-CN",
-            "text": "\n".join(chunk),
+            "texts": chunk,
             "preserve_formatting": True,
             "temperature": 0.1,
         }
@@ -52,8 +52,12 @@ async def translate_lyric_lines(
         if not result.ok:
             code = str((result.data or {}).get("error_code") or "error")
             return None, f"llm.translate.v1_failed:{code}"
-        raw = _translation_text(result)
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        values = result.data.get("translations") if isinstance(result.data, dict) else None
+        if isinstance(values, list) and all(isinstance(value, str) and value.strip() for value in values):
+            lines = [value.strip() for value in values]
+        else:
+            raw = _translation_text(result)
+            lines = [line.strip() for line in raw.splitlines() if line.strip()]
         if len(lines) != len(chunk):
             return None, "llm.translate.v1_line_count_mismatch"
         translated.extend(lines)

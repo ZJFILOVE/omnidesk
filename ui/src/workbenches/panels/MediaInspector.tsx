@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { TranslationButton } from '../../components/TranslationContext';
 import { MediaCover } from '../../components/MediaCover';
 import {
   Disc3,
@@ -48,6 +49,7 @@ export interface MediaInspectorProps {
   activeLyricIndex: number;
   lyricsLoading?: boolean;
   lyricsMessage?: string;
+  onReloadLyrics?: () => void;
   nextSponsorSegment: ChapterSegment | null;
   inEphemeralQueue: boolean;
   activeFocusId: string;
@@ -73,6 +75,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   activeLyricIndex,
   lyricsLoading = false,
   lyricsMessage = '',
+  onReloadLyrics,
   nextSponsorSegment,
   inEphemeralQueue,
   activeFocusId,
@@ -86,6 +89,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   onStatusChange,
 }) => {
   const isMusic = item.kind === 'music';
+  const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
   const totalSec =
     durationSec && Number.isFinite(durationSec) && durationSec > 0
       ? durationSec
@@ -390,19 +394,17 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
               </FocusButton>
             ) : null}
 
-            {item.kind === 'video' ? (
+            {item.kind === 'video' && (item.sourceId === 'plugin-youtube' || item.streamResolver?.providerPluginId === 'plugin-youtube') ? (
               <FocusButton
                 focusId="media:action:asr"
                 activeFocusId={activeFocusId}
                 onFocus={onFocus}
-                onActivate={() =>
-                  onStatusChange('FunASR SenseVoiceSmall 离线双语字幕检查点已验证')
-                }
+                onActivate={() => onReloadLyrics?.()}
                 surface="soft"
                 className="inline-flex items-center gap-1.5 px-3 py-2 text-[14px] font-medium"
               >
                 <Subtitles className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>触发 FunASR 离线字幕校验 (speech.asr.v1)</span>
+                <span>刷新 YouTube 字幕</span>
               </FocusButton>
             ) : null}
           </div>
@@ -414,9 +416,17 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         {item.summary}
       </p>
 
-      {/* Music Listening Cue + Synchronized Bilingual Lyrics Folio */}
-      {item.kind === 'music' ? (
+      {/* Synchronized lyrics and video subtitles share the same cue timeline. */}
+      {item.kind === 'music' || item.kind === 'video' ? (
         <div className="flex flex-col gap-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <TranslationButton label={isMusic ? '翻译歌词' : '翻译字幕'} disabled={lyricsLoading} request={{ title: `${item.title} · ${isMusic ? '歌词' : '字幕'}`,
+              segments: (item.lyrics ?? []).map((line, index) => ({ id: String(index), text: line.original })),
+              onTranslated: results => setTranslations(previous => ({ ...previous, [item.id]: Object.fromEntries(results.map(result => [result.id, result.translation])) })),
+            }} />
+            {isMusic && onReloadLyrics ? <button type="button" disabled={lyricsLoading} className="min-h-11 rounded-lg px-3 text-sm hover:bg-[var(--hover-fill)] disabled:opacity-40" onClick={onReloadLyrics}>刷新歌词</button> : null}
+            {!item.lyrics?.length && !lyricsLoading ? <span className="text-sm text-[var(--text-muted)]">取得原文后即可翻译</span> : null}
+          </div>
           {item.listeningCue ? (
             <EditorialCallout domain="media" title="两遍听法指南">
               <p>{item.listeningCue}</p>
@@ -425,11 +435,11 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
 
           {lyricsLoading ? (
             <p className="px-1 text-[14.5px] text-[var(--text-muted)]">
-              正在拉取真实歌词…
+              正在拉取{isMusic ? '歌词' : '字幕'}…
             </p>
           ) : item.lyrics?.length ? (
             <div className="flex flex-col gap-2.5">
-              <PanelSectionHeading title="双语歌词与乐段同步" meta="点击跳转时间轴" />
+              <PanelSectionHeading title={isMusic ? '双语歌词与乐段同步' : '双语字幕'} meta="点击跳转时间轴" />
               <div className="flex flex-col gap-1.5">
                 {item.lyrics.map((line, index) => {
                   const lyricId = `media:lyric:${item.id}:${index}`;
@@ -454,7 +464,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                         {line.original}
                       </div>
                       <div className="mt-0.5 text-[15px] leading-[1.7] text-[var(--text-muted)]">
-                        {line.translation}
+                        {translations[item.id]?.[String(index)] ?? line.translation}
                       </div>
                     </FocusButton>
                   );

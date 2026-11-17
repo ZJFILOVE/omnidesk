@@ -2,6 +2,8 @@ import { playerShortcut, PLAYER_SHORTCUT_EVENT } from './utils/playerShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { AppShell } from './components/AppShell';
 import { CommunityLinkContext } from './components/CommunityLinkContext';
+import { TranslationContext, type TranslationRequest } from './components/TranslationContext';
+import { TranslationPanel } from './components/TranslationPanel';
 import { COMMUNITY_SITES, resolveCommunityLink, type CommunityNavigation } from './utils/communityLinks';
 import { AuthCenterPanel } from './components/AuthCenterPanel';
 import { CurationCenterPanel } from './components/CurationCenterPanel';
@@ -133,6 +135,8 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
   const [jobCenterOpen, setJobCenterOpen] = useState(false);
   const [authCenterOpen, setAuthCenterOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [translationOpen, setTranslationOpen] = useState(false);
+  const [translationRequest, setTranslationRequest] = useState<TranslationRequest | null>(null);
   const [curationOpen, setCurationOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string | null>(null);
   const [workbenchContexts, setWorkbenchContexts] = useState<Partial<Record<BuiltinWorkbenchId, WorkbenchEntityContext | null>>>({});
@@ -470,7 +474,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
     onActivate: activateFocused,
     onSpace: handleSpace,
     onPlayerKey: (event) => {
-      if (activeWorkbench !== 'media' || settingsOpen || authCenterOpen || jobCenterOpen || curationOpen) return false;
+      if (activeWorkbench !== 'media' || settingsOpen || translationOpen || authCenterOpen || jobCenterOpen || curationOpen) return false;
       if (event.target instanceof Element && event.target.closest('[data-focus-zone="dock"], [role="dialog"]')) return false;
       if (event.key === 'F11') {
         if (!event.repeat) void Promise.resolve().then(() => {
@@ -520,6 +524,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
   );
 
   return (
+    <TranslationContext.Provider value={request => { setTranslationRequest(request); setTranslationOpen(true); }}>
     <CommunityLinkContext.Provider value={openCommunity}>
       <AppShell
         activeWorkbench={activeWorkbench}
@@ -534,6 +539,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
         onToggleHelp={onToggleHelp}
         onOpenAuth={() => setAuthCenterOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenTranslation={() => { setTranslationRequest(null); setTranslationOpen(true); }}
         onOpenJobs={() => setJobCenterOpen(true)}
         onOpenCuration={() => setCurationOpen(true)}
         activeJobCount={activeJobCount}
@@ -610,7 +616,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
                 returnToList={communityTargets[tabWorkbenchId]?.from === tabWorkbenchId}
                 onReturnToSource={communityTargets[tabWorkbenchId] ? () => selectWorkbenchClean(communityTargets[tabWorkbenchId].from) : undefined}
                 isActive={isCurrent}
-                webviewVisible={!paletteOpen && !helpOpen && !hintOpen && !settingsOpen && !authCenterOpen && !jobCenterOpen && !curationOpen && !(dockOpen && dockLayout === 'bottom')}
+                webviewVisible={!paletteOpen && !helpOpen && !hintOpen && !settingsOpen && !translationOpen && !authCenterOpen && !jobCenterOpen && !curationOpen && !(dockOpen && dockLayout === 'bottom')}
                 tauriAvailable={tauriAvailable}
                 onRefreshExtensions={() => {
                   void refreshExtensions();
@@ -696,6 +702,8 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
           setJobCenterOpen(true);
         }}
       />
+      <TranslationPanel open={translationOpen} request={translationRequest} onClose={() => setTranslationOpen(false)} />
     </CommunityLinkContext.Provider>
+    </TranslationContext.Provider>
   );
 }

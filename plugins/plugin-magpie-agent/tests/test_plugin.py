@@ -68,7 +68,7 @@ def test_manifest_matches_spec_and_schema() -> None:
         "media.youtube.v1",
         "media.bilibili.v1",
     }
-    assert set(manifest["permissions"]) == {"process:codex", "process:magpie", "network:loopback", "config:read", "config:write", "secret:vault"}
+    assert set(manifest["permissions"]) == {"process:agy", "process:codex", "process:magpie", "network:loopback", "config:read", "config:write", "secret:vault"}
 
     allowed_top = set(schema["properties"].keys())
     assert set(manifest.keys()).issubset(allowed_top)
@@ -80,6 +80,15 @@ def test_manifest_matches_spec_and_schema() -> None:
 
     fields = {item["key"]: item for item in manifest["config_schema"]}
     assert set(fields.keys()) == {
+        "translation_backend",
+        "translation_codex_models",
+        "translation_agy_models",
+        "agy_bin",
+        "agy_model",
+        "translation_gateway_url",
+        "translation_models",
+        "translation_concurrency",
+        "translation_batch_size",
         "magpie_bin",
         "gateway_url",
         "default_group",

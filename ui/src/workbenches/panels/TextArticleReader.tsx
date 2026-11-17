@@ -1,4 +1,5 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
+import { TranslationButton } from '../../components/TranslationContext';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
 import { ArticleImage } from '../../components/ArticleImage';
 import SelectionBubble, { type SelectionActionEvent } from '../../components/SelectionBubble';
@@ -60,8 +61,10 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
   const showEn = bilingualMode === 'bilingual' || bilingualMode === 'en';
   const showZh = bilingualMode === 'bilingual' || bilingualMode === 'zh';
   const blocksRef = useRef<HTMLDivElement | null>(null);
+  const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
 
   const renderBlock = (block: ArticleBlock) => {
+    block = { ...block, translated: translations[article.id]?.[block.id] ?? block.translated };
     if (block.kind === 'image' && block.imageUrl) {
       return <ArticleImage key={block.id} url={block.imageUrl} alt={block.alt} caption={block.caption} />;
     }
@@ -186,6 +189,10 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
             ))}
           </div>
           <div className="flex items-center gap-2">
+            <TranslationButton label={translations[article.id] ? '重新翻译文章' : '翻译文章'} request={{ title: article.title,
+              segments: article.blocks.filter(block => block.original.trim() && !['image', 'code', 'formula'].includes(block.kind)).map(block => ({ id: block.id, text: block.original })),
+              onTranslated: results => { setTranslations(previous => ({ ...previous, [article.id]: Object.fromEntries(results.map(result => [result.id, result.translation])) })); onBilingualModeChange('bilingual'); },
+            }} />
             {article.url && resolveCommunityLink(article.url) ? <ExternalLink href={article.url}
               className="inline-flex min-h-11 items-center rounded-lg border border-[var(--border-line)] px-3 py-1.5 text-[14px] font-medium text-[var(--domain-text)]">
               打开原帖与讨论

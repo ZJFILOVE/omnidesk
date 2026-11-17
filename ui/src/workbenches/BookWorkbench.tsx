@@ -4,6 +4,7 @@ import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
 import { LoadMoreButton } from '../components/LoadMoreButton';
 import { MediaCover } from '../components/MediaCover';
+import { TranslationButton } from '../components/TranslationContext';
 import { useBookSearch } from '../hooks/useBookSearch';
 import {
   bookSearchAction,
@@ -143,7 +144,8 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const [vocabOpen, setVocabOpen] = useState<boolean>(true);
   const [catalogQuery, setCatalogQuery] = useState<string>('');
   const [searchProvider, setSearchProvider] = useState<BookSearchProvider>('auto');
-  const catalogSearch = useBookSearch(catalogQuery, searchProvider, leftTab === 'search');
+  const [mirrorVersion, setMirrorVersion] = useState(0);
+  const catalogSearch = useBookSearch(catalogQuery, searchProvider, leftTab === 'search', mirrorVersion);
   const searchCatalog = useMemo(() => catalogSearch.results.map(toCatalogItem), [catalogSearch.results]);
   const searchLoading = catalogSearch.loading;
   const searchError = catalogSearch.error;
@@ -196,7 +198,12 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
         Math.max(0, bookSpreads.length - 1),
       )
     : 0;
-  const activeSpread = bookSpreads[spreadIndex];
+  const [pageTranslations, setPageTranslations] = useState<Record<string, Record<string, string>>>({});
+  const pageKey = `${selectedBook?.id}:${bookSpreads[spreadIndex]?.page}`;
+  const sourceSpread = bookSpreads[spreadIndex];
+  const activeSpread = useMemo(() => sourceSpread && pageTranslations[pageKey] ? { ...sourceSpread,
+    rightParagraphs: sourceSpread.leftParagraphs.map(paragraph => ({ id: paragraph.id, text: pageTranslations[pageKey][paragraph.id] ?? '', imageUrl: paragraph.imageUrl })),
+  } : sourceSpread, [sourceSpread, pageTranslations, pageKey]);
   const convertedMetadataReloaded = useRef(new Set<string>());
   useEffect(() => {
     if (!selectedBook || !activeSpread || liveSpread.loading || !isTauriAvailable()) return;
@@ -485,6 +492,10 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       rightWidthClass="@[860px]/workbench:w-[292px]"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
+          <TranslationButton label="翻译当前页" disabled={liveSpread.loading} request={{ title: `${selectedBook?.title ?? '图书'} · 第 ${activeSpread?.page ?? 1} 页`,
+            segments: activeSpread?.leftParagraphs.filter(paragraph => paragraph.text.trim()).map(paragraph => ({ id: paragraph.id, text: paragraph.text })) ?? [],
+            onTranslated: results => setPageTranslations(previous => ({ ...previous, [pageKey]: Object.fromEntries(results.map(result => [result.id, result.translation])) })),
+          }} />
           <FocusButton
             focusId="book:toggle:shelf"
             activeFocusId={activeFocusId}
@@ -557,6 +568,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
               onCatalogQueryChange={setCatalogQuery}
               searchLoading={searchLoading}
               searchError={searchError}
+              onMirrorChanged={() => setMirrorVersion(value => value + 1)}
               searchProvider={searchProvider}
               onSearchProviderChange={setSearchProvider}
               onSelectBook={(book) => {
