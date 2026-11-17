@@ -51,6 +51,7 @@ export interface CommentNode { id: string; author: string; roleBadge?: string; t
 
 export interface TextArticle {
   id: string;
+  url?: string;
   channelId: Exclude<TextChannelId, 'all'>;
   sourceName: string;
   title: string;

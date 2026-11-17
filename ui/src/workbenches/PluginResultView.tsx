@@ -78,7 +78,7 @@ function FeedItemCard({ item, index, onOpenItem }: { item: Dict; index: number; 
                 title
               )}
             </h3>
-            {onOpenItem && url ? <ExternalLink href={url} aria-label={`打开原文：${title}`} title="在浏览器打开原文"
+            {onOpenItem && url ? <ExternalLink href={url} aria-label={`打开原文：${title}`} title="打开原文"
               className="shrink-0 rounded p-2 text-[var(--text-muted)] hover:bg-[var(--hover-fill)]">
               <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" />
             </ExternalLink> : null}

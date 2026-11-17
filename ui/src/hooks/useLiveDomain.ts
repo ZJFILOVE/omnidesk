@@ -104,6 +104,7 @@ export function toTextArticle(raw: unknown, fallbackSource = ''): TextArticle | 
   return {
     id,
     channelId: textChannelFor(sourceId, str(item.category)),
+    url: str(item.url) || undefined,
     sourceName: str(item.source_name, sourceId || 'Live source'),
     title: str(item.title, id),
     titleZh: str(item.title_zh, str(item.title, id)),

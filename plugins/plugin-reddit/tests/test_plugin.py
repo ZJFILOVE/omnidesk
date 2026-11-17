@@ -47,6 +47,15 @@ def test_network_security_wall_after_large_stylesheet_is_not_parse_error() -> No
     assert reddit_http.classify_http_failure(resp, expect_json=False)[0] == ""
 
 
+@pytest.mark.parametrize("status", [404, 410])
+def test_missing_api_response_does_not_claim_the_post_was_deleted(status: int) -> None:
+    code, message = reddit_http.classify_http_failure(reddit_http.HttpResponse(status_code=status))
+    assert code == "not_found"
+    assert str(status) in message
+    assert "无法确认原帖是否已删除" in message
+    assert "内嵌网页" in message
+
+
 def test_reddit_gallery_single_image_and_markdown_images() -> None:
     post = _sample_listing_page1("rust")
     data = post["data"]["children"][0]["data"]

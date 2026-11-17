@@ -15,6 +15,8 @@ import {
 } from '../../components/WorkbenchPrimitives';
 import type { ArticleBlock, TextArticle } from '../../data/mock';
 import type { BilingualMode } from './CommentTreePanel';
+import { ExternalLink } from '../../components/ExternalLink';
+import { resolveCommunityLink } from '../../utils/communityLinks';
 
 const BILINGUAL_OPTIONS: { id: BilingualMode; label: string }[] = [
   { id: 'bilingual', label: '双语对照' },
@@ -184,6 +186,10 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
             ))}
           </div>
           <div className="flex items-center gap-2">
+            {article.url && resolveCommunityLink(article.url) ? <ExternalLink href={article.url}
+              className="inline-flex min-h-11 items-center rounded-lg border border-[var(--border-line)] px-3 py-1.5 text-[14px] font-medium text-[var(--domain-text)]">
+              打开原帖与讨论
+            </ExternalLink> : null}
             <FocusButton
               focusId="text:action:babeldoc"
               activeFocusId={activeFocusId}
@@ -194,7 +200,8 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
             >
               转交 BabelDOC
             </FocusButton>
-            <FocusButton
+            {article.url ? <ExternalLink href={article.url} externalOnly
+              className="inline-flex min-h-11 items-center rounded-lg bg-[var(--bg-soft)] px-3 py-1.5 text-[14px] font-medium text-[var(--domain-text)]">在 Chrome 打开</ExternalLink> : <FocusButton
               focusId="text:action:chrome"
               activeFocusId={activeFocusId}
               onFocus={onFocus}
@@ -204,7 +211,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
               className="px-3 py-1.5 text-[14px] font-medium"
             >
               Chrome --app 阅读
-            </FocusButton>
+            </FocusButton>}
           </div>
         </div>
       </header>

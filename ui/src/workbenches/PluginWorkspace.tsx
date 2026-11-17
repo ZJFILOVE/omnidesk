@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Blocks, LoaderCircle, RefreshCw } from 'lucide-react';
 import { formatRpcError, invokeWorkspaceAction, type WorkspaceTabSnapshot } from '../api';
 import { DeclarativePanel } from '../components/DeclarativePanel';
@@ -7,6 +7,8 @@ import { DOMAIN_CSS_VARS, DOMAIN_LABELS } from '../theme';
 import { PluginResultView, resolveBody } from './PluginResultView';
 import { LoadMoreButton } from '../components/LoadMoreButton';
 import { EmbeddedWebReader } from '../components/EmbeddedWebReader';
+import { CommunityLinkContext } from '../components/CommunityLinkContext';
+import { COMMUNITY_SITES, type CommunityNavigation, type CommunitySite } from '../utils/communityLinks';
 
 type Dict = Record<string, unknown>;
 
@@ -39,6 +41,9 @@ export interface PluginWorkspaceProps {
   tauriAvailable?: boolean;
   onRefreshExtensions?: () => void;
   webviewVisible?: boolean;
+  navigation?: CommunityNavigation;
+  onReturnToSource?: () => void;
+  returnToList?: boolean;
 }
 
 export function PluginWorkspace({
@@ -47,7 +52,12 @@ export function PluginWorkspace({
   tauriAvailable = true,
   onRefreshExtensions,
   webviewVisible = true,
+  navigation,
+  onReturnToSource,
+  returnToList = false,
 }: PluginWorkspaceProps) {
+  const communitySite = (Object.keys(COMMUNITY_SITES) as CommunitySite[]).find(site => COMMUNITY_SITES[site].pluginId === tab.plugin_id);
+  const openCommunity = useContext(CommunityLinkContext);
   const [schema, setSchema] = useState(tab.ui_schema ?? {});
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -59,8 +69,18 @@ export function PluginWorkspace({
   const [loadingMore, setLoadingMore] = useState(false);
   const requestVersion = useRef(0);
   const busyRef = useRef(false);
-  const [webMode, setWebMode] = useState(tab.plugin_id === 'plugin-linuxdo');
+  const [webMode, setWebMode] = useState(Boolean(communitySite));
   const scrollRef = useRef<HTMLDivElement>(null);
+  const feedScrollTop = useRef(0);
+  useEffect(() => {
+    if (navigation) {
+      if (scrollRef.current) feedScrollTop.current = scrollRef.current.scrollTop;
+      setWebMode(true);
+    }
+  }, [navigation]);
+  useEffect(() => {
+    if (!webMode && scrollRef.current) scrollRef.current.scrollTop = feedScrollTop.current;
+  }, [webMode]);
   const [listSnapshot, setListSnapshot] = useState<{ result: Dict | null; actionId: string; feed: typeof feedRequest; scrollTop: number } | null>(null);
 
   useEffect(() => () => { requestVersion.current += 1; busyRef.current = false; }, [tab.plugin_id, tab.tab_id]);
@@ -201,7 +221,12 @@ export function PluginWorkspace({
           </div>
         </div>
         <div className="flex items-center gap-2">
-        {tab.plugin_id === 'plugin-linuxdo' ? <button type="button" onClick={() => setWebMode((value) => !value)}
+        {onReturnToSource && (!returnToList || webMode) ? <button type="button" onClick={() => returnToList ? setWebMode(false) : onReturnToSource()}
+          className="min-h-11 rounded-lg border border-[var(--border-line)] px-3 text-[14px] text-[var(--text-primary)]">{returnToList ? '返回帖子列表' : '返回来源'}</button> : null}
+        {communitySite ? <button type="button" onClick={() => {
+          if (scrollRef.current) feedScrollTop.current = scrollRef.current.scrollTop;
+          setWebMode(value => !value);
+        }}
           className="min-h-11 rounded-lg border border-[var(--border-line)] px-3 text-[14px] text-[var(--text-primary)]">
           {webMode ? '切换帖子列表' : '内嵌网页'}
         </button> : null}
@@ -219,7 +244,11 @@ export function PluginWorkspace({
         </div>
       </header>
 
-      {webMode && tab.plugin_id === 'plugin-linuxdo' ? <EmbeddedWebReader active={isActive && webviewVisible} /> : <>
+      {communitySite ? <div hidden={!webMode} aria-hidden={!webMode}
+        style={{ display: webMode ? 'flex' : 'none' }} className="min-h-0 flex-1 flex-col">
+        <EmbeddedWebReader site={communitySite} navigation={navigation} active={webMode && isActive && webviewVisible} />
+      </div> : null}
+      {!webMode ? <>
 
       {!tauriAvailable ? (
         <div className="mx-6 mt-4 flex items-center gap-2 rounded-[10px] bg-[var(--status-warn-bg)] px-3.5 py-2.5 text-[13.5px] text-[var(--status-warn-fg)]">
@@ -268,6 +297,7 @@ export function PluginWorkspace({
         ) : null}
         <PluginResultView payload={actionResult} actionId={lastActionId} providerPluginId={tab.plugin_id}
           onOpenItem={tab.domain === 'text' && feedRequest ? (item) => {
+            if (typeof item.url === 'string' && openCommunity(item.url)) return;
             void handleAction('fetch_article', { article_id: item.id || item.url, url: item.url });
           } : undefined} />
         {feedRequest ? <LoadMoreButton id={`plugin-workspace:${tab.plugin_id}:${tab.tab_id}:more`}
@@ -281,7 +311,7 @@ export function PluginWorkspace({
             void handleAction(feedRequest.actionId, state, true);
           } }} /> : null}
       </div>
-      </>}
+      </> : null}
     </div>
   );
 }

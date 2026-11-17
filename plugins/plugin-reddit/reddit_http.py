@@ -172,7 +172,10 @@ def classify_http_failure(
         return code, msg
 
     if status in {404, 410}:
-        return "not_found", f"请求的 Reddit 资源不存在 (HTTP {status})"
+        return "not_found", (
+            f"Reddit 接口返回 HTTP {status}，暂时无法获取内容；"
+            "仅凭此响应无法确认原帖是否已删除，请切换内嵌网页查看。"
+        )
 
     if status >= 500:
         return "service_offline", f"Reddit 上游服务异常 (HTTP {status})"

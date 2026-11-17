@@ -1,6 +1,8 @@
 import { playerShortcut, PLAYER_SHORTCUT_EVENT } from './utils/playerShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { AppShell } from './components/AppShell';
+import { CommunityLinkContext } from './components/CommunityLinkContext';
+import { COMMUNITY_SITES, resolveCommunityLink, type CommunityNavigation } from './utils/communityLinks';
 import { AuthCenterPanel } from './components/AuthCenterPanel';
 import { CurationCenterPanel } from './components/CurationCenterPanel';
 import { type HintOverlayTarget } from './components/HintOverlay';
@@ -139,6 +141,8 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
   ])) as Record<BuiltinWorkbenchId, (context: WorkbenchEntityContext | null) => void>, []);
   const prevWorkbenchRef = useRef<WorkbenchId>(activeWorkbench);
   const lastBuiltinRef = useRef<BuiltinWorkbenchId>('media');
+  const [communityTargets, setCommunityTargets] = useState<Record<string, CommunityNavigation & { from: WorkbenchId }>>({});
+  const communityRequestId = useRef(0);
 
   const pluginAssignments = useMemo(
     () => assignPluginWorkbenches(workspaceTabs, Object.keys(ALT_SHORTCUT_MAP)),
@@ -170,6 +174,19 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
     },
     [onSelectWorkbench],
   );
+
+  const openCommunity = useCallback((href: string) => {
+    const target = resolveCommunityLink(href);
+    if (!target || !tauriAvailable) return false;
+    const tab = workspaceTabs.find(entry => entry.plugin_id === COMMUNITY_SITES[target.site].pluginId);
+    if (!tab) return false;
+    const id = pluginWorkbenchId(tab);
+    const requestId = ++communityRequestId.current;
+    setCommunityTargets(previous => ({ ...previous, [id]: { ...target, requestId, from: activeWorkbench } }));
+    setCurationOpen(false);
+    selectWorkbenchClean(id);
+    return true;
+  }, [activeWorkbench, selectWorkbenchClean, tauriAvailable, workspaceTabs]);
 
   useEffect(() => {
     if (focusedId && focusedZone === 'main') {
@@ -503,7 +520,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
   );
 
   return (
-    <>
+    <CommunityLinkContext.Provider value={openCommunity}>
       <AppShell
         activeWorkbench={activeWorkbench}
         onSelectWorkbench={selectWorkbenchClean}
@@ -589,6 +606,9 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
             >
               <PluginWorkspace
                 tab={tab}
+                navigation={communityTargets[tabWorkbenchId]}
+                returnToList={communityTargets[tabWorkbenchId]?.from === tabWorkbenchId}
+                onReturnToSource={communityTargets[tabWorkbenchId] ? () => selectWorkbenchClean(communityTargets[tabWorkbenchId].from) : undefined}
                 isActive={isCurrent}
                 webviewVisible={!paletteOpen && !helpOpen && !hintOpen && !settingsOpen && !authCenterOpen && !jobCenterOpen && !curationOpen && !(dockOpen && dockLayout === 'bottom')}
                 tauriAvailable={tauriAvailable}
@@ -676,6 +696,6 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
           setJobCenterOpen(true);
         }}
       />
-    </>
+    </CommunityLinkContext.Provider>
   );
 }

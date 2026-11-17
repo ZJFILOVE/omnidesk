@@ -1,12 +1,18 @@
-import { useState, type AnchorHTMLAttributes, type MouseEvent } from 'react';
+import { useContext, useState, type AnchorHTMLAttributes, type MouseEvent } from 'react';
 import { callCapability, formatRpcError, isTauriAvailable } from '../api';
+import { CommunityLinkContext } from './CommunityLinkContext';
 
 /** Tauri WebViews do not reliably open target=_blank; use the host's browser bridge. */
-export function ExternalLink({ href, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+export function ExternalLink({ href, children, externalOnly = false, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { externalOnly?: boolean }) {
+  const openCommunity = useContext(CommunityLinkContext);
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const open = async (event: MouseEvent<HTMLAnchorElement>) => {
     event.stopPropagation();
+    if (!externalOnly && href && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && openCommunity(href)) {
+      event.preventDefault();
+      return;
+    }
     if (!isTauriAvailable() || !href || !/^https?:\/\//i.test(href)) return;
     event.preventDefault();
     if (opening) return;
