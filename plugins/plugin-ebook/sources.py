@@ -122,7 +122,7 @@ class EbookBookSource(BookSource):
         with self._lock:
             if (cached := self._cache.get(key)) is not None:
                 return cached
-        if fmt in ("mobi", "azw3"):
+        if fmt not in ("epub", "txt"):
             return None
         parsed = parse_book_file(file_path, fmt, page_char_budget=self._page_budget())
         with self._lock:
@@ -136,7 +136,7 @@ class EbookBookSource(BookSource):
         extra: dict[str, Any] = {"root": str(root_dir)}
         calibre_bin = str(self._cfg("calibre_bin", "") or "").strip()
 
-        if fmt in ("mobi", "azw3"):
+        if fmt not in ("epub", "txt"):
             st = file_path.lstat()
             with self._lock:
                 parsed = self._cache.get((file_path, st.st_mtime_ns, st.st_size, self._page_budget()))
@@ -229,7 +229,7 @@ class EbookBookSource(BookSource):
         with self._lock:
             if (cached := self._cache.get(key)) is not None:
                 return cached
-        if fmt in ("mobi", "azw3"):
+        if fmt not in ("epub", "txt"):
             if self._ctx is None:
                 raise InvalidEbookArgError("PluginContext is required for Calibre conversion")
             calibre_bin = str(self._cfg("calibre_bin", "") or "").strip()
@@ -285,6 +285,7 @@ class EbookBookSource(BookSource):
                     kind=blk.kind,
                     original=blk.original,
                     translated=translated,
+                    image_url=blk.image_url,
                     highlighted_words=_highlight_vocab_words(blk.original, known_words),
                 )
             )

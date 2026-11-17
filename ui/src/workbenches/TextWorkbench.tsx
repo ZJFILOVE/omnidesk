@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { isTauriAvailable } from '../api';
 import { LiveSourceControls } from './LiveSourceControls';
 import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
+import { LoadMoreButton } from '../components/LoadMoreButton';
 import WorkbenchLayout, {
   FocusButton,
   HAIRLINE_BORDER,
+  focusableProps,
   useWorkbenchFocus,
   type WorkbenchViewProps,
 } from '../components/WorkbenchLayout';
@@ -49,8 +51,8 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const [activeChannel, setActiveChannel] = useState<string>(() => isTauriAvailable() ? '' : 'all');
   const [activeSourceId, setActiveSourceId] = useState('');
   const [dailyOnly, setDailyOnly] = useState<boolean>(false);
-  // Default false so 1280x800 opens as a serene 2-column 68-76ch reading sanctuary + margin notes
-  const [tocOpen, setTocOpen] = useState<boolean>(false);
+  const [tocOpen, setTocOpen] = useState<boolean>(true);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [query, setQuery] = useState<string>('');
   const [selectedArticleId, setSelectedArticleId] = useState<string>(TEXT_ARTICLES[0]?.id ?? '');
   const [bilingualMode, setBilingualMode] = useState<BilingualMode>('bilingual');
@@ -94,6 +96,15 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
     [selectedArticleId, filteredArticles],
   );
 
+  const selectedArticleIndex = filteredArticles.findIndex((article) => article.id === selectedArticle?.id);
+  const selectArticleAt = (index: number) => {
+    const article = filteredArticles[index];
+    if (article) {
+      setSelectedArticleId(article.id);
+      setActionBanner(`已加载：${article.titleZh}`);
+    }
+  };
+
   const liveDetail = useLiveArticleDetail(
     liveFeed.live ? selectedArticle?.id ?? '' : '',
     liveFeed.sourceId,
@@ -119,9 +130,10 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
       itemId: selectedArticle.id,
       title: selectedArticle.titleZh,
       subtitle: selectedArticle.sourceName,
+      sourceId: liveFeed.live ? liveFeed.sourceId : undefined,
       kind: selectedArticle.channelId,
     });
-  }, [onContextChange, selectedArticle]);
+  }, [onContextChange, selectedArticle, liveFeed.live, liveFeed.sourceId]);
 
   const handleAddNote = () => {
     if (!selectedArticle || !noteDraft.trim()) return;
@@ -169,10 +181,18 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
       title="文字与期刊"
       subtitle="舒适长文精读 · 编辑部旁注评论 · 双语对照"
       editorialHeader
-      leftWidthClass="@[860px]/workbench:w-[248px]"
+      leftWidthClass="@[860px]/workbench:w-[296px]"
       rightWidthClass="@[860px]/workbench:w-[328px]"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
+          <FocusButton focusId="text:toggle:notes" activeFocusId={activeFocusId} onFocus={emitFocus}
+            onActivate={() => setNotesOpen((value) => !value)} selected={notesOpen}
+            surface="soft" className="px-3 py-1.5 text-[14px] font-medium">
+            {notesOpen ? '收起旁注' : '评论与笔记'}
+          </FocusButton>
+          <FocusButton focusId="text:toggle:wide" activeFocusId={activeFocusId} onFocus={emitFocus}
+            onActivate={() => { setTocOpen(false); setNotesOpen(false); }} selected={!tocOpen && !notesOpen}
+            surface="soft" className="px-3 py-1.5 text-[14px] font-medium">全宽阅读</FocusButton>
           <FocusButton
             focusId="text:toggle:toc"
             activeFocusId={activeFocusId}
@@ -255,18 +275,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
           <div className="flex flex-col gap-2.5 p-4">
             <PanelSectionHeading title="期刊与社区目录" meta={`${filteredArticles.length} 篇`} />
             {filteredArticles.length === 0 ? (
-              <StateView
-                mode="empty"
-                title="没有匹配的文章"
-                description="尝试清空关键词或切换频道。"
-                activeFocusId={activeFocusId}
-                onFocus={emitFocus}
-                action={{
-                  label: '查看全部文章',
-                  focusId: 'text:empty:reset',
-                  onActivate: resetFilters,
-                }}
-              />
+              <p className="text-[14px] text-[var(--text-muted)]">目录暂无条目，可切换频道或加载下一页。</p>
             ) : (
               <div className="flex flex-col gap-1 px-1 py-1">
                 {filteredArticles.map((article) => (
@@ -309,49 +318,36 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
                 ))}
               </div>
             )}
+            {liveFeed.pagination ? <LoadMoreButton id="text:feed:more" pagination={liveFeed.pagination} /> : null}
           </div>
         ) : undefined
       }
       mainPane={
         <div className="flex flex-col">
-          {/* Sleek Single-Row Issue Strip when vertical TOC drawer is collapsed */}
-          {!tocOpen && filteredArticles.length > 0 ? (
-            <nav
-              aria-label="本期文章快速切换"
-              className="border-b px-6 py-2"
-              style={{
-                borderColor: HAIRLINE_BORDER,
-                backgroundColor: 'color-mix(in srgb, var(--bg-surface) 55%, var(--bg-canvas))',
-              }}
-            >
-              <div className="omni-prose-measure mx-auto flex flex-nowrap items-center gap-1.5 overflow-x-auto px-1.5 py-2">
-                {filteredArticles.map((article) => {
-                  const isSelected = selectedArticle?.id === article.id;
-                  return (
-                    <FocusButton
-                      key={article.id}
-                      focusId={`text:article:${article.id}`}
-                      activeFocusId={activeFocusId}
-                      onFocus={emitFocus}
-                      onActivate={() => {
-                        setSelectedArticleId(article.id);
-                        setActionBanner(`已加载：${article.titleZh}`);
-                      }}
-                      selected={isSelected}
-                      tone="text"
-                      surface={isSelected ? 'surface' : 'ghost'}
-                      className="shrink-0 max-w-[220px] truncate px-2.5 py-1 text-left text-[14px] font-medium"
-                    >
-                      <span className="mr-1.5 font-mono text-[13px] opacity-75">
-                        {article.sourceName.split(' ')[0]}
-                      </span>
-                      <span>{article.titleZh}</span>
-                    </FocusButton>
-                  );
-                })}
-              </div>
+          {filteredArticles.length > 0 ? (
+            <nav aria-label="文章阅读导航" className="flex flex-wrap items-center gap-2 border-b px-4 py-3" style={{ borderColor: HAIRLINE_BORDER }}>
+              <FocusButton focusId="text:article:previous" activeFocusId={activeFocusId} onFocus={emitFocus}
+                disabled={selectedArticleIndex <= 0} onActivate={() => selectArticleAt(selectedArticleIndex - 1)}
+                surface="soft" className="inline-flex min-h-11 items-center gap-1 px-3 py-2 text-[14px]">
+                <ChevronLeft className="h-4 w-4" aria-hidden="true" />上一篇
+              </FocusButton>
+              <label className="flex min-w-0 flex-1 items-center gap-2 text-[13px] text-[var(--text-muted)]">
+                <span className="shrink-0">{selectedArticleIndex + 1} / {filteredArticles.length}</span>
+                <select {...focusableProps('text:article:select', activeFocusId, emitFocus)}
+                  aria-label="选择文章" value={selectedArticle?.id ?? ''}
+                  onChange={(event) => setSelectedArticleId(event.target.value)}
+                  className="min-h-11 min-w-0 flex-1 rounded-lg border border-[var(--border-line)] bg-[var(--bg-surface)] px-2 text-[14px] text-[var(--text-primary)]">
+                  {filteredArticles.map((article) => <option key={article.id} value={article.id}>{article.titleZh}</option>)}
+                </select>
+              </label>
+              <FocusButton focusId="text:article:next" activeFocusId={activeFocusId} onFocus={emitFocus}
+                disabled={selectedArticleIndex >= filteredArticles.length - 1} onActivate={() => selectArticleAt(selectedArticleIndex + 1)}
+                surface="soft" className="inline-flex min-h-11 items-center gap-1 px-3 py-2 text-[14px]">
+                下一篇<ChevronRight className="h-4 w-4" aria-hidden="true" />
+              </FocusButton>
             </nav>
           ) : null}
+          {!tocOpen && liveFeed.pagination ? <LoadMoreButton id="text:feed:more" pagination={liveFeed.pagination} /> : null}
 
           {readerArticle ? (
             <TextArticleReader
@@ -389,7 +385,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
         </div>
       }
       rightPane={
-        readerArticle ? (
+        readerArticle && notesOpen ? (
           <CommentTreePanel
             articleId={readerArticle.id}
             comments={readerArticle.comments}

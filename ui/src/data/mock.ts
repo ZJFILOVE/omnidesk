@@ -20,6 +20,7 @@ export interface MediaItem {
   previouslyRecommendedOn?: string;
   verificationLabel?: string;
   thumbGradient: string;
+  coverUrl?: string;
   thumbTag: string;
   playUrl: string;
   audioUrl?: string;
@@ -35,6 +36,7 @@ export interface MediaItem {
 }
 
 export interface StreamResolverDescriptor {
+  providerPluginId?: string;
   capability: string;
   payload: Record<string, unknown>;
   qualityOptions: string[];
@@ -69,23 +71,25 @@ export interface TextArticle {
 
 export interface BookSpread {
   page: number;
+  totalPages?: number;
   chapterTitle: string;
   leftTitle: string;
-  leftParagraphs: { id: string; text: string; keyTerms?: string[] }[];
+  leftParagraphs: { id: string; text: string; keyTerms?: string[]; imageUrl?: string }[];
   rightTitle: string;
-  rightParagraphs: { id: string; text: string }[];
+  rightParagraphs: { id: string; text: string; imageUrl?: string }[];
 }
 
 export interface BookItem {
   id: string;
   title: string;
   author: string;
-  format: 'pdf' | 'epub' | 'english_daily';
+  format: 'pdf' | 'epub' | 'txt' | 'english_daily' | 'mobi' | 'azw3' | 'azw' | 'azw4' | 'fb2' | 'fbz' | 'rtf' | 'html' | 'htm' | 'htmlz' | 'docx' | 'odt' | 'cbz' | 'cbr' | 'cb7' | 'chm' | 'djvu' | 'lit' | 'lrf' | 'prc' | 'pdb' | 'pml' | 'rb' | 'snb' | 'tcr' | 'txtz' | 'kepub';
   language: string;
   progressPct: number;
   totalPages: number;
   currentPage: number;
   coverGradient: string;
+  coverUrl?: string;
   badge: string;
   sourcePlugin: string;
   bilingualReady: boolean;

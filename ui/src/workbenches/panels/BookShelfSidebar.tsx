@@ -1,4 +1,5 @@
 import React from 'react';
+import { MediaCover } from '../../components/MediaCover';
 import { AlertTriangle, BookOpen, LoaderCircle, Plus } from 'lucide-react';
 import type { BookSearchProvider } from '../../api';
 import StateView from '../../components/StateView';
@@ -122,7 +123,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
     ) : null}
 
     {leftTab === 'shelf' ? (
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,160px))] gap-4">
         {books.map((book) => {
           const shelfId = `book:shelf:${book.id}`;
           const isSelected = selectedBookId === book.id;
@@ -155,13 +156,14 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
                     : 'inset 3px 0 0 rgba(255,255,255,0.22), var(--shadow-page)',
                 }}
               >
-                <div className="flex items-center justify-between">
+                <MediaCover url={book.coverUrl} />
+                <div className="relative flex items-center justify-between">
                   <span className="rounded bg-black/45 px-1.5 py-0.5 font-mono text-[12.5px] uppercase">
                     {book.format}
                   </span>
                   {isSelected ? <BookOpen className="h-3.5 w-3.5 text-white/90" aria-hidden="true" /> : null}
                 </div>
-                <div>
+                <div className="relative rounded bg-black/40 p-1">
                   <div className="line-clamp-3 text-[14px] leading-snug font-semibold">
                     {book.title}
                   </div>

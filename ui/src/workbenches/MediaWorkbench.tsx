@@ -1,7 +1,10 @@
+import { PLAYER_SHORTCUT_EVENT, type PlayerShortcut } from '../utils/playerShortcuts';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { callCapability, isTauriAvailable, mpvEmbedSetActive } from '../api';
 import MpvCanvas from '../components/MpvCanvas';
 import StateView from '../components/StateView';
+import { LoadMoreButton } from '../components/LoadMoreButton';
+import { MediaCover } from '../components/MediaCover';
 import WorkbenchLayout, {
   HAIRLINE_BORDER,
   useWorkbenchFocus,
@@ -90,8 +93,11 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   });
   const mpv = mpvController ?? localMpv;
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const lastMpvItemId = useRef<string | undefined>(undefined);
   const lastToggleRef = useRef<number>(mediaToggleTrigger ?? 0);
   const mountedRef = useRef(true);
+  const unmutedVolume = useRef(85);
+  const shortcutHandler = useRef<(action: PlayerShortcut) => void>(() => {});
   const volumeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -120,10 +126,6 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   useEffect(() => {
     if (liveMedia.sources.length === 0) return;
     const chosenSourceId = activeSourceId || liveMedia.sourceId;
-    if (!activeSourceId && chosenSourceId) {
-      setActiveSourceId(chosenSourceId);
-      return;
-    }
     const source = liveMedia.sources.find((entry) => entry.sourceId === chosenSourceId);
     const nextCategories = source?.categories ?? [];
     if (nextCategories.length === 0) {
@@ -155,7 +157,9 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   useEffect(() => {
     if (!mpv.enabled) return;
     const activeItemId = mpv.state?.itemId;
-    if (!activeItemId || activeItemId === selectedId) return;
+    if (!activeItemId || activeItemId === lastMpvItemId.current) return;
+    lastMpvItemId.current = activeItemId;
+    if (activeItemId === selectedId) return;
     if (mediaItems.some((item) => item.id === activeItemId)) {
       setSelectedId(activeItemId);
     }
@@ -258,10 +262,11 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     [mediaLyrics.lines, selectedItem],
   );
 
-  const currentSec = mpv.enabled ? mpv.positionSec : previewSec;
+  const selectedIsPlaying = mpv.state?.itemId === selectedItem?.id;
+  const currentSec = mpv.enabled ? (selectedIsPlaying ? mpv.positionSec : 0) : previewSec;
   const effectiveDuration =
-    mpv.enabled && mpv.durationSec ? mpv.durationSec : (selectedItem?.durationSec ?? 0);
-  const playing = mpv.enabled ? mpv.playing : previewPlaying;
+    mpv.enabled && selectedIsPlaying && mpv.durationSec ? mpv.durationSec : (selectedItem?.durationSec ?? 0);
+  const playing = mpv.enabled ? selectedIsPlaying && mpv.playing : previewPlaying;
   const volume = volumeDraft ?? (mpv.enabled ? mpv.volume : previewVolume);
   const speed = mpv.enabled ? mpv.speed : 1;
 
@@ -291,6 +296,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       sourceId: selectedItem.sourceId,
       kind: selectedItem.kind,
       url: selectedItem.playUrl,
+      extra: { contextCapability: selectedItem.streamResolver?.capability, contextProvider: selectedItem.streamResolver?.providerPluginId, contextItemId: selectedItem.streamResolver?.payload.item_id ?? selectedItem.streamResolver?.payload.video_id ?? selectedItem.id },
     });
   }, [onContextChange, selectedItem]);
 
@@ -450,6 +456,32 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       if (mountedRef.current) setActionStatus(result.message);
     });
   };
+
+  shortcutHandler.current = (action) => {
+    if (!isActive || !selectedItem) return;
+    if (action === 'back' || action === 'forward') handleSeek(currentSec + (action === 'back' ? -10 : 10));
+    if (action === 'quieter' || action === 'louder') handleVolumeChange(Math.max(0, Math.min(100, volume + (action === 'quieter' ? -5 : 5))));
+    if (action === 'mute') {
+      if (volume > 0) { unmutedVolume.current = volume; handleVolumeChange(0); }
+      else handleVolumeChange(unmutedVolume.current);
+    }
+    if (action === 'slower' || action === 'faster' || action === 'normal') handleSpeedChange(action === 'normal' ? 1 : Math.max(0.25, Math.min(4, speed + (action === 'slower' ? -0.25 : 0.25))));
+    if (action === 'skip') {
+      const segment = selectedItem.chapters?.find((ch) => (ch.kind === 'sponsor' || ch.kind === 'ad') && ch.startSec <= currentSec && ch.endSec > currentSec);
+      if (segment) handleSkipSponsor(segment);
+      else setActionStatus('当前位置没有可跳过的赞助片段');
+    }
+    if (action === 'previous' || action === 'next') {
+      const index = filteredItems.findIndex((item) => item.id === selectedItem.id);
+      const next = filteredItems[index + (action === 'previous' ? -1 : 1)];
+      if (next) void handleSelectMedia(next);
+    }
+  };
+  useEffect(() => {
+    const listener = (event: Event) => shortcutHandler.current((event as CustomEvent<PlayerShortcut>).detail);
+    window.addEventListener(PLAYER_SHORTCUT_EVENT, listener);
+    return () => window.removeEventListener(PLAYER_SHORTCUT_EVENT, listener);
+  }, []);
 
   const handleQueueEphemeral = async (id: string) => {
     const result = await enqueueEphemeralTrack(selectedItem);
@@ -627,7 +659,8 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                             boxShadow: 'var(--shadow-page)',
                           }}
                         >
-                          <span className="rounded bg-black/65 px-1.5 py-[1px] font-mono text-[12.5px] leading-tight">
+                          <MediaCover url={item.coverUrl} />
+                          <span className="relative rounded bg-black/65 px-1.5 py-[1px] font-mono text-[12.5px] leading-tight">
                             {item.durationLabel}
                           </span>
                         </div>
@@ -649,6 +682,8 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                 })}
               </div>
             )}
+
+            {liveMedia.pagination && activeCategory === effectiveCategory ? <LoadMoreButton id="media:feed:more" pagination={liveMedia.pagination} /> : null}
 
             <p
               className="mt-2 border-t pt-3 text-[13.5px] leading-[1.68] text-[var(--text-subtle)]"

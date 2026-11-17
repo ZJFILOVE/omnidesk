@@ -62,6 +62,10 @@ function mediaSourceResponse(args?: Record<string, unknown>) {
     ok: true, data: { media_sources: [{ source_id: 'plugin-youtube', title: 'YouTube' }] }, error: '',
   };
   const params = args?.params as Record<string, unknown> | undefined;
+  if (args?.op === 'capability.call' && params?.capability === 'media.youtube.v1') return {
+    ok: true, provider_plugin_id: 'plugin-youtube', error: '',
+    data: { play_url: 'https://video.example/resolved.mp4' },
+  };
   if (args?.op === 'domain.invoke') return {
     ok: true, error: '', data: { result: params?.method === 'fetch_items' ? [{
       id: playingState.itemId, source_id: 'plugin-youtube', title: playingState.title,
@@ -241,9 +245,19 @@ describe('MediaWorkbench real mpv integration', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '开始播放' }));
     await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('call', {
+        args: expect.objectContaining({
+          op: 'capability.call',
+          params: expect.objectContaining({
+            capability: 'media.youtube.v1',
+            provider_plugin_id: 'plugin-youtube',
+            payload: expect.objectContaining({ action: 'resolve_stream', item_id: 'kCc8FmEb1nY' }),
+          }),
+        }),
+      });
       expect(invoke).toHaveBeenCalledWith('mpv_open', {
         args: expect.objectContaining({
-          url: 'https://www.youtube.com/watch?v=kCc8FmEb1nY',
+          url: 'https://video.example/resolved.mp4',
           itemId: 'media-yt-attention',
           hwdec: true,
         }),

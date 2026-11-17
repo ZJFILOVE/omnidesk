@@ -121,7 +121,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
   };
 
   return (
-    <article className="omni-prose-measure mx-auto flex w-full flex-col gap-7 px-6 py-7 sm:px-9">
+    <article className="flex w-full min-w-0 flex-col gap-7 px-4 py-7 sm:px-6">
       {/* Magazine / Journal Editorial Masthead */}
       <header className="flex flex-col gap-4 border-b pb-6" style={{ borderColor: HAIRLINE_BORDER }}>
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -151,9 +151,9 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
           <h2 className="omni-editorial-title text-[26px] leading-[1.32] font-bold text-[var(--text-primary)] sm:text-[30px]">
             {article.titleZh}
           </h2>
-          <p className="mt-2 font-serif text-[17px] leading-[1.55] italic text-[var(--text-muted)]">
+          {article.title !== article.titleZh ? <p className="mt-2 font-serif text-[17px] leading-[1.55] italic text-[var(--text-muted)]">
             {article.title}
-          </p>
+          </p> : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[14.5px] text-[var(--text-muted)]">
@@ -203,7 +203,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
         </div>
       </header>
 
-      {/* Comfortable Prose Body (68-76ch, >= 1.78 line-height) */}
+      {/* Let the reading surface use the available workbench width. */}
       <div ref={blocksRef} data-testid="text-article-blocks" className="flex flex-col gap-3.5">
         {article.blocks.map(renderBlock)}
       </div>

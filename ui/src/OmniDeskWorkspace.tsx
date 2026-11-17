@@ -1,3 +1,4 @@
+import { playerShortcut, PLAYER_SHORTCUT_EVENT } from './utils/playerShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { AppShell } from './components/AppShell';
 import { AuthCenterPanel } from './components/AuthCenterPanel';
@@ -7,9 +8,10 @@ import { HostSettingsPanel } from './components/HostSettingsPanel';
 import { JobCenterPanel } from './components/JobCenterPanel';
 import { MiniPlayerBar } from './components/MiniPlayerBar';
 import { OverlayLayer } from './components/OverlayLayer';
-import type { VocabAddPayload } from './components/WorkbenchLayout';
+import type { VocabAddPayload, WorkbenchEntityContext } from './components/WorkbenchLayout';
 import {
   call,
+  getTauriGlobal,
   formatRpcError,
   listPlugins,
   submitJob,
@@ -131,6 +133,10 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [curationOpen, setCurationOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string | null>(null);
+  const [workbenchContexts, setWorkbenchContexts] = useState<Partial<Record<BuiltinWorkbenchId, WorkbenchEntityContext | null>>>({});
+  const contextCallbacks = useMemo(() => Object.fromEntries(BUILTIN_WORKBENCHES.map((wb) => [
+    wb.id, (context: WorkbenchEntityContext | null) => setWorkbenchContexts((previous) => ({ ...previous, [wb.id]: context })),
+  ])) as Record<BuiltinWorkbenchId, (context: WorkbenchEntityContext | null) => void>, []);
   const prevWorkbenchRef = useRef<WorkbenchId>(activeWorkbench);
   const lastBuiltinRef = useRef<BuiltinWorkbenchId>('media');
 
@@ -446,6 +452,25 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
     onMove: moveFocus,
     onActivate: activateFocused,
     onSpace: handleSpace,
+    onPlayerKey: (event) => {
+      if (activeWorkbench !== 'media' || settingsOpen || authCenterOpen || jobCenterOpen || curationOpen) return false;
+      if (event.target instanceof Element && event.target.closest('[data-focus-zone="dock"], [role="dialog"]')) return false;
+      if (event.key === 'F11') {
+        if (!event.repeat) void Promise.resolve().then(() => {
+          const invoke = getTauriGlobal()?.core?.invoke;
+          if (invoke) return invoke('player_fullscreen');
+          if (document.fullscreenElement) return document.exitFullscreen?.();
+          return document.documentElement.requestFullscreen?.();
+        }).catch((error) => setCommandNotice(`全屏失败：${String(error)}`));
+        return true;
+      }
+      const action = playerShortcut(event);
+      if (!action) return false;
+      if (!event.repeat || ['back', 'forward', 'quieter', 'louder'].includes(action)) {
+        window.dispatchEvent(new CustomEvent(PLAYER_SHORTCUT_EVENT, { detail: action }));
+      }
+      return true;
+    },
     onCycleZone: handleCycleZone,
     onAltShortcut: handleAltShortcut,
     onTriggerSearch: handleTriggerSearch,
@@ -459,8 +484,8 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
   );
 
   const activeContextEntity = useMemo(
-    () => resolveContextEntity(activeWorkbench, focusedId, activeMeta),
-    [activeMeta, activeWorkbench, focusedId],
+    () => workbenchContexts[activeWorkbench as BuiltinWorkbenchId] ?? resolveContextEntity(activeWorkbench, focusedId, activeMeta),
+    [activeMeta, activeWorkbench, focusedId, workbenchContexts],
   );
   const authSummary = useMemo(
     () => ({
@@ -530,6 +555,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
                 onFocus={isCurrent ? handleWorkbenchFocus : undefined}
                 onOpenDock={isCurrent ? onOpenDock : undefined}
                 onAddVocab={handleAddVocab}
+                onContextChange={contextCallbacks[wb.id]}
                 sharedVocab={sharedVocab}
                 onNavigateWorkbench={(wbId) => selectWorkbenchClean(wbId)}
                 onOpenPluginSettings={(pluginId) => {
@@ -564,6 +590,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
               <PluginWorkspace
                 tab={tab}
                 isActive={isCurrent}
+                webviewVisible={!paletteOpen && !helpOpen && !hintOpen && !settingsOpen && !authCenterOpen && !jobCenterOpen && !curationOpen && !(dockOpen && dockLayout === 'bottom')}
                 tauriAvailable={tauriAvailable}
                 onRefreshExtensions={() => {
                   void refreshExtensions();

@@ -1,11 +1,13 @@
-import { ExternalLink, FileText, MessageSquare, Star } from 'lucide-react';
+import { ExternalLink as ExternalLinkIcon, FileText, MessageSquare, Star } from 'lucide-react';
 import { MarkdownRenderer } from '../components/MarkdownRenderer';
+import { ExternalLink } from '../components/ExternalLink';
 
 type Dict = Record<string, unknown>;
 
 interface PluginResultViewProps {
   payload: unknown;
   actionId: string;
+  onOpenItem?: (item: Dict) => void;
 }
 
 const isRecord = (value: unknown): value is Dict =>
@@ -26,14 +28,13 @@ const safeHref = (value: unknown): string => {
   return href.startsWith('https://') || href.startsWith('http://') ? href : '';
 };
 
-function resolveBody(payload: unknown): Dict {
+export function resolveBody(payload: unknown): Dict {
   if (!isRecord(payload)) return {};
-  if (isRecord(payload.result)) return payload.result;
-  if (isRecord(payload.data)) return payload.data;
-  return payload;
+  const body = isRecord(payload.result) ? payload.result : isRecord(payload.data) ? payload.data : payload;
+  return !Array.isArray(body.items) && Array.isArray(body.results) ? { ...body, items: body.results } : body;
 }
 
-function FeedItemCard({ item, index }: { item: Dict; index: number }) {
+function FeedItemCard({ item, index, onOpenItem }: { item: Dict; index: number; onOpenItem?: (item: Dict) => void }) {
   const title = text(item.title || item.name || item.id || `条目 ${index + 1}`);
   const excerpt = text(item.excerpt || item.summary || item.subtitle || item.description);
   const source = text(item.source_name || item.source || item.category);
@@ -53,20 +54,27 @@ function FeedItemCard({ item, index }: { item: Dict; index: number }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
             <h3 className="text-[15px] font-medium leading-[1.5] text-[var(--text-primary)]">
-              {url ? (
-                <a
+              {onOpenItem ? (
+                <button type="button" onClick={() => onOpenItem(item)}
+                  className="cursor-pointer text-left hover:text-[var(--focus-ring)] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]">{title}</button>
+              ) : url ? (
+                <ExternalLink
                   href={url}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-start gap-1.5 hover:text-[var(--focus-ring)]"
                 >
                   <span>{title}</span>
-                  <ExternalLink className="mt-1 h-3 w-3 shrink-0" aria-hidden="true" />
-                </a>
+                  <ExternalLinkIcon className="mt-1 h-3 w-3 shrink-0" aria-hidden="true" />
+                </ExternalLink>
               ) : (
                 title
               )}
             </h3>
+            {onOpenItem && url ? <ExternalLink href={url} aria-label={`打开原文：${title}`} title="在浏览器打开原文"
+              className="shrink-0 rounded p-2 text-[var(--text-muted)] hover:bg-[var(--hover-fill)]">
+              <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" />
+            </ExternalLink> : null}
           </div>
           {excerpt ? (
             <p className="mt-1 line-clamp-3 text-[13.5px] leading-[1.55] text-[var(--text-muted)]">
@@ -199,7 +207,7 @@ function KeyValueSummary({ body }: { body: Dict }) {
   );
 }
 
-export function PluginResultView({ payload, actionId }: PluginResultViewProps) {
+export function PluginResultView({ payload, actionId, onOpenItem }: PluginResultViewProps) {
   const body = resolveBody(payload);
   const items = asRecords(body.items);
   const article = isRecord(body.article)
@@ -228,7 +236,7 @@ export function PluginResultView({ payload, actionId }: PluginResultViewProps) {
         </div>
       ) : null}
       {items.map((item, index) => (
-        <FeedItemCard key={text(item.id) || index} item={item} index={index} />
+        <FeedItemCard key={text(item.id) || index} item={item} index={index} onOpenItem={onOpenItem} />
       ))}
       {article ? <ArticleView article={article} /> : null}
       {chapters.length > 0 ? (

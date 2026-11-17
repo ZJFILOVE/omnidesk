@@ -151,7 +151,7 @@ export function AppShell({
       <div className="flex-1 min-h-0 flex overflow-hidden">
         <aside
           aria-label="工作台与插件页签导航"
-          className="w-[64px] md:w-[150px] shrink-0 flex flex-col justify-between py-3.5 px-2.5"
+          className="w-[64px] md:w-[210px] xl:w-[240px] shrink-0 flex flex-col justify-between py-3.5 px-2.5"
           style={{
             backgroundColor: 'var(--bg-sunken)',
             borderRight: '1px solid var(--border-subtle)',

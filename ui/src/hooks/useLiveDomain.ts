@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { LoadMoreState } from '../components/LoadMoreButton';
 import {
   callCapability,
   domainSources,
@@ -46,6 +47,7 @@ function toStreamResolver(value: unknown): StreamResolverDescriptor | undefined 
   if (!capability) return undefined;
   return {
     capability,
+    providerPluginId: str(raw.provider_plugin_id) || undefined,
     payload: dict(raw.payload),
     qualityOptions: arr(raw.quality_options)
       .map((entry) => (isRecord(entry) ? str(entry.value) : str(entry)))
@@ -70,10 +72,10 @@ function formatDuration(sec: number): string {
 }
 
 const GRADIENTS = [
-  'from-sky-500/25 via-cyan-400/10 to-transparent',
-  'from-amber-500/25 via-orange-400/10 to-transparent',
-  'from-emerald-500/25 via-teal-400/10 to-transparent',
-  'from-violet-500/25 via-fuchsia-400/10 to-transparent',
+  'linear-gradient(135deg, #263849, #326278)',
+  'linear-gradient(135deg, #493728, #88603a)',
+  'linear-gradient(135deg, #263d35, #37745b)',
+  'linear-gradient(135deg, #352c49, #6d4f84)',
 ];
 
 function gradientFor(seed: string): string {
@@ -161,7 +163,7 @@ export function toBookItem(raw: unknown): BookItem | null {
   if (!id) return null;
   const fmt = str(item.format, 'epub');
   const format: BookItem['format'] =
-    fmt === 'pdf' || fmt === 'english_daily' ? fmt : 'epub';
+    fmt as BookItem['format'];
   return {
     id,
     title: str(item.title, id),
@@ -172,6 +174,7 @@ export function toBookItem(raw: unknown): BookItem | null {
     totalPages: Math.max(1, num(item.total_pages, 1)),
     currentPage: Math.max(1, num(item.current_page, 1)),
     coverGradient: gradientFor(id),
+    coverUrl: str(dict(item.extra).cover_data_url, str(item.cover_url)) || undefined,
     badge: str(item.badge, format.toUpperCase()),
     sourcePlugin: str(item.source_id, 'book.source.v1'),
     bilingualReady: Boolean(item.bilingual_ready),
@@ -187,13 +190,16 @@ function toBookSpreads(raw: unknown, bookId: string): BookSpread[] {
       id: str(block.id, `${bookId}-p${index}-l${i}`),
       text: str(block.original, str(block.translated)),
       keyTerms: arr(block.highlighted_words).map(String),
+      imageUrl: str(block.image_url) || undefined,
     }));
-    const right = blocks.map((block, i) => ({
+    const right = blocks.filter((block) => str(block.translated) || str(block.translated_image_url)).map((block, i) => ({
       id: str(block.id, `${bookId}-p${index}-r${i}`),
-      text: str(block.translated, str(block.original)),
+      text: str(block.translated),
+      imageUrl: str(block.translated_image_url) || undefined,
     }));
     return {
       page: Math.max(1, num(spread.page_number, index + 1)),
+      totalPages: Math.max(1, num(spread.total_pages, 1)),
       chapterTitle: str(spread.chapter_title, `第 ${index + 1} 页`),
       leftTitle: '原文',
       leftParagraphs: left,
@@ -211,6 +217,17 @@ export function toMediaItem(raw: unknown): MediaItem | null {
   const duration = num(item.duration_sec);
   const extra = dict(item.extra);
   const playUrl = str(item.play_url);
+  let youtubeId = '';
+  try {
+    const url = new URL(playUrl);
+    if (['youtube.com', 'www.youtube.com', 'm.youtube.com'].includes(url.hostname)) youtubeId = url.searchParams.get('v') ?? '';
+    if (url.hostname === 'youtu.be') youtubeId = url.pathname.slice(1);
+  } catch { /* Local files do not need a resolver. */ }
+  const inferredYoutubeResolver: StreamResolverDescriptor | undefined = /^[a-zA-Z0-9_-]{11}$/.test(youtubeId) ? {
+    capability: 'media.youtube.v1', providerPluginId: 'plugin-youtube',
+    payload: { action: 'resolve_stream', item_id: youtubeId }, qualityOptions: ['best', '1080p', '720p', '480p'],
+  } : undefined;
+
   const httpHeaders =
     toStringMap(item.http_headers) ??
     toStringMap(item.headers) ??
@@ -235,12 +252,13 @@ export function toMediaItem(raw: unknown): MediaItem | null {
     businessDate: (item.business_date as string) || undefined,
     previouslyRecommendedOn: (item.previously_recommended_on as string) || undefined,
     thumbGradient: gradientFor(id),
+    coverUrl: str(item.cover_url, str(item.coverUrl)) || undefined,
     thumbTag: str(item.source_badge, kind.toUpperCase()),
     playUrl,
     audioUrl: str(item.audio_url) || undefined,
     httpHeaders,
     qualityLabel: str(item.quality_label) || undefined,
-    streamResolver: toStreamResolver(extra.stream_resolver),
+    streamResolver: toStreamResolver(extra.stream_resolver) ?? inferredYoutubeResolver,
     summary: str(item.summary),
     listeningCue: str(item.listening_cue) || undefined,
     appleMusicSongId: appleMusicSongId || undefined,
@@ -287,9 +305,10 @@ export interface LiveFeed<T> {
   loading: boolean;
   error: string | null;
   reload: () => void;
+  pagination?: LoadMoreState;
 }
 
-function useLiveSource<T>(
+function useLiveSource<T extends { id: string }>(
   domain: 'text' | 'book' | 'media',
   method: string,
   payload: Dict,
@@ -306,6 +325,13 @@ function useLiveSource<T>(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
+  const morePending = useRef(false);
+  const paginated = method === 'fetch_feed' || method === 'fetch_items';
   const payloadKey = JSON.stringify(payload);
   const mounted = useRef(true);
   useEffect(() => {
@@ -352,6 +378,12 @@ function useLiveSource<T>(
       return;
     }
     let cancelled = false;
+    requestVersion.current += 1;
+    morePending.current = false;
+    setPage(1);
+    setHasMore(false);
+    setLoadingMore(false);
+    setLoadMoreError(null);
     setLoading(true);
     setError(null);
     setItems([]);
@@ -417,6 +449,7 @@ function useLiveSource<T>(
         .filter((entry): entry is T => entry !== null);
       setSourceId(chosen);
       setItems(mapped);
+      setHasMore(paginated && mapped.length > 0);
       // A successful empty response is still live data, never a request for demo content.
       setLive(true);
     })().catch((err: unknown) => {
@@ -427,11 +460,53 @@ function useLiveSource<T>(
     });
     return () => {
       cancelled = true;
+      requestVersion.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [domain, method, payloadKey, nonce, preferredSourceId, ...deps]);
 
-  return { items, sources, categories, channels, sourceId, live, loading, error, reload };
+  const loadMore = useCallback(async () => {
+    if (!paginated || !live || loading || !hasMore || morePending.current) return;
+    const version = requestVersion.current;
+    morePending.current = true;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const res = await invokeDomain<unknown>({
+        domain, sourceId, method,
+        payload: { ...JSON.parse(payloadKey), page: page + 1 },
+        timeoutMs: 30000,
+      });
+      if (version !== requestVersion.current || !mounted.current) return;
+      if (!res.ok) {
+        setLoadMoreError(res.available ? res.error.message : '数据源连接不可用，请重试。');
+        return;
+      }
+      const seen = new Set(items.map((item) => item.id));
+      const next = arr(res.data).map((entry) => mapItem(entry, sourceId))
+        .filter((item): item is T => {
+          if (!item || seen.has(item.id)) return false;
+          seen.add(item.id);
+          return true;
+        });
+      setItems((previous) => [...previous, ...next]);
+      if (next.length > 0) setPage(page + 1);
+      // Some sources repeat their first page when exhausted; avoid an endless loop.
+      setHasMore(next.length > 0);
+    } catch (err) {
+      if (version === requestVersion.current && mounted.current) {
+        setLoadMoreError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (version === requestVersion.current && mounted.current) {
+        morePending.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [domain, sourceId, method, payloadKey, page, items, live, loading, hasMore, paginated, mapItem]);
+
+  return { items, sources, categories, channels, sourceId, live, loading, error, reload,
+    pagination: paginated && live ? { page, hasMore, loadingMore, loadMoreError, loadMore } : undefined };
 }
 
 export function useLiveTextFeed(query = '', channelId = '', sourceId = ''): LiveFeed<TextArticle> {
@@ -555,7 +630,7 @@ export function useLiveSpread(bookId: string, page = 1, sourceId?: string): Live
         sourceId,
         method: 'fetch_spread',
         payload: { book_id: bookId, page_number: page },
-        timeoutMs: 30000,
+        timeoutMs: 120000,
       });
       if (cancelled) return;
       setLoading(false);

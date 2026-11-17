@@ -6,7 +6,7 @@ import { BOOK_ITEMS, MEDIA_ITEMS, TEXT_ARTICLES } from '../../data/mock';
 import { BookWorkbench } from '../../workbenches/BookWorkbench';
 import { MediaWorkbench } from '../../workbenches/MediaWorkbench';
 import { TextWorkbench } from '../../workbenches/TextWorkbench';
-import { useLiveArticleDetail, useLiveBooks, useLiveMedia } from '../useLiveDomain';
+import { useLiveArticleDetail, useLiveBooks, useLiveMedia, useLiveTextFeed } from '../useLiveDomain';
 
 const ok = (data: unknown) => ({ ok: true, data, error: '' });
 type Params = { domain: string; source_id: string; method: string; payload: Record<string, unknown> };
@@ -42,6 +42,70 @@ function connect(read: (params: Params) => unknown | Promise<unknown>) {
 afterEach(() => { cleanup(); delete window.__TAURI__; vi.restoreAllMocks(); });
 
 describe('live workbench data flow', () => {
+  it.each(['media', 'text'])('%s appends real provider pages, deduplicates and stops on an empty page', async (domain) => {
+    const requests: Params[] = [];
+    connect((params) => {
+      requests.push(params);
+      const page = params.payload.page;
+      return ok({ result: page === 1 ? [{ id: 'one', title: '第一条' }] : page === 2 ?
+        [{ id: 'one', title: '重复条目' }, { id: 'two', title: '第二条' }] : [] });
+    });
+    const { result } = renderHook(() => domain === 'media' ? useLiveMedia('search', '关键词', 'provider') : useLiveTextFeed('关键词', 'tech', 'provider'));
+    await waitFor(() => expect(result.current.live).toBe(true));
+    await act(async () => { result.current.pagination!.loadMore(); result.current.pagination!.loadMore(); });
+    await waitFor(() => expect(result.current.items.map((item) => item.id)).toEqual(['one', 'two']));
+    expect(requests.map((request) => request.payload.page)).toEqual([1, 2]);
+    expect(requests[1]).toMatchObject({ source_id: 'provider', payload: { query: '关键词', page: 2 } });
+    expect(result.current.pagination?.page).toBe(2);
+    await act(async () => result.current.pagination!.loadMore());
+    await waitFor(() => expect(result.current.pagination?.hasMore).toBe(false));
+    expect(result.current.items).toHaveLength(2);
+  });
+
+  it('keeps loaded content on failure and retries the same next page', async () => {
+    let fail = true;
+    connect(({ payload }) => payload.page === 2 && fail ? { ok: false, error: '网络中断' } :
+      ok({ result: [{ id: `item-${payload.page}` }] }));
+    const { result } = renderHook(() => useLiveMedia());
+    await waitFor(() => expect(result.current.live).toBe(true));
+    await act(async () => result.current.pagination!.loadMore());
+    await waitFor(() => expect(result.current.pagination?.loadMoreError).toBe('网络中断'));
+    expect(result.current.items.map((item) => item.id)).toEqual(['item-1']);
+    expect(result.current.pagination?.page).toBe(1);
+    fail = false;
+    await act(async () => result.current.pagination!.loadMore());
+    await waitFor(() => expect(result.current.items.map((item) => item.id)).toEqual(['item-1', 'item-2']));
+    expect(result.current.pagination?.loadMoreError).toBeNull();
+  });
+
+  it('discards an in-flight next page after switching filters and resets pagination on refresh', async () => {
+    let finish!: (value: unknown) => void;
+    connect(({ payload }) => payload.page === 2 ? new Promise((resolve) => { finish = resolve; }) :
+      ok({ result: [{ id: String(payload.category) }] }));
+    const { result, rerender } = renderHook(({ category }) => useLiveMedia(category), { initialProps: { category: 'old' } });
+    await waitFor(() => expect(result.current.live).toBe(true));
+    act(() => { result.current.pagination!.loadMore(); });
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    rerender({ category: 'new' });
+    await waitFor(() => expect(result.current.items[0]?.id).toBe('new'));
+    await act(async () => finish(ok({ result: [{ id: 'stale' }] })));
+    expect(result.current.items.map((item) => item.id)).toEqual(['new']);
+    expect(result.current.pagination?.page).toBe(1);
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.live).toBe(true));
+    expect(result.current.pagination?.loadingMore).toBe(false);
+  });
+
+  it.each([TextWorkbench, MediaWorkbench])('loads the next page through the workbench button', async (Workbench) => {
+    connect(({ method, payload }) => ok({ result: method === 'fetch_article' ? {} :
+      [{ id: `item-${payload.page}`, title: `第${payload.page}批内容` }] }));
+    render(<Workbench />);
+    fireEvent.click(await screen.findByRole('button', { name: '加载下一页' }));
+    await screen.findByText(/已加载 2 页/);
+    expect(screen.getAllByText('第1批内容').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('第2批内容').length).toBeGreaterThan(0);
+  });
+
   it.each([
     ['text', TextWorkbench, TEXT_ARTICLES[0].titleZh],
     ['book', BookWorkbench, BOOK_ITEMS[0].title],

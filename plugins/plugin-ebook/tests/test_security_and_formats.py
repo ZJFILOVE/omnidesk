@@ -217,3 +217,27 @@ async def test_security_traversal_symlink_zip_slip_zip_bomb_and_xml_bomb(
 
     await invoke_lifecycle_hook(plugin.on_unload)
     await ctx.acleanup()
+
+
+def test_epub_images_and_real_page_two(tmp_path: Path) -> None:
+    from ebook_lib.epub_parser import parse_epub
+    import base64
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+    book = build_minimal_epub(tmp_path / "illustrated.epub", extra_entries={"OEBPS/images/diagram.png": png})
+    parsed = parse_epub(book)
+    images = [block for page in parsed.pages for block in page.blocks if block.kind == "image"]
+    assert images and images[0].image_url.startswith("data:image/png;base64,")
+    assert base64.b64decode(images[0].image_url.split(",", 1)[1]) == png
+    assert parsed.extra["cover_data_url"] == images[0].image_url
+    assert len(parsed.pages) >= 2
+    assert "Telemetry" in parsed.pages[1].chapter_title
+
+
+def test_epub_external_images_do_not_escape_archive(tmp_path: Path) -> None:
+    from ebook_lib.epub_parser import parse_epub
+    path = build_minimal_epub(tmp_path / "external.epub", chapters=[{
+        "filename": "cover.xhtml", "title": "Cover", "body": '<img src="https://example.com/track.png"/><img src="../../../../etc/passwd"/>'
+    }])
+    from ebook_lib.errors import EbookPathSafetyError
+    with pytest.raises(EbookPathSafetyError):
+        parse_epub(path)

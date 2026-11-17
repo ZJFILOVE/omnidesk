@@ -239,15 +239,30 @@ class ChromeWebPlugin(BasePlugin):
             targets = await self._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
             target, needs_nav = select_extract_target(targets, url)
             navigate_url = url if (needs_nav and payload.get("navigate", True) is not False) else None
-            eval_resp = await self._cdp_transport.evaluate(
-                str(target["webSocketDebuggerUrl"]),
-                "document.documentElement ? document.documentElement.outerHTML : ''",
-                await_promise=False,
-                return_by_value=True,
-                navigate_url=navigate_url,
-                timeout_sec=timeout_sec,
-            )
-            html_value = extract_eval_value(eval_resp)
+            deadline = asyncio.get_running_loop().time() + timeout_sec
+            html_value = ""
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise CdpError("等待网页正文加载超时", error_code="timeout")
+                try:
+                    eval_resp = await self._cdp_transport.evaluate(
+                        str(target["webSocketDebuggerUrl"]),
+                        "document.readyState !== 'loading' && document.documentElement ? document.documentElement.outerHTML : ''",
+                        await_promise=False,
+                        return_by_value=True,
+                        navigate_url=navigate_url,
+                        timeout_sec=remaining,
+                    )
+                    html_value = extract_eval_value(eval_resp)
+                except CdpError as exc:
+                    # A navigation can destroy the old JS realm before evaluation.
+                    if not any(marker in str(exc).lower() for marker in ("context was destroyed", "cannot find context")):
+                        raise
+                navigate_url = None  # Retry reading, never restart the navigation.
+                if isinstance(html_value, str) and html_value.strip():
+                    break
+                await asyncio.sleep(min(0.15, max(0, deadline - asyncio.get_running_loop().time())))
         except CdpError as exc:
             return CapabilityResult.fail(redact_sensitive(str(exc)), error_code=exc.error_code)
 
@@ -255,7 +270,7 @@ class ChromeWebPlugin(BasePlugin):
             return CapabilityResult.fail("CDP 未返回已渲染页面 DOM（拒绝使用 urllib 静默降级）", error_code="service_offline")
 
         target_url = str(target.get("url") or "")
-        final_url = target_url if (not navigate_url and target_url.startswith(("http://", "https://"))) else url
+        final_url = target_url if (not needs_nav and target_url.startswith(("http://", "https://"))) else url
         parsed = extract_from_html(html_value, base_url=final_url, fallback_title=str(target.get("title") or ""))
         translate_flag = bool(payload.get("translate") or payload.get("bilingual"))
         target_lang = str(payload.get("target_lang") or "zh-CN").strip() or "zh-CN"
@@ -294,7 +309,27 @@ class ChromeWebPlugin(BasePlugin):
             return CapabilityResult.fail(str(exc), error_code=exc.error_code)
 
         try:
-            targets = await self._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
+            try:
+                targets = await self._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
+            except CdpError as exc:
+                if exc.error_code != "service_offline" or not payload.get("open_tab_if_missing"):
+                    raise
+                tab_url = validate_http_url(str(payload.get("tab_url") or f"{origin_string(url)}/"), field_name="tab_url")
+                if origin_string(tab_url) != origin_string(url):
+                    raise CdpError("tab_url 与目标 URL 不同源", error_code="permission_denied")
+                opened = await self.handle_embed({"action": "open", "url": tab_url})
+                if not opened.ok:
+                    return opened
+                host, port = self._resolve_cdp_endpoint(payload)
+                # Startup is asynchronous; retry only the local browser endpoint.
+                for attempt in range(20):
+                    try:
+                        targets = await self._cdp_transport.list_targets(host, port, timeout_sec=min(timeout_sec, 1.0))
+                        break
+                    except CdpError:
+                        if attempt == 19:
+                            raise
+                        await asyncio.sleep(0.15)
             navigate_url: str | None = None
             try:
                 target = select_same_origin_target(targets, url)

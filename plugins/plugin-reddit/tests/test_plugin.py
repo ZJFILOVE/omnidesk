@@ -1004,6 +1004,8 @@ async def test_chrome_fetch_and_html_extract_fallback_and_malformed_html(tmp_pat
         assert res_html_feed.data["transport"] == "web.extract.v1:html"
         assert res_html_feed.data["items"][0]["title"] == "Rust Async Guide"
         assert res_html_feed.data["items"][0]["score"] == 188
+        assert res_html_feed.data["after"] == "t3_html1"
+        assert res_html_feed.data["has_more"] is True
 
         # 3. web.extract.v1 post HTML with nested comment tree!
         extract_mode = "valid_post"

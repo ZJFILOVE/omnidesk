@@ -293,6 +293,7 @@ class XTextSource(TextSource):
     def __init__(self, owner: XPlugin) -> None:
         self._owner = owner
         self.last_error: dict[str, Any] | None = None
+        self._page_cursors: dict[tuple[str, str, int], str] = {}
 
     def channels(self) -> list[TextChannel]:
         self._owner.apply_config()
@@ -306,17 +307,22 @@ class XTextSource(TextSource):
         *,
         force_refresh: bool = False,
     ) -> list[TextFeedItem]:
-        del force_refresh
         self.last_error = None
         self._owner.apply_config()
         if isinstance(page, bool) or not isinstance(page, int) or page < 1:
             return []
+        key = (channel_id.strip(), query.strip())
+        if page == 1 or force_refresh:
+            self._page_cursors = {k: v for k, v in self._page_cursors.items() if k[:2] != key}
+        cursor = self._page_cursors.get((*key, page), "")
+        if page > 1 and not cursor:
+            return []
         try:
-            items, _cursor, _raw = await self._owner.fetch_timeline(
+            items, next_cursor, _raw = await self._owner.fetch_timeline(
                 channel_id=channel_id,
                 query=query,
                 count=20,
-                cursor="",
+                cursor=cursor,
             )
         except XPluginError as exc:
             self.last_error = {
@@ -327,6 +333,8 @@ class XTextSource(TextSource):
             raise
         if self._owner.auto_translate():
             items = await self._owner.translate_feed_items(items)
+        if next_cursor:
+            self._page_cursors[(*key, page + 1)] = next_cursor
         return items
 
     async def fetch_article(self, article_id: str) -> TextArticle:

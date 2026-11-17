@@ -137,6 +137,51 @@ function installTauriMock(
 }
 
 describe('Declarative plugin UI', () => {
+  it('opens a feed article and returns to the accumulated list', async () => {
+    const invoke = vi.fn(async (_cmd: string, payload?: { args?: { params?: { action_id?: string } } }) => ({ ok: true, data: { ok: true, result:
+      payload?.args?.params?.action_id === 'fetch_article'
+        ? { article: { title: '主题详情', paragraphs: [{ original: '可阅读的真实正文' }] } }
+        : { items: [{ id: 'post-1', title: '打开这个主题', url: 'https://example.org/post' }] },
+    } }));
+    window.__TAURI__ = { core: { invoke: invoke as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'] } };
+    render(<PluginWorkspace tab={{ tab_id: 'topics', plugin_id: 'plugin-zhihu', title: '知乎', domain: 'text', ui_schema: { type: 'ActionRow', actions: [{ id: 'fetch_feed', label: '刷新栏目' }] } }} />);
+    fireEvent.click(await screen.findByRole('button', { name: '打开这个主题' }));
+    await screen.findByText('可阅读的真实正文');
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }));
+    await screen.findByRole('button', { name: '打开这个主题' });
+    expect(screen.queryByText('可阅读的真实正文')).toBeNull();
+  });
+
+  it('appends plugin pages using the successful query and cursor, and retries without losing entries', async () => {
+    let fail = true;
+    const requests: Record<string, unknown>[] = [];
+    const invoke = vi.fn(async (_cmd: string, payload?: { args?: { op?: string; params?: { state?: Record<string, unknown> } } }) => {
+      const state = payload?.args?.params?.state ?? {};
+      requests.push(state);
+      if (state.page === 2 && fail) return { ok: true, data: { ok: false, error: '请求失败' } };
+      return { ok: true, data: { ok: true, result: {
+        items: state.page === 2 ? [{ id: 'one', title: '第一批' }, { id: 'two', title: '第二批' }] : [{ id: 'one', title: '第一批' }],
+        next_cursor: state.page === 2 ? '' : 'cursor-2', has_more: state.page !== 2,
+      } } };
+    });
+    window.__TAURI__ = { core: { invoke: invoke as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'] } };
+    render(<PluginWorkspace tab={{ tab_id: 'x', plugin_id: 'plugin-x', title: 'X', domain: 'text',
+      ui_schema: { type: 'ActionRow', actions: [{ id: 'fetch_feed', label: '刷新栏目' }] },
+    }} />);
+    await screen.findByText('第一批');
+    fireEvent.click(screen.getByRole('button', { name: '加载下一页' }));
+    fireEvent.click(await screen.findByRole('button', { name: '重试下一页' }));
+    await screen.findByRole('button', { name: '重试下一页' });
+    expect(screen.getByText('第一批')).not.toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: '重试下一页' }));
+    await screen.findByText('第二批');
+    expect(screen.getAllByText('第一批')).toHaveLength(1);
+    expect(requests.slice(1)).toEqual(Array(3).fill({ page: 2, cursor: 'cursor-2' }));
+    expect(screen.queryByRole('button', { name: '加载下一页' })).toBeNull();
+    expect(screen.getByText(/没有更多内容了/)).not.toBeNull();
+  });
+
   it('auto-loads a text feed and renders readable entries alongside the control schema', async () => {
     const invoke = installTauriMock(
       {

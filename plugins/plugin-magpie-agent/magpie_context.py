@@ -26,6 +26,8 @@ CONTEXT_CAPABILITIES = frozenset(
         "speech.asr.v1",
         "text.source.v1",
         "media.source.v1",
+        "media.youtube.v1",
+        "media.bilibili.v1",
         "book.bilingual_pdf.v1",
     }
 )
@@ -134,7 +136,10 @@ async def collect_context(
         payload = item.get("payload")
         if not capability:
             return "", {}, {"index": index, "label": label, "error_code": "invalid_argument", "error": "缺少 capability"}
-        if capability not in CONTEXT_CAPABILITIES:
+        if capability not in CONTEXT_CAPABILITIES or (
+            capability in {"media.youtube.v1", "media.bilibili.v1"}
+            and (not isinstance(payload, Mapping) or payload.get("action") not in {"fetch_chapters", "fetch_subtitles", "fetch_lyrics"})
+        ):
             return (
                 "",
                 {},

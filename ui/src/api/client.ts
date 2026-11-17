@@ -998,6 +998,7 @@ export async function searchBooks(args: {
   provider?: BookSearchProvider;
   format?: string;
   limit?: number;
+  page?: number;
 }): Promise<RpcResult<{ results: BookSearchResult[]; providerPluginId: string }>> {
   const providers: string[] =
     args.provider && args.provider !== 'auto'
@@ -1018,6 +1019,7 @@ export async function searchBooks(args: {
         query: args.query,
         format: args.format || undefined,
         limit: args.limit ?? 20,
+        page: args.page ?? 1,
       },
     });
     if (result.available && result.ok) {

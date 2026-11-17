@@ -147,6 +147,8 @@ class PdfBabeldocPlugin(BasePlugin):
                 spread = await self._book_source.fetch_spread(book_id, page_number=raw_page)
             except FileNotFoundError as exc:
                 return CapabilityResult.fail(self._redact(str(exc)), error_code="not_found")
+            except (RuntimeError, OSError) as exc:
+                return CapabilityResult.fail(self._redact(str(exc)), error_code="render_failed")
             except ValueError as exc:
                 return CapabilityResult.fail(self._redact(str(exc)), error_code="invalid_argument")
             if spread.extra.get("needs_bilingual_pdf"):

@@ -27,6 +27,7 @@ export interface UseGlobalKeysOptions {
   onMove: (direction: Direction) => string | null;
   onActivate: () => boolean;
   onSpace?: () => void;
+  onPlayerKey?: (event: KeyboardEvent) => boolean;
   onCycleZone?: () => void;
   onAltShortcut?: (letter: string) => boolean | void;
   onTriggerSearch: () => void;
@@ -166,6 +167,11 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
       }
 
       if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+
+      if (opts.onPlayerKey?.(event)) {
+        event.preventDefault();
         return;
       }
 

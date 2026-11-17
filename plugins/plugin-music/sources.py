@@ -96,11 +96,13 @@ class AppleMusicMediaSource(MediaSource):
         get_data_dir: Callable[[], Path],
         get_qwen: Callable[[], QwenModules] | None = None,
         translate_lines: TranslateLines | None = None,
+        fetch_metadata: Callable[[list[str]], Awaitable[list[dict[str, Any]]]] | None = None,
     ) -> None:
         self._get_config = get_config
         self._get_data_dir = get_data_dir
         self._get_qwen = get_qwen
         self._translate_lines = translate_lines
+        self._fetch_metadata = fetch_metadata
         self.last_translation_error = ""
         self.last_translated_count = 0
 
@@ -445,7 +447,7 @@ class AppleMusicMediaSource(MediaSource):
             creator=artist,
             kind="music",
             source_badge=f"每日 5 首 · {day}",
-            cover_url=str(cached.get("cover_url") or ""),
+            cover_url=str(cached.get("cover_url") or raw.get("cover_url") or am.get("cover_url") or ""),
             play_url=play_url,
             quality_label=str(cached.get("quality_label") or "Apple Music CN · ALAC"),
             duration_sec=float(cached.get("duration_sec") or 0.0),
@@ -577,7 +579,20 @@ class AppleMusicMediaSource(MediaSource):
                 ).casefold()
             ]
         start = (page - 1) * _PAGE_SIZE
-        return items[start : start + _PAGE_SIZE]
+        page_items = items[start : start + _PAGE_SIZE]
+        missing = [normalize_song_id(item.id) for item in page_items if not item.cover_url]
+        if missing and self._fetch_metadata:
+            try:
+                metadata = await asyncio.wait_for(self._fetch_metadata(missing), timeout=12)
+                by_id = {str(track.get("id")): track for track in metadata}
+                for item in page_items:
+                    track = by_id.get(normalize_song_id(item.id), {})
+                    item.cover_url = item.cover_url or str(track.get("cover_url") or "")
+                    item.duration_sec = item.duration_sec or float(track.get("duration_sec") or 0)
+            except Exception:
+                # A metadata outage must not hide the user's local collection.
+                pass
+        return page_items
 
     async def fetch_lyrics(self, item_id: str) -> list[LyricLine]:
         song_id = normalize_song_id(item_id)

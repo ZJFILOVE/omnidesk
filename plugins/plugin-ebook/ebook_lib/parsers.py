@@ -139,10 +139,10 @@ async def convert_and_parse_mobi(
         )
     with tempfile.TemporaryDirectory(prefix="omnidesk-calibre-") as tmpdir:
         out_epub = Path(tmpdir) / "converted.epub"
-        res = await exec_subprocess([resolved, str(safe_path), str(out_epub)], timeout_sec=30.0)
+        res = await exec_subprocess([resolved, str(safe_path), str(out_epub)], timeout_sec=90.0)
         if not getattr(res, "ok", False) or not out_epub.is_file() or out_epub.is_symlink():
             raise FormatUnavailableError(
-                f"Calibre conversion failed for {safe_path.name}; refusing binary fallback"
+                f"无法转换 {safe_path.name}：请确认文件完整、格式受支持且未加密（Calibre 转换失败）"
             )
         parsed = parse_epub(out_epub, page_char_budget=page_char_budget)
         parsed.book_format = book_format

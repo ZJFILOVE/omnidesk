@@ -5,6 +5,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import { ExternalLink } from './ExternalLink';
 import {
   highlightCode,
   isExternalUrl,
@@ -161,8 +162,9 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
           );
         }
         const external = isExternalUrl(safeHref);
+        const Link = external ? ExternalLink : 'a';
         return (
-          <a
+          <Link
             href={safeHref}
             title={title}
             target={external ? '_blank' : undefined}
@@ -171,7 +173,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             style={{ color: 'var(--domain-text, #185194)' }}
           >
             {children}
-          </a>
+          </Link>
         );
       },
       img: ({ src, alt, title }) => {

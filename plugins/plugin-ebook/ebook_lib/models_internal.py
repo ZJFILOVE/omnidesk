@@ -11,7 +11,8 @@ from typing import Any
 
 from omnidesk_sdk import BookFormat, BookPageBlock
 
-SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".epub", ".txt", ".mobi", ".azw3"})
+CALIBRE_FORMATS = frozenset(['mobi', 'azw3', 'azw', 'azw4', 'fb2', 'fbz', 'rtf', 'html', 'htm', 'htmlz', 'docx', 'odt', 'cbz', 'cbr', 'cb7', 'chm', 'djvu', 'lit', 'lrf', 'prc', 'pdb', 'pml', 'rb', 'snb', 'tcr', 'txtz', 'kepub'])
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".epub", ".txt"} | {f".{fmt}" for fmt in CALIBRE_FORMATS})
 _SPACE_RE = re.compile(r"\s+")
 _MAX_BLOCKS_PER_PAGE = 12
 
@@ -87,7 +88,7 @@ def paginate_blocks(
 def probe_file_format(path: Path) -> dict[str, Any]:
     """Inspect extension and leading magic bytes safely without following symlinks."""
     suffix = path.suffix.lower()
-    fmt_map: dict[str, str] = {".epub": "epub", ".txt": "txt", ".mobi": "mobi", ".azw3": "azw3"}
+    fmt_map = {ext: ext.lstrip(".") for ext in SUPPORTED_EXTENSIONS}
     declared = fmt_map.get(suffix, "")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)

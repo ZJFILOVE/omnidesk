@@ -17,7 +17,7 @@ CurationMode = Literal["daily_immutable", "interactive_ephemeral"]
 MediaKind = Literal["video", "music", "live", "nas"]
 ChapterKind = Literal["content", "ad", "sponsor"]
 TextParagraphKind = Literal["heading", "paragraph", "quote", "code", "formula", "image"]
-BookFormat = Literal["pdf", "epub", "mobi", "azw3", "txt", "english_daily"]
+BookFormat = Literal["pdf", "epub", "txt", "english_daily", "mobi", "azw3", "azw", "azw4", "fb2", "fbz", "rtf", "html", "htm", "htmlz", "docx", "odt", "cbz", "cbr", "cb7", "chm", "djvu", "lit", "lrf", "prc", "pdb", "pml", "rb", "snb", "tcr", "txtz", "kepub"]
 BookBlockKind = Literal["heading", "paragraph", "caption", "formula", "image"]
 
 
@@ -281,6 +281,8 @@ class BookPageBlock(BaseModel):
     kind: BookBlockKind = "paragraph"
     original: str = ""
     translated: str = ""
+    image_url: str = ""
+    translated_image_url: str = ""
     highlighted_words: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("highlighted_words", "highlightedWords", "keyTerms"),

@@ -125,7 +125,7 @@ export async function resolveMediaStream(
   }
   const result = await callCapability<Record<string, unknown>>({
     capability: resolver.capability,
-    providerPluginId: item.sourceId,
+    providerPluginId: resolver.providerPluginId ?? item.sourceId,
     payload: {
       ...resolver.payload,
       ...(quality ? { quality } : {}),

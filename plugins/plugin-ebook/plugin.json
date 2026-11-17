@@ -8,7 +8,7 @@
   "kind": "hybrid",
   "domain": "book",
   "author": "OmniDesk",
-  "description": "Local EPUB/MOBI/AZW3/TXT bilingual paginated companion reader, term etymology & sentence breakdown, and SM-2 spaced-repetition vocabulary studio.",
+  "description": "Local EPUB/TXT/PDF-companion and Calibre-backed Kindle, FictionBook, office and comic reader, term etymology & sentence breakdown, and SM-2 spaced-repetition vocabulary studio.",
   "provides": [
     "book.source.v1",
     "vocab.sm2.v1"
@@ -39,7 +39,7 @@
       "label": "Calibre ebook-convert 路径",
       "type": "string",
       "default": "",
-      "description": "Executable name or path to Calibre ebook-convert for MOBI/AZW3 conversion; leave empty to fail closed."
+      "description": "Executable name or path to Calibre ebook-convert for Kindle, FB2, RTF, HTML, DOCX, ODT, comics and other Calibre input formats."
     },
     {
       "key": "target_language",

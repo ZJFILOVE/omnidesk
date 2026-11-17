@@ -114,10 +114,17 @@ class YouTubeMediaSource(MediaSource):
             if (m := map_api_item_to_media_item(r, source_id=self.source_id, quality_label=quality, category=category)) is not None
         ]
 
-    async def fetch_from_target(self, target_type: str, target_id: str, *, category: str, per_page: int) -> list[MediaItem]:
+    async def fetch_from_target(self, target_type: str, target_id: str, *, category: str, per_page: int, page: int = 1) -> list[MediaItem]:
         api: YouTubeApiClient = self._plugin.api_client
         api_key, oauth, region = self._plugin.api_key(), self._plugin.oauth_token(), self._plugin.region()
         timeout_sec = self._plugin.timeout_sec()
+
+        token_key = (f"{category}:{target_type}", f"{target_id}:{per_page}")
+        if page == 1:
+            self._page_tokens = {k: v for k, v in self._page_tokens.items() if k[:2] != token_key}
+        token = self._page_tokens.get((*token_key, page), "")
+        if (api_key or oauth) and page > 1 and not token:
+            return []
 
         if target_type == "playlist":
             try:
@@ -125,12 +132,14 @@ class YouTubeMediaSource(MediaSource):
             except ValueError:
                 return []
             if api_key or oauth:
-                raw_items, _, err = await api.fetch_playlist_videos(pid, api_key=api_key, oauth_token=oauth, max_results=per_page, timeout_sec=timeout_sec)
+                raw_items, next_token, err = await api.fetch_playlist_videos(pid, api_key=api_key, oauth_token=oauth, max_results=per_page, page_token=token, timeout_sec=timeout_sec)
                 if err is not None:
                     self.last_error = err
                     return []
+                if next_token:
+                    self._page_tokens[(*token_key, page + 1)] = next_token
                 return self._map_api_items(raw_items, category=category)
-            return await self._fetch_via_ytdlp_list(f"https://www.youtube.com/playlist?list={pid}", category=category, start=1, end=per_page)
+            return await self._fetch_via_ytdlp_list(f"https://www.youtube.com/playlist?list={pid}", category=category, start=(page - 1) * per_page + 1, end=page * per_page)
 
         if target_type == "channel":
             try:
@@ -139,17 +148,19 @@ class YouTubeMediaSource(MediaSource):
                 return []
             if api_key or oauth:
                 if cid.startswith("UC"):
-                    raw_items, _, err = await api.fetch_playlist_videos("UU" + cid[2:], api_key=api_key, oauth_token=oauth, max_results=per_page, timeout_sec=timeout_sec)
+                    raw_items, next_token, err = await api.fetch_playlist_videos("UU" + cid[2:], api_key=api_key, oauth_token=oauth, max_results=per_page, page_token=token, timeout_sec=timeout_sec)
                     if err is not None:
-                        raw_items, _, err = await api.search_videos("", api_key=api_key, oauth_token=oauth, region=region, max_results=per_page, channel_id=cid, timeout_sec=timeout_sec)
+                        raw_items, next_token, err = await api.search_videos("", api_key=api_key, oauth_token=oauth, region=region, max_results=per_page, page_token=token, channel_id=cid, timeout_sec=timeout_sec)
                 else:
-                    raw_items, _, err = await api.search_videos(cid, api_key=api_key, oauth_token=oauth, region=region, max_results=per_page, timeout_sec=timeout_sec)
+                    raw_items, next_token, err = await api.search_videos(cid, api_key=api_key, oauth_token=oauth, region=region, max_results=per_page, page_token=token, timeout_sec=timeout_sec)
                 if err is not None:
                     self.last_error = err
                     return []
+                if next_token:
+                    self._page_tokens[(*token_key, page + 1)] = next_token
                 return self._map_api_items(raw_items, category=category)
             url = f"https://www.youtube.com/{cid}/videos" if cid.startswith("@") else f"https://www.youtube.com/channel/{cid}/videos"
-            return await self._fetch_via_ytdlp_list(url, category=category, start=1, end=per_page)
+            return await self._fetch_via_ytdlp_list(url, category=category, start=(page - 1) * per_page + 1, end=page * per_page)
         return []
 
     async def _fetch_via_ytdlp_list(self, target: str, *, category: str, start: int, end: int) -> list[MediaItem]:
@@ -189,7 +200,11 @@ class YouTubeMediaSource(MediaSource):
             if not q:
                 return []
             if api_key := self._plugin.api_key():
-                token = "" if force_refresh else self._page_tokens.get((cat, q, page), "")
+                if page == 1 or force_refresh:
+                    self._page_tokens = {k: v for k, v in self._page_tokens.items() if k[:2] != (cat, q)}
+                token = self._page_tokens.get((cat, q, page), "")
+                if page > 1 and not token:
+                    return []
                 raw_items, next_tok, err = await self._plugin.api_client.search_videos(
                     q, api_key=api_key, oauth_token=self._plugin.oauth_token(), region=self._plugin.region(),
                     max_results=per_page, page_token=token, timeout_sec=self._plugin.timeout_sec(),
@@ -214,12 +229,12 @@ class YouTubeMediaSource(MediaSource):
                     return []
                 channel_ids.extend(s["channel_id"] for s in subs[:5] if s.get("channel_id"))
             for cid in dict.fromkeys(channel_ids):
-                items.extend(await self.fetch_from_target("channel", cid, category=cat, per_page=max(5, per_page // max(1, len(channel_ids)))))
+                items.extend(await self.fetch_from_target("channel", cid, category=cat, per_page=max(5, per_page // max(1, len(channel_ids))), page=page))
             for pid in dict.fromkeys(playlist_ids):
-                items.extend(await self.fetch_from_target("playlist", pid, category=cat, per_page=max(5, per_page // max(1, len(playlist_ids)))))
+                items.extend(await self.fetch_from_target("playlist", pid, category=cat, per_page=max(5, per_page // max(1, len(playlist_ids))), page=page))
         elif cat == "channels":
             for cid in ([query.strip()] if query.strip() else self._plugin.configured_channel_ids()):
-                items.extend(await self.fetch_from_target("channel", cid, category=cat, per_page=per_page))
+                items.extend(await self.fetch_from_target("channel", cid, category=cat, per_page=per_page, page=page))
         elif cat == "history":
             local_items = load_items(self._plugin, "history")
             if query.strip():
@@ -228,7 +243,7 @@ class YouTubeMediaSource(MediaSource):
                     item for item in local_items
                     if needle in item.title.lower() or needle in item.creator.lower()
                 ]
-            items.extend(local_items if page == 1 else [])
+            items.extend(local_items[(page - 1) * per_page : page * per_page])
         elif cat == "watch_later":
             local_items = load_items(self._plugin, "watch_later")
             if query.strip():
@@ -237,23 +252,27 @@ class YouTubeMediaSource(MediaSource):
                     item for item in local_items
                     if needle in item.title.lower() or needle in item.creator.lower()
                 ]
-            items.extend(local_items if page == 1 else [])
+            items.extend(local_items[(page - 1) * per_page : page * per_page])
             targets = [query.strip()] if query.strip() else self._plugin.configured_playlist_ids()
-            if not targets and page == 1 and self._plugin.oauth_token():
+            if not targets and self._plugin.oauth_token():
                 targets = ["WL"]
             for pid in targets:
                 items.extend(
-                    await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page)
+                    await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page, page=page)
                 )
         elif cat == "playlists":
             targets = [query.strip()] if query.strip() else self._plugin.configured_playlist_ids()
             for pid in targets:
                 items.extend(
-                    await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page)
+                    await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page, page=page)
                 )
         elif cat in {"trending", "podcast"}:
             if cat == "trending" and (self._plugin.api_key() or self._plugin.oauth_token()):
-                token = "" if force_refresh else self._page_tokens.get((cat, "", page), "")
+                if page == 1 or force_refresh:
+                    self._page_tokens = {k: v for k, v in self._page_tokens.items() if k[:2] != (cat, "")}
+                token = self._page_tokens.get((cat, "", page), "")
+                if page > 1 and not token:
+                    return []
                 raw_items, next_tok, err = await self._plugin.api_client.fetch_trending(
                     api_key=self._plugin.api_key(),
                     oauth_token=self._plugin.oauth_token(),

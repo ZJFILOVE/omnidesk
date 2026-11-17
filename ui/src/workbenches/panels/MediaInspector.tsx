@@ -1,4 +1,5 @@
 import React from 'react';
+import { MediaCover } from '../../components/MediaCover';
 import {
   Disc3,
   Film,
@@ -121,13 +122,14 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 backdropFilter: 'blur(12px)',
               }}
             >
-              <div className="flex items-center justify-between font-mono text-[13.5px] opacity-85">
+              <MediaCover url={item.coverUrl} />
+              <div className="relative flex items-center justify-between font-mono text-[13.5px] opacity-85">
                 <span>ALAC</span>
                 <Disc3 className="h-4 w-4" aria-hidden="true" />
               </div>
               <div>
-                <div className="text-[13.5px] opacity-85">{item.thumbTag}</div>
-                <div className="mt-1 line-clamp-2 text-[16.5px] leading-snug font-semibold">
+                <div className="relative bg-black/50 rounded px-1 text-[13.5px]">{item.thumbTag}</div>
+                <div className="relative mt-1 line-clamp-2 bg-black/50 rounded px-1 text-[16.5px] leading-snug font-semibold">
                   {item.creator}
                 </div>
               </div>
@@ -177,7 +179,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         >
           {videoSurface ? (
             <div className="absolute inset-0 overflow-hidden bg-black">{videoSurface}</div>
-          ) : null}
+          ) : <MediaCover url={item.coverUrl} />}
           <div
             className="pointer-events-none absolute inset-0"
             style={{

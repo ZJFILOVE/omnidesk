@@ -374,27 +374,29 @@ export function useCompanionChat({
       const contextLabel = contextEntity
         ? `${contextEntity.title}${contextEntity.subtitle ? ` — ${contextEntity.subtitle}` : ''}`
         : contextTitle;
-      const contextRefs = contextEntity
+      const contextRefs = contextEntity?.sourceId && ['book', 'media', 'text'].includes(effectiveDomain)
         ? [
             {
               capability:
                 effectiveDomain === 'book'
                   ? 'book.source.v1'
                   : effectiveDomain === 'media'
-                    ? 'media.source.v1'
+                    ? (typeof contextEntity.extra?.contextCapability === 'string' ? contextEntity.extra.contextCapability : 'media.source.v1')
                     : 'text.source.v1',
               label: contextEntity.title,
+              provider_plugin_id: typeof contextEntity.extra?.contextProvider === 'string' ? contextEntity.extra.contextProvider : contextEntity.sourceId.startsWith('plugin-') ? contextEntity.sourceId : undefined,
               payload:
                 effectiveDomain === 'book'
                   ? {
                       action: 'fetch_spread',
                       book_id: contextEntity.itemId,
+                      page_number: contextEntity.extra?.pageNumber ?? 1,
                       source_id: contextEntity.sourceId,
                     }
                   : effectiveDomain === 'media'
                     ? {
                         action: 'fetch_chapters',
-                        item_id: contextEntity.itemId,
+                        item_id: contextEntity.extra?.contextItemId ?? contextEntity.itemId,
                         source_id: contextEntity.sourceId,
                       }
                     : {

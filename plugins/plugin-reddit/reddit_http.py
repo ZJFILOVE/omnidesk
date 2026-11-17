@@ -52,7 +52,7 @@ else:
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _FALLBACK_ELIGIBLE_CODES = frozenset(
-    {"auth_required", "cloudflare_blocked", "permission_denied", "rate_limited", "service_offline", "parse_error"}
+    {"auth_required", "cloudflare_blocked", "permission_denied", "rate_limited", "service_offline", "parse_error", "not_found"}
 )
 _CLOUDFLARE_MARKERS = (
     "just a moment...",
@@ -149,7 +149,7 @@ def classify_http_failure(
     if _is_cloudflare_response(status, resp.headers, resp.body):
         return "cloudflare_blocked", f"请求被 Cloudflare / 反爬验证拦截 (HTTP {status or 403})"
 
-    if status == 401 or _is_login_wall(resp.final_url, resp.body):
+    if status == 401 or (status < 400 and _is_login_wall(resp.final_url, resp.body)):
         return "auth_required", f"Reddit 需要有效登录会话 (HTTP {status or 401})"
 
     if status == 429:

@@ -10,6 +10,7 @@ pub mod mpv_ipc;
 pub mod paths;
 pub mod protocol;
 pub mod redact;
+pub mod web_reader;
 
 use std::sync::Arc;
 
@@ -59,6 +60,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            web_reader::web_reader,
+            web_reader::player_fullscreen,
             commands::runtime_status,
             commands::host_paths,
             commands::mpv_probe,

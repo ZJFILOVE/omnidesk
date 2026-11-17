@@ -79,6 +79,13 @@ class MusicPlugin(BasePlugin):
         async def _translate_lines(texts: Any, title: str) -> tuple[list[str] | None, str]:
             return await translate_lyric_lines(ctx, texts, title=title)
 
+        async def _fetch_metadata(song_ids: list[str]) -> list[dict[str, Any]]:
+            client, _ = self._playlist_service._build_client(ctx, require_write=False)
+            response = await client.preflight_cn_catalog(song_ids)
+            tracks = response.get("tracks", [])
+            self._playlist_service._cache_verified_tracks(ctx, tracks)
+            return tracks
+
         self._media_source = AppleMusicMediaSource(
             get_config=lambda: self._ctx.get_config() if self._ctx is not None else {},
             get_data_dir=lambda: self._ctx.data_dir if self._ctx is not None else Path("/tmp"),
@@ -86,6 +93,7 @@ class MusicPlugin(BasePlugin):
                 str(self._ctx.get_config("qwen_translator_dir") or "") if self._ctx else ""
             ),
             translate_lines=_translate_lines,
+            fetch_metadata=_fetch_metadata,
         )
 
         ctx.register_capability("media.playlist.v1", self._playlist_service.handle)

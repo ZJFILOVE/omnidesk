@@ -30,16 +30,8 @@ def _write_fake_babeldoc(path: Path, body: str) -> Path:
     return path
 
 
-def _write_minimal_pdf(path: Path, *, pages: int = 2) -> Path:
-    kids = " ".join(f"{10 + i} 0 R" for i in range(pages))
-    leaves = "".join(f"{10 + i} 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n" for i in range(pages))
-    raw = (
-        f"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {pages} >>\nendobj\n{leaves}%%EOF\n"
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(raw.encode("utf-8"))
-    return path
+from pdf_fixture import write_pdf as _write_minimal_pdf
+
 
 
 async def _wait_job(ctx: PluginContext, job_id: str, timeout: float = 5.0) -> dict[str, Any]:
@@ -115,7 +107,8 @@ async def test_sidecar_variants_side_by_side_placeholder_and_utf16_metadata(tmp_
     s_sbs = await src.fetch_spread(books["sbs.pdf"].id, page_number=2)
     assert s_sbs.extra["pairing_mode"] == "side_by_side"
     assert s_sbs.extra["left_page"] == 2 and s_sbs.extra["right_page"] == 2
-    assert "占位" in s_sbs.blocks[0].translated
+    assert s_sbs.blocks[0].image_url.startswith("data:image/png;base64,")
+    assert not s_sbs.blocks[0].translated
 
     s_pmap = await src.fetch_spread(books["pmap.pdf"].id, page_number=1)
     assert s_pmap.extra["pairing_mode"] == "alternating_pages"

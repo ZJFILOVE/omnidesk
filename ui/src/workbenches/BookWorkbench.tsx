@@ -1,12 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BookMarked, BookOpen, ChevronDown, ChevronUp, Search } from 'lucide-react';
 import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
+import { LoadMoreButton } from '../components/LoadMoreButton';
+import { MediaCover } from '../components/MediaCover';
+import { useBookSearch } from '../hooks/useBookSearch';
 import {
   bookSearchAction,
   formatRpcError,
   isTauriAvailable,
-  searchBooks,
   type BookSearchProvider,
   type BookSearchResult,
 } from '../api';
@@ -140,9 +142,10 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const [vocabOpen, setVocabOpen] = useState<boolean>(true);
   const [catalogQuery, setCatalogQuery] = useState<string>('');
   const [searchProvider, setSearchProvider] = useState<BookSearchProvider>('auto');
-  const [searchCatalog, setSearchCatalog] = useState<BookCatalogItem[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const catalogSearch = useBookSearch(catalogQuery, searchProvider, leftTab === 'search');
+  const searchCatalog = useMemo(() => catalogSearch.results.map(toCatalogItem), [catalogSearch.results]);
+  const searchLoading = catalogSearch.loading;
+  const searchError = catalogSearch.error;
   const [downloadedIds, setDownloadedIds] = useState<Set<string>>(() => new Set());
   const [selectedBookId, setSelectedBookId] = useState<string>(BOOK_ITEMS[0]?.id ?? '');
   const [spreadIndexByBook, setSpreadIndexByBook] = useState<Record<string, number>>({});
@@ -170,7 +173,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   );
   const liveSpread = useLiveSpread(
     selectedBook?.id ?? '',
-    selectedBook?.currentPage ?? 1,
+    selectedBook ? (spreadIndexByBook[selectedBook.id] ?? selectedBook.currentPage - 1) + 1 : 1,
     selectedBook?.sourcePlugin,
   );
   const bookSpreads = useMemo(
@@ -185,6 +188,15 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       )
     : 0;
   const activeSpread = bookSpreads[spreadIndex];
+  const convertedMetadataReloaded = useRef(new Set<string>());
+  useEffect(() => {
+    if (!selectedBook || !activeSpread || liveSpread.loading || !isTauriAvailable()) return;
+    if (['epub', 'txt', 'pdf', 'english_daily'].includes(selectedBook.format)) return;
+    if (convertedMetadataReloaded.current.has(selectedBook.id)) return;
+    convertedMetadataReloaded.current.add(selectedBook.id);
+    liveBooks.reload();
+  }, [selectedBook, activeSpread, liveSpread.loading, liveBooks.reload]);
+
   const activeVocab = useMemo(
     () => vocabCards.find((v) => v.id === activeVocabId) ?? vocabCards[0],
     [vocabCards, activeVocabId],
@@ -201,34 +213,6 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     );
   }, [catalogQuery, searchCatalog]);
 
-  useEffect(() => {
-    if (leftTab !== 'search' || !isTauriAvailable()) return undefined;
-    const query = catalogQuery.trim();
-    if (query.length < 2) {
-      setSearchCatalog([]);
-      setSearchError(null);
-      return undefined;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      setSearchLoading(true);
-      setSearchError(null);
-      void searchBooks({ query, provider: searchProvider, limit: 24 }).then((result) => {
-        if (cancelled) return;
-        setSearchLoading(false);
-        if (!result.ok) {
-          setSearchError(formatRpcError(result.error));
-          setSearchCatalog([]);
-          return;
-        }
-        setSearchCatalog(result.data.results.map(toCatalogItem));
-      });
-    }, 320);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [catalogQuery, leftTab, searchProvider]);
 
   useEffect(() => {
     if (!sharedVocab?.length) return;
@@ -265,11 +249,21 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       subtitle: selectedBook.author,
       sourceId: selectedBook.sourcePlugin,
       kind: selectedBook.format,
+      extra: { pageNumber: activeSpread?.page ?? selectedBook.currentPage },
     });
-  }, [onContextChange, selectedBook]);
+  }, [onContextChange, selectedBook, activeSpread?.page]);
 
   const handleTurnPage = (delta: number) => {
     if (!selectedBook) return;
+    if (isTauriAvailable()) {
+      if (liveSpread.loading) return;
+      const currentPage = (spreadIndexByBook[selectedBook.id] ?? selectedBook.currentPage - 1) + 1;
+      const totalPages = activeSpread?.totalPages ?? selectedBook.totalPages;
+      const nextPage = Math.max(1, Math.min(totalPages, currentPage + delta));
+      setSpreadIndexByBook((previous) => ({ ...previous, [selectedBook.id]: nextPage - 1 }));
+      setStatusMessage(`正在读取第 ${nextPage} / ${totalPages} 页`);
+      return;
+    }
     const maxIdx = Math.max(0, bookSpreads.length - 1);
     const nextIdx = Math.max(0, Math.min(maxIdx, spreadIndex + delta));
     setSpreadIndexByBook((prev) => ({ ...prev, [selectedBook.id]: nextIdx }));
@@ -538,6 +532,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       mainPane={
         <div className="flex flex-col">
           {shelfOpen ? (
+            <>
             <BookShelfSidebar
               books={books}
               catalog={filteredCatalog}
@@ -564,6 +559,10 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
                 void handleCatalogAction(entry, action);
               }}
             />
+            {leftTab === 'search' && isTauriAvailable() && catalogSearch.results.length > 0 ? (
+              <LoadMoreButton id="book:catalog:more" pagination={catalogSearch.pagination} />
+            ) : null}
+            </>
           ) : (
             /* Compact Book Spine Strip: keeps 2:3 mini covers & Z-Lib tab reachable while maximizing the reading spread */
             <div
@@ -606,7 +605,8 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
                         }}
                         aria-hidden="true"
                       >
-                        {isSelected ? <BookOpen className="mb-1 h-2.5 w-2.5 opacity-90" /> : null}
+                        <MediaCover url={book.coverUrl} />
+                        {isSelected ? <BookOpen className="relative mb-1 h-2.5 w-2.5 opacity-90" /> : null}
                       </span>
                       <span className="min-w-0 max-w-[148px]">
                         <span className="block truncate text-[14px] font-semibold text-[var(--text-primary)]">
@@ -653,11 +653,14 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
             </div>
           )}
 
-          {selectedBook && activeSpread ? (
+          {liveSpread.loading ? <div role="status" className="p-8 text-[var(--text-muted)]">正在读取书籍页面…</div> : liveSpread.error ? (
+            <div role="alert" className="p-8 text-[var(--status-err-fg)]">读取书籍失败：{liveSpread.error}</div>
+          ) : selectedBook && activeSpread ? (
             <BookSpreadReader
               book={selectedBook}
               spread={activeSpread}
               spreadIndex={spreadIndex}
+              totalPages={isTauriAvailable() ? activeSpread.totalPages ?? selectedBook.totalPages : undefined}
               activeVocab={activeVocab}
               activeFocusId={activeFocusId}
               onFocus={emitFocus}

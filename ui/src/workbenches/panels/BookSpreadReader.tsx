@@ -1,6 +1,7 @@
 import React, { useRef } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
+import { isSafeImageUrl } from '../../components/MediaCover';
 import SelectionBubble, { type SelectionActionEvent } from '../../components/SelectionBubble';
 import { FocusButton, HAIRLINE_BORDER } from '../../components/WorkbenchLayout';
 import type { BookItem, BookSpread, VocabCard } from '../../data/mock';
@@ -9,6 +10,7 @@ export interface BookSpreadReaderProps {
   book: BookItem;
   spread: BookSpread;
   spreadIndex: number;
+  totalPages?: number;
   activeVocab?: VocabCard;
   activeFocusId: string;
   onFocus: (id: string) => void;
@@ -26,6 +28,7 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
   book,
   spread,
   spreadIndex,
+  totalPages,
   activeVocab,
   activeFocusId,
   onFocus,
@@ -59,6 +62,7 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
             activeFocusId={activeFocusId}
             onFocus={onFocus}
             onActivate={() => onTurnPage(-1)}
+            disabled={totalPages !== undefined ? spread.page <= 1 : spreadIndex <= 0}
             surface="surface"
             className="inline-flex items-center gap-1 px-3 py-1.5 text-[14px] font-medium"
           >
@@ -66,13 +70,14 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
             <span>上一跨页</span>
           </FocusButton>
           <span className="px-2 font-mono text-[14px] text-[var(--text-muted)]">
-            p.{spread.page} ({spreadIndex + 1}/{book.spreads.length})
+            {totalPages !== undefined ? `p.${spread.page} / ${totalPages}` : `p.${spread.page} (${spreadIndex + 1}/${Math.max(1, book.spreads.length)})`}
           </span>
           <FocusButton
             focusId="book:nav:next"
             activeFocusId={activeFocusId}
             onFocus={onFocus}
             onActivate={() => onTurnPage(1)}
+            disabled={totalPages !== undefined ? spread.page >= totalPages : spreadIndex >= book.spreads.length - 1}
             surface="surface"
             className="inline-flex items-center gap-1 px-3 py-1.5 text-[14px] font-medium"
           >
@@ -83,7 +88,7 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
       </div>
 
       {/* Maximized Open-Book Dual-Page Folio Stage */}
-      <div className="grid flex-1 grid-cols-1 gap-4 @[620px]/workbench:grid-cols-2">
+      <div className={`grid flex-1 grid-cols-1 gap-4 ${spread.rightParagraphs.length ? "@[620px]/workbench:grid-cols-2" : ""}`}>
         <section
           ref={originalColumnRef}
           data-testid="book-original-column"
@@ -100,7 +105,9 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
           </div>
           {spread.leftParagraphs.map((para) => (
             <div key={para.id} className="flex flex-col gap-3">
-              <MarkdownRenderer content={para.text} />
+              {para.imageUrl && isSafeImageUrl(para.imageUrl) ? (
+                <img src={para.imageUrl} alt={para.text.replace(/^\[Image: |\]$/g, '')} className="max-h-[70vh] max-w-full self-center object-contain" />
+              ) : <MarkdownRenderer content={para.text} />}
               {para.keyTerms?.length ? (
                 <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                   <span className="text-[13.5px] text-[var(--text-subtle)]">词元划查：</span>
@@ -125,7 +132,7 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
           ))}
         </section>
 
-        <section
+        {spread.rightParagraphs.length > 0 ? <section
           data-testid="book-translation-column"
           data-selection-source="translation"
           className="flex flex-col gap-5 rounded-[16px] p-6 sm:p-8"
@@ -142,9 +149,12 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
             <span className="font-mono text-[13.5px] text-[var(--text-subtle)]">译文对照</span>
           </div>
           {spread.rightParagraphs.map((para) => (
-            <MarkdownRenderer key={para.id} content={para.text} muted />
+            para.imageUrl && isSafeImageUrl(para.imageUrl)
+              ? <img key={para.id} src={para.imageUrl} alt="译文页面" className="max-w-full self-center object-contain" />
+              : <MarkdownRenderer key={para.id} content={para.text} muted />
           ))}
-        </section>
+          {spread.rightParagraphs.length === 0 ? <p className="text-[var(--text-muted)]">本页暂无译文。</p> : null}
+        </section> : null}
       </div>
 
       <SelectionBubble

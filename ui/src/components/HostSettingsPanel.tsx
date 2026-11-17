@@ -1,3 +1,4 @@
+import { applyFontScale, getFontScale } from '../utils/fontScale';
 import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
@@ -60,6 +61,7 @@ export function HostSettingsPanel({
   onOpenCuration,
   onOpenJobs,
 }: HostSettingsPanelProps) {
+  const [fontScale, setFontScale] = useState(getFontScale);
   const available = isTauriAvailable();
   const [plugins, setPlugins] = useState<BackendPluginRecord[]>([]);
   const [capabilityCount, setCapabilityCount] = useState<number | null>(null);
@@ -158,6 +160,12 @@ export function HostSettingsPanel({
           </button>
         </header>
 
+        <label className="mx-5 mt-4 flex flex-wrap items-center gap-3 text-base">
+          界面字号
+          <select aria-label="界面字号" value={fontScale} onChange={(event) => { const value = Number(event.target.value); setFontScale(value); applyFontScale(value); }} className="min-h-11 rounded bg-[var(--bg-soft)] px-3">
+            {[1, 1.1, 1.2, 1.3, 1.4, 1.6].map((scale) => <option key={scale} value={scale}>{Math.round(scale * 100)}%{scale === 1.2 ? '（默认）' : ''}</option>)}
+          </select>
+        </label>
         {!available ? (
           <div className="mx-5 mt-3 flex items-center gap-2 rounded-[9px] bg-[var(--status-warn-bg)] px-3 py-2 text-[13.5px] text-[var(--status-warn-fg)]">
             <AlertTriangle className="h-4 w-4" />

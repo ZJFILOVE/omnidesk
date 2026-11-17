@@ -155,3 +155,16 @@ async def test_agent_context_refs_fail_closed_without_collector() -> None:
 
     assert res.ok is False
     assert res.data["error_code"] == "context_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_media_context_uses_dedicated_provider_but_rejects_writes() -> None:
+    calls = []
+    async def fake_call(capability, payload, **kwargs):
+        calls.append((capability, payload, kwargs))
+        return CapabilityResult.ok({"chapters": [{"label": "Intro", "start_sec": 0}]})
+    result = await collect_context({"items": [{"capability": "media.youtube.v1", "provider_plugin_id": "plugin-youtube", "payload": {"action": "fetch_chapters", "item_id": "video"}}]}, call_capability=fake_call)
+    assert result.ok and calls[0][0] == "media.youtube.v1"
+    calls.clear()
+    denied = await collect_context({"items": [{"capability": "media.youtube.v1", "payload": {"action": "update_settings"}}]}, call_capability=fake_call)
+    assert not denied.ok and not calls

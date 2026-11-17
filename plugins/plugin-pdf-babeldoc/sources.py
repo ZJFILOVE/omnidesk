@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
+import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,9 @@ from typing import Any
 from omnidesk_sdk import BookItem, BookPageBlock, BookSource, BookSpread, VocabCard
 
 if __package__:
-    from . import artifacts, job_store, pdf_utils
+    from . import artifacts, job_store, pdf_utils, page_render
 else:
+    import page_render
     import artifacts  # type: ignore[import-not-found,no-redef]
     import job_store  # type: ignore[import-not-found,no-redef]
     import pdf_utils  # type: ignore[import-not-found,no-redef]
@@ -34,6 +37,7 @@ class BabelDocBookSource(BookSource):
         get_config_fn: Callable[[], dict[str, Any]],
         get_job_store_fn: Callable[[Path | None], job_store.JobStore],
     ) -> None:
+        self._cover_cache: dict[tuple[str, int, int], str] = {}
         self._get_config = get_config_fn
         self._get_job_store = get_job_store_fn
 
@@ -187,6 +191,14 @@ class BabelDocBookSource(BookSource):
             )
             if q and not any(q in field.lower() for field in (item.title, item.author, item.file_path, item.id)):
                 continue
+            stat = pdf_path.stat()
+            key = (str(pdf_path), stat.st_mtime_ns, stat.st_size)
+            if key not in self._cover_cache:
+                with contextlib.suppress(RuntimeError, OSError, subprocess.TimeoutExpired):
+                    self._cover_cache[key] = await asyncio.to_thread(page_render.render_page, pdf_path, 1, cover=True)
+                if len(self._cover_cache) > 128:
+                    self._cover_cache.pop(next(iter(self._cover_cache)))
+            item.extra["cover_data_url"] = self._cover_cache.get(key, "")
             items.append(item)
         return items
 
@@ -211,12 +223,12 @@ class BabelDocBookSource(BookSource):
                 chapter_title="",
                 page_number=page_number,
                 total_pages=meta.total_pages,
-                blocks=[],
+                blocks=[BookPageBlock(id=f"{book_id}-p{page_number}", kind="image", original=f"第 {page_number} 页", image_url=await asyncio.to_thread(page_render.render_page, source_path, page_number))],
                 extra={
-                    "status": "needs_bilingual_pdf",
-                    "needs_bilingual_pdf": True,
+                    "status": "original_ready",
+                    "needs_bilingual_pdf": False,
                     "source_path": str(source_path),
-                    "message": "尚未生成 BabelDOC 双栏对照 PDF，请先提交翻译任务。",
+                    "message": "正在显示原版 PDF；生成译文后可对照阅读。",
                 },
             )
 
@@ -275,10 +287,10 @@ class BabelDocBookSource(BookSource):
                 chapter_title=f"第 {page_number} 页",
                 page_number=page_number,
                 total_pages=meta.total_pages,
-                blocks=[],
+                blocks=[BookPageBlock(id=f"{book_id}-p{page_number}", kind="image", original=f"第 {page_number} 页", image_url=await asyncio.to_thread(page_render.render_page, source_path, page_number))],
                 extra={
                     "status": "needs_bilingual_pdf" if sidecar_error else "missing_page_in_sidecar",
-                    "needs_bilingual_pdf": bool(sidecar_error),
+                    "needs_bilingual_pdf": False,
                     "has_sidecar": not bool(sidecar_error),
                     "sidecar_error": sidecar_error,
                     "page_map_path": str(page_map) if page_map else "",
@@ -298,31 +310,21 @@ class BabelDocBookSource(BookSource):
         if page_number > effective_total:
             raise _PageBoundsError(f"page_number ({page_number}) exceeds total_pages ({effective_total})")
 
-        placeholder = BookPageBlock(
-            id=f"{book_id}-p{page_number}-placeholder",
-            kind="paragraph",
-            original=(
-                f"[第 {page_number}/{effective_total} 页原文占位] "
-                f"双栏 PDF（{dual_pdf.name}，左页 p.{left_page} / {pairing_mode}）已生成，"
-                "缺少页码文本映射 sidecar JSON。"
-            ),
-            translated=(
-                f"[第 {page_number}/{effective_total} 页译文占位] "
-                f"缺少 BabelDOC 文本映射 sidecar JSON，请直接查看双栏 PDF（右页 p.{right_page}），"
-                "系统不会编造译文内容。"
-            ),
-        )
+        page_image = await asyncio.to_thread(page_render.render_page, dual_pdf, left_page)
+        rendered_blocks = [BookPageBlock(id=f"{book_id}-p{page_number}", kind="image", original=f"第 {page_number} 页", image_url=page_image)]
+        if right_page != left_page:
+            rendered_blocks[0].translated_image_url = await asyncio.to_thread(page_render.render_page, dual_pdf, right_page)
         return BookSpread(
             book_id=book_id,
             chapter_title=f"第 {page_number} 页 · 双栏 PDF 页码配对",
             page_number=page_number,
             total_pages=effective_total,
-            blocks=[placeholder],
+            blocks=rendered_blocks,
             extra={
-                "status": "ready_placeholder",
+                "status": "ready_rendered",
                 "needs_bilingual_pdf": False,
                 "has_sidecar": False,
-                "placeholder": True,
+                "placeholder": False,
                 "pairing_mode": pairing_mode,
                 "left_page": left_page,
                 "right_page": right_page,

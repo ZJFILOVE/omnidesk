@@ -657,7 +657,7 @@ class RedditPlugin(BasePlugin):
                         {
                             "key": "authenticated",
                             "label": "登录状态",
-                            "value": "已登录" if status.get("authenticated") else "游客模式",
+                            "value": "已保存凭据 · 拉取时验证" if status.get("authenticated") else "游客模式",
                         },
                         {
                             "key": "subreddits",

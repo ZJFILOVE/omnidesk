@@ -318,6 +318,7 @@ export interface AiAgentRequestPayload {
   context_title?: string;
   context_refs?: Array<{
     capability: string;
+    provider_plugin_id?: string;
     label?: string;
     payload?: Record<string, unknown>;
   }>;

@@ -215,6 +215,22 @@ async def test_extract_cdp_rendered_dom_translate_offline_and_timeout(tmp_path: 
         assert nav_res.ok is True
         assert injected.navigate_urls == ["https://journal.example/other"]
         assert nav_res.data["title"] == "Nav"
+
+        class _LoadingTransport(_InjectedTransport):
+            async def evaluate(self, ws_url: str, expression: str, **kwargs: Any) -> dict[str, Any]:
+                self.navigate_urls.append(kwargs.get("navigate_url"))
+                value = "" if len(self.navigate_urls) == 1 else "<html><title>Loaded</title><p>Ready</p></html>"
+                return {"result": {"result": {"type": "string", "value": value}}}
+
+        loading = _LoadingTransport()
+        plugin.set_cdp_transport(loading)
+        loaded = await ctx.capabilities.call(
+            "web.extract.v1", {"action": "extract", "url": "https://journal.example/slow", "cdp_port": srv.port},
+        )
+        assert loaded.ok is True
+        assert loaded.data["title"] == "Loaded"
+        assert loading.navigate_urls == ["https://journal.example/slow", None]
+        assert loaded.data["url"] == "https://journal.example/slow"
         plugin.set_cdp_transport(orig_transport)
 
         delay_sec = 0.5

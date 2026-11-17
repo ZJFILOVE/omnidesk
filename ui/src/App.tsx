@@ -1,3 +1,4 @@
+import { applyFontScale } from './utils/fontScale';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { OmniDeskWorkspace } from './OmniDeskWorkspace';
 import { SpatialFocusProvider } from './hooks/useSpatialFocus';
@@ -31,6 +32,7 @@ export function App() {
 
   useEffect(() => {
     applyTheme(theme);
+    applyFontScale();
   }, [theme]);
 
   useEffect(() => {

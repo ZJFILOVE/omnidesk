@@ -93,13 +93,13 @@
   --hljs-builtin: #6D28D9;
 
   /* Type Scale, Measure, Spacing & Radii */
-  --type-xs: 13.5px;
-  --type-sm: 14.5px;
-  --type-base: 16px;
-  --type-prose: 17.5px;
-  --type-lg: 20px;
-  --type-xl: 24px;
-  --type-editorial: 29px;
+  --type-xs: calc(13.5px * var(--ui-font-scale, 1.2));
+  --type-sm: calc(14.5px * var(--ui-font-scale, 1.2));
+  --type-base: calc(16px * var(--ui-font-scale, 1.2));
+  --type-prose: calc(17.5px * var(--ui-font-scale, 1.2));
+  --type-lg: calc(20px * var(--ui-font-scale, 1.2));
+  --type-xl: calc(24px * var(--ui-font-scale, 1.2));
+  --type-editorial: calc(29px * var(--ui-font-scale, 1.2));
 
   --leading-ui: 1.5;
   --leading-prose: 1.78;
@@ -413,3 +413,32 @@ body,
 .omni-markdown .hljs-type {
   color: var(--hljs-builtin);
 }
+
+/* Adjustable typography without scaling native video/webview coordinates. */
+:root { --ui-font-scale: 1.2; }
+.text-\[10\.5px\] { font-size: calc(10.5px * var(--ui-font-scale)); }
+.text-\[11\.5px\] { font-size: calc(11.5px * var(--ui-font-scale)); }
+.text-\[11\.75px\] { font-size: calc(11.75px * var(--ui-font-scale)); }
+.text-\[12px\] { font-size: calc(12px * var(--ui-font-scale)); }
+.text-\[12\.5px\] { font-size: calc(12.5px * var(--ui-font-scale)); }
+.text-\[12\.75px\] { font-size: calc(12.75px * var(--ui-font-scale)); }
+.text-\[13px\] { font-size: calc(13px * var(--ui-font-scale)); }
+.text-\[13\.5px\] { font-size: calc(13.5px * var(--ui-font-scale)); }
+.text-\[13\.75px\] { font-size: calc(13.75px * var(--ui-font-scale)); }
+.text-\[14px\] { font-size: calc(14px * var(--ui-font-scale)); }
+.text-\[14\.5px\] { font-size: calc(14.5px * var(--ui-font-scale)); }
+.text-\[15px\] { font-size: calc(15px * var(--ui-font-scale)); }
+.text-\[15\.5px\] { font-size: calc(15.5px * var(--ui-font-scale)); }
+.text-\[16px\] { font-size: calc(16px * var(--ui-font-scale)); }
+.text-\[16\.5px\] { font-size: calc(16.5px * var(--ui-font-scale)); }
+.text-\[17px\] { font-size: calc(17px * var(--ui-font-scale)); }
+.text-\[17\.5px\] { font-size: calc(17.5px * var(--ui-font-scale)); }
+.text-\[18\.5px\] { font-size: calc(18.5px * var(--ui-font-scale)); }
+.text-\[19px\] { font-size: calc(19px * var(--ui-font-scale)); }
+.text-\[20\.5px\] { font-size: calc(20.5px * var(--ui-font-scale)); }
+.text-\[22px\] { font-size: calc(22px * var(--ui-font-scale)); }
+.text-\[23px\] { font-size: calc(23px * var(--ui-font-scale)); }
+.text-\[24px\] { font-size: calc(24px * var(--ui-font-scale)); }
+.text-\[26px\] { font-size: calc(26px * var(--ui-font-scale)); }
+.text-\[30px\] { font-size: calc(30px * var(--ui-font-scale)); }
+body { font-size: calc(16px * var(--ui-font-scale)); }

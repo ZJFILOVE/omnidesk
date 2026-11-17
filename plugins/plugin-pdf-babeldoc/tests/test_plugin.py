@@ -36,32 +36,8 @@ def _write_fake_babeldoc(path: Path, body: str, *, executable: bool = True) -> P
     return path
 
 
-def _write_minimal_pdf(
-    path: Path,
-    *,
-    pages: int = 1,
-    title: str = "",
-    author: str = "",
-) -> Path:
-    info_parts = []
-    if title:
-        info_parts.append(f"/Title ({title})")
-    if author:
-        info_parts.append(f"/Author ({author})")
-    info_obj = f"4 0 obj\n<< {' '.join(info_parts)} >>\nendobj\n" if info_parts else ""
-    kids = " ".join(f"{10 + i} 0 R" for i in range(pages))
-    leaf_objs = "".join(f"{10 + i} 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n" for i in range(pages))
-    content = (
-        f"%PDF-1.4\n"
-        f"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {pages} >>\nendobj\n"
-        f"{leaf_objs}"
-        f"{info_obj}"
-        f"%%EOF\n"
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content.encode("utf-8"))
-    return path
+from pdf_fixture import write_pdf as _write_minimal_pdf
+
 
 
 def test_manifest_matches_v2_schema_and_config_requirements() -> None:
@@ -258,13 +234,13 @@ async def test_book_source_scans_real_pdfs_and_spread_modes(tmp_path: Path) -> N
     # Untranslated -> needs_bilingual_pdf with empty blocks (never fabricated)
     spread_untrans = await source.fetch_spread(b_untrans.id, page_number=1)
     assert isinstance(spread_untrans, BookSpread)
-    assert spread_untrans.blocks == []
-    assert spread_untrans.extra["status"] == "needs_bilingual_pdf"
-    assert spread_untrans.extra["needs_bilingual_pdf"] is True
+    assert spread_untrans.blocks[0].image_url.startswith("data:image/png;base64,")
+    assert not spread_untrans.blocks[0].translated
+    assert spread_untrans.extra["status"] == "original_ready"
+    assert spread_untrans.extra["needs_bilingual_pdf"] is False
 
     cap_untrans = await ctx.capabilities.call("book.source.v1", {"action": "fetch_spread", "book_id": b_untrans.id, "page_number": 1})
-    assert cap_untrans.ok is False
-    assert cap_untrans.data["error_code"] == "needs_bilingual_pdf"
+    assert cap_untrans.ok is True
 
     # Sidecar -> exact original + translated blocks
     spread_p1 = await source.fetch_spread(b_sidecar.id, page_number=1)
@@ -279,12 +255,12 @@ async def test_book_source_scans_real_pdfs_and_spread_modes(tmp_path: Path) -> N
     b_alt = by_path[str(pdf_no_sidecar.resolve())]
     spread_alt = await source.fetch_spread(b_alt.id, page_number=2)
     assert spread_alt.extra["has_sidecar"] is False
-    assert spread_alt.extra["placeholder"] is True
+    assert spread_alt.extra["placeholder"] is False
     assert spread_alt.extra["pairing_mode"] == "alternating_pages"
     assert spread_alt.extra["left_page"] == 3
     assert spread_alt.extra["right_page"] == 4
-    assert "占位" in spread_alt.blocks[0].original
-    assert "占位" in spread_alt.blocks[0].translated
+    assert spread_alt.blocks[0].image_url.startswith("data:image/png;base64,")
+    assert not spread_alt.blocks[0].translated
 
     # Query filter and format filter
     assert len(await source.list_books(format_filter="epub")) == 0

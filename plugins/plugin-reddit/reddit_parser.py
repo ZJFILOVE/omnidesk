@@ -1079,7 +1079,11 @@ def parse_listing_html(html_text: str, fallback_subreddit: str = "") -> FeedList
         )
     if not items:
         raise RedditParseError("渲染 HTML 中未提取到有效 Reddit 帖子列表")
-    return FeedListingResult(items=items)
+    # Rendered listings omit the JSON envelope, but Reddit accepts the last
+    # post fullname as `after` on the HTML route as well. Keep pagination
+    # working when API access is blocked and the signed-in page is readable.
+    last_id = items[-1].id.rsplit(":", 1)[-1]
+    return FeedListingResult(items=items, after=f"t3_{strip_thing_prefix(last_id)}")
 
 
 def parse_post_html(html_text: str, fallback_post_id: str = "") -> ArticleParseResult:

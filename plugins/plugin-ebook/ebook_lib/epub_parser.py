@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import posixpath
+import base64
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -99,6 +100,7 @@ class _XhtmlBlockExtractor(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.page_title = ""
         self.blocks: list[tuple[str, str, str]] = []
+        self.image_sources: list[str] = []
         self._skip_depth = 0
         self._in_title = False
         self._title_buf: list[str] = []
@@ -141,6 +143,7 @@ class _XhtmlBlockExtractor(HTMLParser):
             src = attr_map.get("src", "") or attr_map.get("xlink:href", "") or attr_map.get("href", "")
             label = alt or posixpath.basename(src.split("?", 1)[0]) or "figure"
             self.blocks.append(("image", f"[Image: {label}]", ""))
+            self.image_sources.append(src)
             return
         classes = set(attr_map.get("class", "").split())
         is_trans = attr_map.get("data-bilingual") == "translation" or "omnidesk-translation" in classes
@@ -313,6 +316,31 @@ def parse_epub(path: Path, *, page_char_budget: int = 1800) -> ParsedBook:
         opf_xml = _safe_parse_xml(read_zip_member_bounded(zf, opf_info, tracker=tracker))
         titles, creators, language, manifest, spine_ids, ncx_id = _parse_opf_document(opf_xml, opf_member)
 
+        image_cache: dict[str, str] = {}
+
+        def image_url(member: str) -> str:
+            if member in image_cache:
+                return image_cache[member]
+            info = _lookup_zip_info(index, member)
+            if info is None or info.file_size > 1024 * 1024:
+                return ""
+            raw = read_zip_member_bounded(zf, info, max_bytes=1024 * 1024, tracker=tracker)
+            mime = (
+                "image/png" if raw.startswith(b"\x89PNG\r\n\x1a\n") else
+                "image/jpeg" if raw.startswith(b"\xff\xd8\xff") else
+                "image/gif" if raw.startswith((b"GIF87a", b"GIF89a")) else
+                "image/webp" if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP" else ""
+            )
+            value = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}" if mime else ""
+            image_cache[member] = value
+            return value
+
+        cover_id = next((node.attrib.get("content", "") for node in opf_xml.iter()
+                         if _strip_ns(node.tag) == "meta" and node.attrib.get("name") == "cover"), "")
+        cover_item = manifest.get(cover_id) or next((item for item in manifest.values()
+            if "cover-image" in item["properties"].split()), None)
+        cover_url = image_url(cover_item["href"]) if cover_item else ""
+
         toc_entries: list[dict[str, str]] = []
         nav_item = next((m for m in manifest.values() if "nav" in m["properties"].split()), None)
         if nav_item and (nav_info := _lookup_zip_info(index, nav_item["href"])) is not None:
@@ -349,6 +377,15 @@ def parse_epub(path: Path, *, page_char_budget: int = 1800) -> ParsedBook:
             first_heading = next((orig for kind, orig, _ in extractor.blocks if kind == "heading"), "")
             ch_title = toc_title_by_href.get(item["href"]) or first_heading or extractor.page_title or f"Chapter {ch_idx}"
             ch_pages = paginate_blocks(ch_title, extractor.blocks, start_page=next_page, char_budget=page_char_budget)
+            image_sources = iter(extractor.image_sources)
+            for parsed_page in ch_pages:
+                for block in parsed_page.blocks:
+                    if block.kind == "image":
+                        src = next(image_sources, "")
+                        if src and not urllib.parse.urlsplit(src).scheme and not src.startswith("//"):
+                            block.image_url = image_url(_resolve_zip_rel(item["href"], src))
+                            if not cover_url:
+                                cover_url = block.image_url
             pages.extend(ch_pages)
             next_page += len(ch_pages)
 
@@ -362,5 +399,5 @@ def parse_epub(path: Path, *, page_char_budget: int = 1800) -> ParsedBook:
             book_format="epub",
             toc=toc_entries,
             pages=pages,
-            extra={"spine_count": len(spine_ids), "toc_count": len(toc_entries)},
+            extra={"spine_count": len(spine_ids), "toc_count": len(toc_entries), "cover_data_url": cover_url},
         )
