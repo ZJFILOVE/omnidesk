@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import type { BusEventEnvelope, RuntimeStatus } from '../api';
 import type { PluginHealthEntry } from '../hooks/useCoreEvents';
 import type { MpvPlaybackController } from '../workbenches/useMpvPlayback';
@@ -308,6 +308,7 @@ export interface WorkbenchLayoutProps {
   mainPane: React.ReactNode;
   rightPane?: React.ReactNode;
   rightWidthClass?: string;
+  resizableRightPane?: boolean;
   footer?: React.ReactNode;
   testId?: string;
   className?: string;
@@ -326,11 +327,28 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
   mainPane,
   rightPane,
   rightWidthClass = '@[860px]/workbench:w-[336px]',
+  resizableRightPane = false,
   footer,
   testId,
   className = '',
 }) => {
   const meta = DOMAIN_META[domain];
+  const stageRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ x: number; width: number } | null>(null);
+  const [rightWidth, setRightWidth] = useState(() => {
+    try {
+      const value = Number(window.localStorage.getItem(`omnidesk:${domain}:right-width`));
+      return value >= 260 && value <= 720 ? value : 328;
+    } catch { return 328; }
+  });
+  const resizeRight = (width: number) => {
+    const available = stageRef.current?.clientWidth ?? 1000;
+    const left = stageRef.current?.querySelector('aside')?.getBoundingClientRect().width ?? 0;
+    const max = Math.max(260, Math.min(720, available - (leftPane ? left : 0) - 360));
+    const next = Math.round(Math.max(260, Math.min(max, width)));
+    setRightWidth(next);
+    try { window.localStorage.setItem(`omnidesk:${domain}:right-width`, String(next)); } catch { /* Storage is optional. */ }
+  };
 
   return (
     <section
@@ -393,7 +411,7 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
       </div>
 
       {/* Responsive Split Stage: scrolls cleanly when stacked (<860px, e.g. F8 dock open at 1280x800) */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto @[860px]/workbench:flex-row @[860px]/workbench:overflow-hidden">
+      <div ref={stageRef} className="flex min-h-0 flex-1 flex-col overflow-y-auto @[860px]/workbench:flex-row @[860px]/workbench:overflow-hidden">
         {leftPane ? (
           <aside
             className={`flex w-full shrink-0 flex-col border-b @[860px]/workbench:min-h-0 @[860px]/workbench:overflow-y-auto @[860px]/workbench:border-r @[860px]/workbench:border-b-0 ${leftWidthClass}`}
@@ -411,12 +429,26 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
         </main>
 
         {rightPane ? (
+          <>
+          {resizableRightPane ? <div role="separator" aria-label="调整评论栏宽度" aria-orientation="vertical"
+            aria-valuemin={260} aria-valuemax={720} aria-valuenow={rightWidth} tabIndex={0}
+            className="hidden w-2 shrink-0 cursor-col-resize touch-none bg-[var(--border-subtle)] hover:bg-[var(--focus-ring)] focus-visible:bg-[var(--focus-ring)] @[860px]/workbench:block"
+            onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); drag.current = { x: event.clientX, width: event.currentTarget.nextElementSibling?.getBoundingClientRect().width ?? rightWidth }; event.currentTarget.setPointerCapture(event.pointerId); }}
+            onPointerMove={event => { if (drag.current) resizeRight(drag.current.width + drag.current.x - event.clientX); }}
+            onPointerUp={event => { drag.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }}
+            onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}
+            onKeyDown={event => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault(); event.stopPropagation();
+              resizeRight(event.key === 'Home' ? 260 : event.key === 'End' ? 720 : rightWidth + (event.key === 'ArrowLeft' ? 24 : -24));
+            }} /> : null}
           <aside
-            className={`flex w-full shrink-0 flex-col border-t @[860px]/workbench:min-h-0 @[860px]/workbench:overflow-y-auto @[860px]/workbench:border-t-0 @[860px]/workbench:border-l ${rightWidthClass}`}
-            style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
+            className={`flex w-full shrink-0 flex-col border-t @[860px]/workbench:min-h-0 @[860px]/workbench:overflow-y-auto @[860px]/workbench:border-t-0 @[860px]/workbench:border-l ${resizableRightPane ? '@[860px]/workbench:w-[min(var(--reader-right-width),45%)]' : rightWidthClass}`}
+            style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER, '--reader-right-width': `${rightWidth}px` } as React.CSSProperties}
           >
             {rightPane}
           </aside>
+          </>
         ) : null}
       </div>
 

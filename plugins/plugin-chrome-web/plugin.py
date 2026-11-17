@@ -212,6 +212,23 @@ class ChromeWebPlugin(BasePlugin):
             profile_dir = self._profile_dir()
         except ValidationProblem as exc:
             return CapabilityResult.fail(str(exc), error_code=exc.error_code)
+        # The live browser owns HttpOnly/session cookies which may not yet be
+        # flushed to SQLite (and may be encrypted with an unavailable key).
+        read_live = getattr(self._cdp_transport, 'get_cookies', None)
+        if payload.get('action') in {'get', 'get_cookies'} and payload.get('url') and read_live:
+            try:
+                url = validate_http_url(payload['url'])
+                sessions = [s for s in self._sessions.active_sessions() if s.profile_dir == profile_dir and s.cdp_port]
+                for session in reversed(sessions):
+                    targets = await self._cdp_transport.list_targets('127.0.0.1', session.cdp_port, timeout_sec=2)
+                    target = next((t for t in targets if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')), None)
+                    if target:
+                        cookies = await read_live(str(target['webSocketDebuggerUrl']), url, timeout_sec=3)
+                        return CapabilityResult.ok({'cookies': cookies, 'count': len(cookies),
+                            'cookie_header': '; '.join(f"{c['name']}={c['value']}" for c in cookies),
+                            'cookie_source': 'chrome-live'})
+            except (CdpError, ValidationProblem):
+                pass
         return await asyncio.to_thread(
             handle_cookies_action,
             self.ctx,

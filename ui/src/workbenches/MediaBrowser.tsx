@@ -56,7 +56,7 @@ export function MediaBrowser({ sourceId, category, items, onPlay, footer }: {
     return <article key={item.id} className="group min-w-0">
       <button type="button" onClick={() => open(item)} className="block w-full rounded-xl text-left focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--domain-media)]" aria-label={`${item.collection ? '打开' : '播放'} ${item.title}`}>
         <div className={`relative overflow-hidden rounded-xl ${music ? 'aspect-square' : 'aspect-video'}`} style={{ background: item.thumbGradient }}>
-          <MediaCover url={item.coverUrl} />
+          <MediaCover url={item.coverUrl} item={item} />
           <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-opacity group-hover:bg-black/15 group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none"><Play size={32} fill="currentColor" aria-hidden="true" /></span>
           {!music && <span className="absolute bottom-2 right-2 rounded bg-black/75 px-1.5 py-0.5 text-xs text-white">{item.durationLabel}</span>}
         </div>

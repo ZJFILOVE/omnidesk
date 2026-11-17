@@ -16,6 +16,29 @@ from omnidesk_sdk import PluginContext  # noqa: E402
 from shuiyuan_http import HttpRequest, HttpResponse  # noqa: E402
 from plugin import ShuiyuanPlugin, create_plugin  # noqa: E402
 
+@pytest.mark.asyncio
+async def test_images_use_forum_cookie_only_on_forum_origin():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from shuiyuan_images import fetch_image
+    auth = SimpleNamespace(resolve_cookies=AsyncMock(return_value=SimpleNamespace(cookie_header='_t=private')),
+                           secrets_for_redaction=lambda: ('private',))
+    http = SimpleNamespace(request=AsyncMock(return_value=HttpResponse(status_code=200, headers={'content-type': 'image/png'}, body_bytes=b'\x89PNG\r\n\x1a\n')))
+    plugin = SimpleNamespace(auth=auth, client=SimpleNamespace(base_url='https://shuiyuan.sjtu.edu.cn', _http=http))
+    result = await fetch_image(plugin, 'https://shuiyuan.sjtu.edu.cn/uploads/test.png')
+    assert result.ok and result.data['data_url'].startswith('data:image/png;base64,')
+    assert http.request.call_args.args[0].cookie_header == '_t=private'
+    result = await fetch_image(plugin, 'https://mmbiz.qpic.cn/test.png')
+    assert result.ok and http.request.call_args.args[0].cookie_header == ''
+    assert not (await fetch_image(plugin, 'https://evil.example/test.png')).ok
+    assert http.request.await_count == 2
+
+
+def test_lazy_and_upload_images_are_resolved():
+    from shuiyuan_html import parse_cooked_to_paragraphs
+    paragraphs = parse_cooked_to_paragraphs('<p><img src="placeholder" data-src="upload://abcd.png"></p>', 'https://shuiyuan.sjtu.edu.cn')
+    assert '/uploads/short-url/abcd.png' in paragraphs[0].original
+
 
 class _FakeHttp:
     def __init__(self, payloads: dict[str, dict[str, object]]) -> None:

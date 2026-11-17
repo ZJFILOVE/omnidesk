@@ -99,8 +99,19 @@ async def request_targets(plugin: Any, payload: dict, url: str, timeout_sec: flo
         raise CdpError(str(exc), error_code=exc.error_code) from None
     headless = payload.get("headless") is True
     sessions = [s for s in plugin._sessions.active_sessions() if s.profile_dir == profile]
-    if headless and any(not s.headless for s in sessions):
-        raise CdpError("请完成并关闭 Chrome 登录窗口后重试后台拉取")
+    visible = [s for s in sessions if not s.headless]
+    if headless and visible:
+        # Explicit opt-in: use the verified browser itself, retaining its cookies
+        # and browser identity. Never navigate an unrelated visible login page.
+        if payload.get("reuse_visible_session") is not True or not any(s.cdp_port == port for s in visible):
+            raise CdpError("请完成并关闭 Chrome 登录窗口后重试后台拉取")
+        targets = await plugin._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
+        matching = [t for t in targets if t.get("type") == "page" and
+                    (str(t.get("url", "")) == origin_string(url) or
+                     str(t.get("url", "")).startswith(origin_string(url) + "/"))]
+        if not matching:
+            raise CdpError("请在已打开的 Chrome 窗口中完成当前站点验证后重试", error_code="verification_required")
+        return matching
     try:
         targets = await plugin._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
     except CdpError as exc:

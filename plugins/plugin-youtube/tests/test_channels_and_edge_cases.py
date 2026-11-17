@@ -251,3 +251,19 @@ async def test_cover_uses_selected_proxy_and_rejects_other_hosts(monkeypatch):
     assert result.ok and result.data['data_url'].startswith('data:image/jpeg;base64,')
     assert seen[0].proxies == {'https': 'http://127.0.0.1:7891'}
     assert isinstance(seen[1], yt_cover.NoRedirect)
+
+
+@pytest.mark.asyncio
+async def test_browser_login_overrides_stale_vault_but_guest_cookie_does_not():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from omnidesk_sdk import CapabilityResult
+    from yt_auth import resolve_cookie, auth_action
+    capabilities = SimpleNamespace(has=lambda _: True, call=AsyncMock(return_value=CapabilityResult.ok({'cookie_header': 'SID=fresh'})))
+    ctx = SimpleNamespace(capabilities=capabilities, get_secret=lambda _: 'SID=old')
+    assert await resolve_cookie(ctx) == ('SID=fresh', 'web.cookies.v1')
+    capabilities.call.return_value = CapabilityResult.ok({'cookie_header': 'PREF=guest'})
+    assert await resolve_cookie(ctx) == ('SID=old', 'vault')
+    result = await auth_action(SimpleNamespace(ctx=ctx, oauth_token=lambda: ''), 'auth_status')
+    assert result.ok and result.data['session_cookie_present']
+    assert 'SID=old' not in str(result.data)

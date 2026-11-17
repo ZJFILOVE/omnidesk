@@ -20,6 +20,8 @@ _CATEGORY_LABELS = {
 }
 _QUALITY_OPTIONS = ["best", "2160p", "1440p", "1080p", "720p", "480p", "360p", "audio"]
 SUPPORTED_ACTIONS = (
+    "open_login",
+    "auth_status",
     "status",
     "categories",
     "fetch_items",
@@ -46,6 +48,10 @@ def build_ui_schema(plugin: YouTubePlugin) -> dict[str, Any]:
     history = plugin.library_items("history")[:8]
     watch_later = plugin.library_items("watch_later")[:8]
     children: list[dict[str, Any]] = [
+        {"type": "ActionRow", "actions": [
+            {"id": "open_login", "label": "在 Chrome 登录 YouTube"},
+            {"id": "auth_status", "label": "已登录，刷新登录状态"},
+        ]},
         {
             "type": "Markdown",
             "id": "youtube-intro",

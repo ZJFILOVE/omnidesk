@@ -10,13 +10,15 @@
   "author": "OmniDesk",
   "description": "YouTube subscriptions, search, channels, playlists, yt-dlp stream resolution, SponsorBlock chapter merge, and bilingual subtitle pre-translation.",
   "provides": [
-    "media.source.v1"
+    "media.source.v1",
+    "media.youtube.v1"
   ],
   "consumes": [
     "llm.translate.v1",
     "speech.asr.v1",
     "player.timeline.v1",
-    "web.cookies.v1"
+    "web.cookies.v1",
+    "web.embed.v1"
   ],
   "permissions": [
     "network:wan",

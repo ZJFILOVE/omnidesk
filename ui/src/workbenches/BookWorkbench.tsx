@@ -388,7 +388,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       totalPages: 420,
       currentPage: 1,
       coverGradient: entry.coverGradient,
-      badge: entry.format === 'pdf' ? 'BabelDOC 队列' : 'EPUB 已导入',
+      badge: entry.format === 'pdf' ? 'BabelDOC 队列' : entry.format === 'unknown' ? '已导入' : `${entry.format.toUpperCase()} 已导入`,
       sourcePlugin:
         entry.providerPluginId ??
         (entry.format === 'pdf' ? 'plugin-pdf-babeldoc' : 'plugin-ebook'),

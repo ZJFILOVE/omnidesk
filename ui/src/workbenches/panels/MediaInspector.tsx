@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { TranslationButton } from '../../components/TranslationContext';
 import { MediaCover } from '../../components/MediaCover';
 import {
@@ -89,6 +89,16 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   onStatusChange,
 }) => {
   const isMusic = item.kind === 'music';
+  const lyricsViewport = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const viewport = lyricsViewport.current;
+    const line = viewport?.children[activeLyricIndex] as HTMLElement | undefined;
+    if (!viewport || !line || lyricsLoading) return;
+    // Scroll only the lyric pane; keep playback controls and keyboard focus stable.
+    const top = viewport.scrollTop + line.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+      - (viewport.clientHeight - line.offsetHeight) / 2;
+    viewport.scrollTo?.({ top: Math.max(0, top), behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  }, [item.id, item.lyrics, activeLyricIndex, lyricsLoading]);
   const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
   const totalSec =
     durationSec && Number.isFinite(durationSec) && durationSec > 0
@@ -124,7 +134,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 backdropFilter: 'blur(12px)',
               }}
             >
-              <MediaCover url={item.coverUrl} />
+              <MediaCover url={item.coverUrl} item={item} />
               <div className="relative flex items-center justify-between font-mono text-[13.5px] opacity-85">
                 <span>ALAC</span>
                 <Disc3 className="h-4 w-4" aria-hidden="true" />
@@ -181,7 +191,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         >
           {videoSurface ? (
             <div className="absolute inset-0 overflow-hidden bg-black">{videoSurface}</div>
-          ) : <MediaCover url={item.coverUrl} />}
+          ) : <MediaCover url={item.coverUrl} item={item} />}
           <div
             className="pointer-events-none absolute inset-0"
             style={{
@@ -440,7 +450,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
           ) : item.lyrics?.length ? (
             <div className="flex flex-col gap-2.5">
               <PanelSectionHeading title={isMusic ? '双语歌词与乐段同步' : '双语字幕'} meta="点击跳转时间轴" />
-              <div className="flex flex-col gap-1.5">
+              <div ref={lyricsViewport} role="region" aria-label={isMusic ? '同步歌词' : '同步字幕'} tabIndex={0} className="flex max-h-[55vh] min-h-0 flex-col gap-1.5 overflow-y-auto overscroll-contain">
                 {item.lyrics.map((line, index) => {
                   const lyricId = `media:lyric:${item.id}:${index}`;
                   const isCurrent = index === activeLyricIndex;
@@ -454,7 +464,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                       selected={isCurrent}
                       tone="media"
                       surface={isCurrent ? 'surface' : 'ghost'}
-                      className="omni-focus-row px-4 py-3 text-left"
+                      className="omni-focus-row shrink-0 px-4 py-3 text-left"
                     >
                       <div className="mb-1 flex items-center justify-between font-mono text-[13.5px] opacity-80">
                         <span>{formatMediaTime(line.timeSec)}</span>

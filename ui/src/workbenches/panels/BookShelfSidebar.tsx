@@ -8,6 +8,13 @@ import { FocusButton, HAIRLINE_BORDER, focusClass, focusableProps } from '../../
 import { SearchInput, SegmentedPills } from '../../components/WorkbenchPrimitives';
 import type { BookCatalogItem, BookItem } from '../../data/mock';
 
+// Keep aligned with plugin-ebook's SUPPORTED_EXTENSIONS / CALIBRE_FORMATS.
+const EBOOK_FORMATS = new Set<BookCatalogItem['format']>([
+  'epub', 'txt', 'mobi', 'azw3', 'azw', 'azw4', 'fb2', 'fbz', 'rtf',
+  'html', 'htm', 'htmlz', 'docx', 'odt', 'cbz', 'cbr', 'cb7', 'chm',
+  'djvu', 'lit', 'lrf', 'prc', 'pdb', 'pml', 'rb', 'snb', 'tcr', 'txtz', 'kepub',
+]);
+
 export interface BookShelfSidebarProps {
   books: BookItem[];
   catalog: BookCatalogItem[];
@@ -227,7 +234,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
             >
               <div className="flex items-center justify-between text-[13.5px]">
                 <span className="font-mono font-semibold" style={{ color: 'var(--domain-book)' }}>
-                  {entry.format.toUpperCase()} · {entry.sizeLabel}
+                  {entry.format === 'unknown' ? '格式未知' : entry.format.toUpperCase()} · {entry.sizeLabel}
                 </span>
                 <span className="inline-flex items-center gap-1 font-medium text-[var(--text-muted)]">
                   <Plus className="h-3 w-3" aria-hidden="true" />
@@ -243,21 +250,21 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
               </div>
             </FocusButton>
             {entry.providerPluginId && onCatalogAction ? (
-              <div className="grid grid-cols-3 gap-1">
-                <button
+              <div className="grid auto-cols-fr grid-flow-col gap-1">
+                {entry.format === 'pdf' ? <button
                   type="button"
                   onClick={() => onCatalogAction(entry, 'open_in_babeldoc')}
                   className="cursor-pointer rounded-[7px] bg-[var(--bg-canvas)] px-1.5 py-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                 >
-                  BabelDOC
-                </button>
-                <button
+                  BabelDOC 翻译
+                </button> : null}
+                {EBOOK_FORMATS.has(entry.format) ? <button
                   type="button"
                   onClick={() => onCatalogAction(entry, 'open_in_ebook')}
                   className="cursor-pointer rounded-[7px] bg-[var(--bg-canvas)] px-1.5 py-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                 >
-                  EPUB 阅读
-                </button>
+                  {entry.format.toUpperCase()} 阅读
+                </button> : null}
                 <button
                   type="button"
                   onClick={() => onCatalogAction(entry, 'send_to_nas')}

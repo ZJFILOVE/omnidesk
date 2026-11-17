@@ -184,6 +184,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
       editorialHeader
       leftWidthClass="@[860px]/workbench:w-[296px]"
       rightWidthClass="@[860px]/workbench:w-[328px]"
+      resizableRightPane
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
           <FocusButton focusId="text:toggle:notes" activeFocusId={activeFocusId} onFocus={emitFocus}

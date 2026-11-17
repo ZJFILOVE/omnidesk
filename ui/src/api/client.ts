@@ -982,7 +982,7 @@ function normalizeBookSearchResult(
     itemId: String(raw.item_id ?? raw.id ?? raw.md5 ?? ''),
     title: String(raw.title ?? raw.name ?? raw.item_id ?? '未命名图书'),
     author: String(raw.author ?? raw.authors ?? '未知作者'),
-    format: String(raw.format ?? raw.extension ?? (providerPluginId === 'plugin-annas-archive' ? '' : 'epub')).toLowerCase(),
+    format: String(raw.format || raw.extension || '').trim().toLowerCase(),
     size: String(raw.size ?? raw.size_label ?? raw.filesize ?? ''),
     language: String(raw.language ?? raw.lang ?? ''),
     year: String(raw.year ?? ''),

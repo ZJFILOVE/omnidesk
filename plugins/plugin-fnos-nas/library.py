@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import re
@@ -38,6 +39,33 @@ _YEAR_RE = re.compile(r"(?<![0-9])(19\d{2}|20\d{2})(?![0-9])")
 _QUALITY_RE = re.compile(r"\b(2160p|4k|1080p|720p|remux|bluray|blu-ray|web-dl|webrip|dovi|hdr10\+?|hdr|hevc|x265|x264)\b", re.IGNORECASE)
 _SEASON_DIR_RE = re.compile(r"^(?:season|s)\s*0*(\d{1,2})$", re.IGNORECASE)
 _MAX_SCAN_ITEMS = 20000
+
+
+def read_cover(snapshot: LibrarySnapshot, item_id: str) -> str:
+    """Read adjacent artwork only for an indexed item inside the configured mount."""
+    record = snapshot.records_by_id.get(item_id)
+    if not record or snapshot.mount_root is None:
+        return ''
+    media = Path(record['path'])
+    roots = [media.parent]
+    if _SEASON_DIR_RE.match(media.parent.name):
+        roots.append(media.parent.parent)
+    candidates = [media.with_name(media.stem + suffix) for suffix in ('-poster.jpg', '.jpg', '.png')]
+    candidates += [root / (name + ext) for root in roots for name in ('poster', 'cover', 'folder') for ext in ('.jpg', '.png', '.webp')]
+    for path in candidates:
+        if not is_safe_scan_entry(snapshot.mount_root, path) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with path.open('rb') as stream:
+                raw = stream.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                continue
+            mime = 'image/jpeg' if raw.startswith(b'\xff\xd8\xff') else 'image/png' if raw.startswith(b'\x89PNG\r\n\x1a\n') else 'image/webp' if raw.startswith(b'RIFF') and raw[8:12] == b'WEBP' else ''
+            if mime:
+                return f'data:{mime};base64,' + base64.b64encode(raw).decode('ascii')
+        except OSError:
+            continue
+    return ''
 
 
 @dataclass

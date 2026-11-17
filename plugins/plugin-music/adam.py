@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import http.client
 import json
@@ -47,6 +48,7 @@ class AdamService:
         self._start_lock = asyncio.Lock()
         self._engine_task = None
         self.sessions: list[str] = []
+        self._covers: dict[str, str] = {}
 
     def owned_listener(self) -> bool:
         expected = '0100007F:4E39'  # 127.0.0.1:20025
@@ -78,7 +80,7 @@ class AdamService:
                 await asyncio.sleep(.1)
             raise AdamError('Adam 引擎启动超时', 'timeout')
 
-    def _request(self, path: str, method: str, body):
+    def _request(self, path: str, method: str, body, image: bool = False):
         if not self.owned_listener():
             raise AdamError('Adam 本机服务未运行或不属于当前用户')
         # Bootstrap transmits no credentials; the actual request pins this leaf.
@@ -106,13 +108,18 @@ class AdamService:
                 raise AdamError(f'Adam 请求失败（HTTP {response.status}）', 'unauthorized' if response.status in (401, 403) else 'upstream_error', response.status)
             if len(raw) > 8 * 1024 * 1024:
                 raise AdamError('Adam 响应过大', 'invalid_response')
+            if image:
+                mime = response.getheader('Content-Type', '').split(';')[0].strip().lower()
+                if mime not in {'image/jpeg', 'image/png', 'image/webp', 'image/gif'}:
+                    raise AdamError('Adam 封面响应不是图片', 'invalid_response')
+                return 'data:' + mime + ';base64,' + base64.b64encode(raw).decode('ascii')
             return json.loads(raw) if raw else {}
         finally:
             conn.close()
 
-    async def request(self, path, method='GET', body=None):
+    async def request(self, path, method='GET', body=None, *, image=False):
         await self.ensure_engine()
-        return await asyncio.to_thread(self._request, path, method, body)
+        return await asyncio.to_thread(self._request, path, method, body, image)
 
     def map_nodes(self, payload) -> list[MediaItem]:
         result, seen = [], set()
@@ -237,6 +244,18 @@ class AdamService:
                     data = await self.request(f'/api/v1/catalog/artists/{ident}?sf=cn')
                     data = [node.get('relationships', {}) for node in data.get('data', [])]
                 return CapabilityResult.ok({'items': [i.model_dump() for i in self.map_nodes(data)], 'has_more': has_more})
+            if action == 'cover':
+                ident = str(req.get('item_id') or '')
+                sf = str(req.get('storefront') or 'cn').lower()
+                if not ID.fullmatch(ident) or not re.fullmatch(r'[a-z]{2}', sf):
+                    raise AdamError('无效歌曲 ID 或地区', 'invalid_argument')
+                key = sf + ':' + ident
+                if key not in self._covers:
+                    value = await self.request(f'/api/v1/artwork/{ident}?sf={sf}&size=600', image=True)
+                    if len(self._covers) >= 64:
+                        self._covers.pop(next(iter(self._covers)))
+                    self._covers[key] = value
+                return CapabilityResult.ok({'data_url': self._covers[key]})
             if action == 'resolve_stream':
                 ident = str(req.get('item_id') or '')
                 if not ID.fullmatch(ident): raise AdamError('无效歌曲 ID', 'invalid_argument')

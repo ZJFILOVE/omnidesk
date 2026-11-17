@@ -103,6 +103,10 @@ async def test_background_requests_reuse_headless_and_explicit_login_switches_mo
             self.close_calls += 1
             plugin._sessions.latest_session().process.terminate()
 
+        async def get_cookies(self, ws_url, url, **kwargs):
+            assert url == 'https://www.reddit.com/'
+            return [{'name': 'session', 'value': 'live-test', 'domain': '.reddit.com', 'httpOnly': True}]
+
         async def list_targets(self, host, port, **kwargs):
             if not plugin._sessions.active_sessions() and not self.external:
                 raise module.CdpError("offline")
@@ -153,8 +157,16 @@ async def test_background_requests_reuse_headless_and_explicit_login_switches_mo
         assert not background.is_running
         assert "--app=https://www.reddit.com/login/" in login.data["args"]
         assert "--headless=new" not in login.data["args"]
+        cookies = await plugin.handle_cookies({'action': 'get_cookies', 'url': 'https://www.reddit.com/'})
+        assert cookies.ok and cookies.data['cookie_header'] == 'session=live-test'
+        assert cookies.data['cookie_source'] == 'chrome-live'
         blocked = await plugin.handle_fetch(request)
         assert not blocked.ok and transport.evaluations == 2
+        reused = await plugin.handle_fetch({**request, "reuse_visible_session": True})
+        assert reused.ok and transport.evaluations == 3
+        assert plugin._sessions.latest_session().session_id == login.data['session_id']
+        unrelated = await plugin.handle_fetch({**request, "url": "https://unrelated.example/", "reuse_visible_session": True})
+        assert not unrelated.ok and transport.evaluations == 3
         await plugin.handle_embed({"action": "close"})
         extracted = await plugin.handle_extract({"url": "https://www.reddit.com/r/rust/", "headless": True})
         assert extracted.ok and "Background article" in extracted.data["text"]

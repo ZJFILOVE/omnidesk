@@ -163,7 +163,10 @@ def _collect_inline_text(node: _DomNode | str, base_url: str, out: list[str]) ->
         if "avatar" in node.classes:
             return
         alt = node.attrs.get("alt", "").strip()
-        src = resolve_url(base_url, node.attrs.get("src", "")) if base_url else node.attrs.get("src", "").strip()
+        raw_src = node.attrs.get("data-src") or node.attrs.get("data-original") or node.attrs.get("src", "")
+        if raw_src.startswith('upload://'):
+            raw_src = '/uploads/short-url/' + raw_src[len('upload://'):]
+        src = resolve_url(base_url, raw_src) if base_url else raw_src.strip()
         out.append(image_markdown(src, alt, base_url=base_url))
         return
     if "math" in node.classes:

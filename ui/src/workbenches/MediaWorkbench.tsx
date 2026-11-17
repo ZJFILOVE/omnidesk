@@ -319,7 +319,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
 
   const activeLyricIndex = useMemo(() => {
     if (!displayItem?.lyrics?.length) return -1;
-    let idx = 0;
+    let idx = -1;
     for (let i = 0; i < displayItem.lyrics.length; i += 1) {
       if (displayItem.lyrics[i].timeSec <= currentSec) idx = i;
     }
@@ -694,7 +694,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                             boxShadow: 'var(--shadow-page)',
                           }}
                         >
-                          <MediaCover url={item.coverUrl} />
+                          <MediaCover url={item.coverUrl} item={item} />
                           <span className="relative rounded bg-black/65 px-1.5 py-[1px] font-mono text-[12.5px] leading-tight">
                             {item.durationLabel}
                           </span>

@@ -52,6 +52,7 @@ class HttpRequest:
     timeout_sec: float = 15.0
     max_redirects: int = MAX_REDIRECTS
     max_bytes: int = MAX_HTTP_BYTES
+    binary: bool = False
 
 
 @dataclass(slots=True)
@@ -62,6 +63,7 @@ class HttpResponse:
     effective_url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
     body: str = ""
+    body_bytes: bytes = b""
     error: str = ""
     error_code: str = ""
     redirected_cross_host: bool = False
@@ -162,7 +164,7 @@ def detect_sso_or_login_wall(
     return False
 
 
-def _read_bounded_body(stream: Any, *, max_bytes: int, deadline: float) -> str:
+def _read_bounded_body(stream: Any, *, max_bytes: int, deadline: float, binary: bool = False) -> str | bytes:
     declared = getattr(stream, "headers", {}).get("Content-Length") if hasattr(stream, "headers") else None
     if declared is not None:
         try:
@@ -180,7 +182,7 @@ def _read_bounded_body(stream: Any, *, max_bytes: int, deadline: float) -> str:
         buf.extend(chunk)
         if len(buf) > max_bytes:
             raise ShuiyuanError("validation_error", f"响应体积超出 {max_bytes} 字节安全上限")
-    return bytes(buf).decode("utf-8", errors="replace")
+    return bytes(buf) if binary else bytes(buf).decode("utf-8", errors="replace")
 
 
 class SafeHttpClient:
@@ -264,7 +266,7 @@ class SafeHttpClient:
                 with opener.open(u_req, timeout=remaining) as resp:
                     status_code = int(getattr(resp, "status", 200))
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-                    body = _read_bounded_body(resp, max_bytes=req.max_bytes, deadline=deadline)
+                    body = _read_bounded_body(resp, max_bytes=req.max_bytes, deadline=deadline, binary=req.binary)
             except urllib.error.HTTPError as exc:
                 status_code = int(exc.code)
                 resp_headers = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
@@ -349,13 +351,16 @@ class SafeHttpClient:
                     redirected_cross_host=redirected_cross_host,
                 )
 
-            challenge = detect_challenge(status_code, resp_headers, body)
-            sso = detect_sso_or_login_wall(status_code, current_url, resp_headers, body)
+            body_bytes = body if isinstance(body, bytes) else b""
+            text_body = body.decode('utf-8', errors='replace') if isinstance(body, bytes) else body
+            challenge = detect_challenge(status_code, resp_headers, text_body)
+            sso = detect_sso_or_login_wall(status_code, current_url, resp_headers, text_body)
             return HttpResponse(
                 status_code=status_code,
                 effective_url=current_url,
                 headers=resp_headers,
-                body=body,
+                body="" if req.binary else text_body,
+                body_bytes=body_bytes,
                 redirected_cross_host=redirected_cross_host,
                 sso_redirect_detected=sso,
                 challenge_detected=challenge,

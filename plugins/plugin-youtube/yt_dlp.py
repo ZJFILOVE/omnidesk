@@ -138,11 +138,11 @@ async def run_ytdlp_json(
     if proxy and (urlsplit(proxy).scheme not in {'http', 'https', 'socks5', 'socks5h'} or not urlsplit(proxy).hostname or any(ch in proxy for ch in '\r\n\t')):
         return None, {'error_code': 'invalid_argument', 'error': 'YouTube 代理地址无效'}
     cookie_path = ''
-    cookie = str(ctx.get_secret('cookie_header') or '')
-    if not cookie and ctx.capabilities.has('web.cookies.v1'):
-        cookie_result = await ctx.capabilities.call('web.cookies.v1', {'action': 'get_cookies', 'url': 'https://www.youtube.com/', 'domain': 'youtube.com', 'include_subdomains': True})
-        if cookie_result.ok:
-            cookie = str(cookie_result.data.get('cookie_header') or '')
+    if __package__:
+        from .yt_auth import resolve_cookie
+    else:
+        from yt_auth import resolve_cookie
+    cookie, _ = await resolve_cookie(ctx)
     runtime_args = ['--js-runtimes', 'node'] if shutil.which('node') and not shutil.which('deno') else []
     extra_secrets = (*extra_secrets, *(value for value in (cookie, proxy) if value))
     try:

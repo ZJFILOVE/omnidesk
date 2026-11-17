@@ -174,8 +174,8 @@ def test_manifest_matches_schema_and_config_rules() -> None:
     assert manifest["kind"] == "workspace"
     assert manifest["domain"] == "media"
     assert manifest["entry"] == "plugin:create_plugin"
-    assert manifest["provides"] == ["media.source.v1"]
-    assert set(manifest["consumes"]) == {"llm.translate.v1", "speech.asr.v1", "player.timeline.v1", "web.cookies.v1"}
+    assert manifest["provides"] == ["media.source.v1", "media.youtube.v1"]
+    assert set(manifest["consumes"]) == {"llm.translate.v1", "speech.asr.v1", "player.timeline.v1", "web.cookies.v1", "web.embed.v1"}
     assert set(manifest.keys()).issubset(set(schema["properties"].keys()))
 
     cap_re = re.compile(schema["properties"]["provides"]["items"]["pattern"])

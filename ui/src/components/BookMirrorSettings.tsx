@@ -33,7 +33,7 @@ function ProviderMirrors({ provider, name, onChanged }: { provider: string; name
     try {
       const result = await callCapability({ capability: 'book.search.v1', providerPluginId: provider, payload: { action: 'open_browser' } });
       if (!result.ok) setError(formatRpcError(result.error));
-      else setMessage('已打开当前 Anna 页面；完成验证后返回重新搜索。');
+      else setMessage('完成验证码并看到搜索结果后，保留 Chrome 窗口，返回点击「已完成验证，重新搜索」。');
     } catch (err) { setError(String(err)); }
     finally { setBusy(false); }
   };
@@ -48,6 +48,7 @@ function ProviderMirrors({ provider, name, onChanged }: { provider: string; name
     </div>
     <p className="text-xs text-[var(--text-muted)]">当前：{state?.mirror_url || '正在读取…'}</p>
     {provider === 'plugin-annas-archive' && <button type="button" className={field} onClick={() => void openAnna()}>在 Chrome 打开 Anna / 完成验证</button>}
+    {provider === 'plugin-annas-archive' && <button type="button" className={`${field} ml-2`} onClick={() => { setError(''); setMessage('正在使用当前 Chrome 验证会话重新搜索。'); onChanged(); }}>已完成验证，重新搜索</button>}
     {error && <p role="alert" className="text-sm text-[var(--status-err-fg)]">{error}</p>}
     <p role="status" className="text-sm text-[var(--text-muted)]">{message}</p>
   </fieldset>;

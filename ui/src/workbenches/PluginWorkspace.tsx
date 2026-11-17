@@ -187,7 +187,7 @@ export function PluginWorkspace({
     <div
       data-testid="plugin-workspace"
       data-plugin-tab-id={tab.tab_id}
-      className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-canvas)]"
+      className="flex h-full max-h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-canvas)]"
     >
       <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border-subtle)] px-6 py-4">
         <div className="flex min-w-0 items-start gap-3">
@@ -266,7 +266,9 @@ export function PluginWorkspace({
         </div>
       ) : null}
 
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-6 py-4.5">
+      <div ref={scrollRef} role="region" aria-label={`${tab.title}阅读内容`} tabIndex={0}
+        data-reader-scroll={lastActionId === 'fetch_article' ? 'true' : undefined}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4.5">
         {listSnapshot && !feedRequest ? <FocusItem as="button" id={`plugin-workspace:${tab.tab_id}:back`}
           disabled={pendingAction !== null} onActivate={() => {
             setActionResult(listSnapshot.result);

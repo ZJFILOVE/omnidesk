@@ -174,6 +174,12 @@ class YouTubePlugin(BasePlugin):
         """Dispatch `media.youtube.v1` RPC actions with fail-closed error handling."""
         payload = dict(req) if req is not None else {}
         action = str(payload.get("action") or "status").strip()
+        if action in {'open_login', 'auth_status'}:
+            if __package__:
+                from .yt_auth import auth_action
+            else:
+                from yt_auth import auth_action
+            return await auth_action(self, action)
         if action == "cover":
             if __package__:
                 from .yt_cover import fetch_cover

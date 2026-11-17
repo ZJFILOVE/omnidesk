@@ -347,6 +347,13 @@ class ShuiyuanPlugin(BasePlugin):
             else:
                 return self._fail("invalid_argument", "action must be a non-empty string")
 
+            if action == "image":
+                if __package__:
+                    from .shuiyuan_images import fetch_image
+                else:
+                    from shuiyuan_images import fetch_image
+                return await fetch_image(self, req_obj.get('url'))
+
             if action == "channels":
                 await self.auth.resolve_cookies(persist_chrome_snapshot=True)
                 return CapabilityResult.ok(

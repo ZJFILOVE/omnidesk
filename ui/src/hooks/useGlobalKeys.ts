@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { Direction, WorkbenchId } from '../types';
 import { isEditableElement } from '../utils/shortcuts';
 import { useImeGuard } from './useImeGuard';
+import { scrollReader } from '../utils/readerScroll';
 
 const WORKBENCH_SHORTCUT_MAP: Record<string, WorkbenchId> = {
   '1': 'media',
@@ -167,6 +168,11 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
       }
 
       if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+
+      if (scrollReader(event)) {
+        event.preventDefault();
         return;
       }
 

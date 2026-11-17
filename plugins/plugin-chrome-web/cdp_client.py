@@ -229,6 +229,10 @@ class LoopbackWebSocketCdpTransport:
     async def close_browser(self, ws_url: str, *, timeout_sec: float = 2.0) -> None:
         await self._execute(ws_url, [("Browser.close", {})], timeout_sec=timeout_sec)
 
+    async def get_cookies(self, ws_url: str, url: str, *, timeout_sec: float = 5.0) -> list[dict[str, Any]]:
+        response = await self._execute(ws_url, [("Network.getCookies", {"urls": [url]})], timeout_sec=timeout_sec)
+        return response.get('result', {}).get('cookies', [])
+
     async def _execute(self, ws_url: str, commands: list[tuple[str, dict[str, Any]]], *, timeout_sec: float) -> dict[str, Any]:
         try:
             host, port, path = validate_cdp_ws_url(ws_url)

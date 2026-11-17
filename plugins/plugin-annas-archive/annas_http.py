@@ -314,6 +314,8 @@ async def fetch_with_chrome_fallback(
                 "credentials": "include",
                 "open_tab_if_missing": True,
                 "headless": True,
+                "reuse_visible_session": True,
+                "max_bytes": max_bytes,
                 "timeout_ms": int(max(1.0, timeout_sec) * 1000),
             },
         )

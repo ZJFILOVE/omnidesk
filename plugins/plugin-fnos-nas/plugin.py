@@ -210,6 +210,9 @@ class FnosNasPlugin(BasePlugin):
         """Handle `media.source.v1` RPC wrapper around FnosMediaSource."""
         payload = dict(req) if req is not None else {}
         action = str(payload.get("action") or "fetch_items").strip().lower()
+        if action == "cover":
+            data = await asyncio.to_thread(library.read_cover, self._get_snapshot(), str(payload.get('item_id') or ''))
+            return CapabilityResult.ok({'data_url': data}) if data else CapabilityResult.fail('媒体目录暂无封面', error_code='not_found')
         if action == "categories":
             cats = self._media_source.categories()
             return CapabilityResult.ok({"categories": cats})

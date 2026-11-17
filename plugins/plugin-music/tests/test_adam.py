@@ -4,6 +4,16 @@ import pytest
 from adam import AdamService, artwork
 
 @pytest.mark.asyncio
+async def test_cover_uses_playback_engine_and_caches_image():
+    service = AdamService(SimpleNamespace(), None)
+    service.request = AsyncMock(return_value='data:image/jpeg;base64,/9j/')
+    first = await service.handle({'action': 'cover', 'item_id': '123'})
+    second = await service.handle({'action': 'cover', 'item_id': '123'})
+    assert first.ok and second.data == first.data
+    service.request.assert_awaited_once_with('/api/v1/artwork/123?sf=cn&size=600', image=True)
+    assert not (await service.handle({'action': 'cover', 'item_id': '../bad'})).ok
+
+@pytest.mark.asyncio
 async def test_adam_playback_returns_engine_stream_not_web_page():
     service = AdamService(SimpleNamespace(), None)
     service.request = AsyncMock(return_value={'sessionId': 'session-test', 'codec': 'alac', 'bitDepth': 24, 'sampleRate': 192000, 'durationMs': 180000})

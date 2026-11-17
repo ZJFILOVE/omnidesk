@@ -31,6 +31,25 @@ def _load_plugin_module() -> Any:
     return mod
 
 
+def test_cover_is_read_from_indexed_media_directory_and_cannot_escape(tmp_path):
+    module = _load_plugin_module()
+    mount = tmp_path / 'mount'
+    folder = mount / 'Movies' / 'Film'
+    folder.mkdir(parents=True)
+    (folder / 'Film.mkv').write_bytes(b'video')
+    image = folder / 'poster.jpg'
+    image.write_bytes(b'\xff\xd8\xfftest')
+    snapshot = module.library.scan_library(str(mount), {})
+    ident = snapshot.items[0].id
+    assert module.library.read_cover(snapshot, ident).startswith('data:image/jpeg;base64,')
+    image.unlink()
+    outside = tmp_path / 'private.jpg'
+    outside.write_bytes(b'\xff\xd8\xffprivate')
+    image.symlink_to(outside)
+    assert module.library.read_cover(snapshot, ident) == ''
+    assert module.library.read_cover(snapshot, '../../private.jpg') == ''
+
+
 def test_manifest_v2_schema_and_zero_hardcoded_secrets(tmp_path: Path) -> None:
     manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     schema = json.loads((REPO_ROOT / "docs" / "schemas" / "plugin-manifest.schema.json").read_text(encoding="utf-8"))
