@@ -181,6 +181,7 @@ class ExamplePlugin(BasePlugin):
 | `player.timeline.v1` | `plugin-sponsorblock` | `MediaWorkbench` / `plugin-bilibili` / `plugin-youtube` | 基于 B 站 (`bsbsb.top`) 与 YouTube (`sponsor.ajay.app`) K-匿名哈希前缀查询空降/章节片段并合并进播放器时间轴 |
 | `subtitle.fetch.v1` | `plugin-sub-hunter` | `MediaWorkbench` / `plugin-fnos-nas` / `plugin-youtube` | SubHD 抓取、ASSRT API 检索下载、16 MB 安全解压与多编码 UTF-8 转换 |
 | `subtitle.sync.v1` | `plugin-sub-hunter` | `MediaWorkbench` / `plugin-fnos-nas` | `ffsubsync` 音轨 VAD / 参考轴自动对齐与线性偏移/倍率缩放 |
+| `subtitle.translate.v1` | `plugin-sub-hunter` | `MediaWorkbench` / `plugin-fnos-nas` | 调用 `llm.translate.v1` 将 SRT/VTT 批量翻译为双语 / 仅译文 / 仅原文；1-8 路并发、内容哈希断点缓存、批次失败自动二分重试与原子写回 |
 | `nas.connection.v1` | `plugin-fnos-nas` | 音乐、PDF、EPUB、搜书插件 | 探测飞牛连接状态、列出受管媒体库/书库挂载根与受保护原子写回 |
 | `media.source.v1` | `plugin-bilibili` / `youtube` / `fnos-nas` / `plugin-music` / `plugin-ai-curator` | `MediaWorkbench` | 通过 `MediaSource` 向影视音乐工作台注入视频流、番剧、NAS 原盘、Apple Music 曲库及 AI 推荐流 |
 | `media.local_match.v1` | `plugin-fnos-nas` | `plugin-bilibili` / `plugin-arr-imdb` | 根据片名 / IMDb / TMDB / 剧集季集号查询飞牛 NAS 是否已有本地高码率片源 |

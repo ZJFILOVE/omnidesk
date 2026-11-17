@@ -73,7 +73,7 @@ flowchart TB
 | `plugin-ai-curator` | `hybrid` | `core` | **已新建于 `plugins/`** | 克隆同步 `obsidian-vault` 与 `music-daily` 回灌全量历史推荐，硬隔离 `daily_immutable` 与 `interactive_ephemeral` 双模前端反写 | **提供** `recommend.feed.v1` 及三域 `Source`；**消费** `vocab.sm2.v1` |
 | `plugin-asr-funasr` | `provider` | `core` | **已迁入 `plugins/`** | 本地 Vulkan/CPU `FunASR SenseVoiceSmall` 独立子进程分块离线转写与断点续传 | **提供** `speech.asr.v1` |
 | `plugin-demo` | `hybrid` | `core` | **已新建于 `plugins/`** | 最小 Protocol v2 参考示例插件（含能力调用与声明式工作台页签） | **提供** `demo.echo.v1` |
-| `plugin-sub-hunter` | `provider` | `media` | **已迁入 `plugins/`** | SubHD / ASSRT 字幕检索安全解压与 `ffsubsync` 自动音轨对齐 | **提供** `subtitle.fetch.v1`, `subtitle.sync.v1`；**消费** `web.cookies.v1` |
+| `plugin-sub-hunter` | `provider` | `media` | **已迁入 `plugins/`** | SubHD / ASSRT 字幕检索安全解压、`ffsubsync` 自动音轨对齐与 SRT/VTT 双语翻译 | **提供** `subtitle.fetch.v1`, `subtitle.sync.v1`, `subtitle.translate.v1`；**消费** `web.cookies.v1`, `llm.translate.v1` |
 | `plugin-sponsorblock` | `extension` | `media` | **已迁入 `plugins/`** | Bilibili (`bsbsb.top`) / YouTube (`sponsor.ajay.app`) K-匿名空降与恰饭片段标记跳过 | **提供** `player.timeline.v1` |
 | `plugin-chrome-web` | `hybrid` | `text` | **已迁入 `plugins/`** | 托管原生 Chrome `--app` 阅读/登录窗、只读 Cookies SQLite 导入、CDP DOM 提取与同源请求代理（附 MV3 扩展骨架） | **提供** `web.embed.v1`, `web.cookies.v1`, `web.extract.v1`, `web.fetch.v1`；**消费** `llm.translate.v1` |
 | `plugin-music` | `hybrid` | `media` | **已迁入 `plugins/`** | 复用 `qwen-translator` Apple Music / 双语歌词能力 + 国区曲库预检 + `ChatGPT Daily 5` 门禁写回 | **提供** `media.playlist.v1`, `media.source.v1`；**消费** `llm.translate.v1`, `llm.chat.v1` |

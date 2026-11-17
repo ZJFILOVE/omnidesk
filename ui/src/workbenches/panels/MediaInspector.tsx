@@ -22,6 +22,7 @@ import {
   focusableInputProps,
 } from '../../components/WorkbenchLayout';
 import type { ChapterSegment, MediaItem } from '../../data/mock';
+import { SubHunterAction } from './SubHunterAction';
 
 export function formatMediaTime(sec: number): string {
   const safe = Math.max(0, Math.floor(sec));
@@ -462,18 +463,12 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
             title="飞牛 fnOS 原盘信息"
             meta={item.nasMeta.imdbRating}
             action={
-              <FocusButton
-                focusId="media:action:subhunter"
+              <SubHunterAction
+                item={item}
                 activeFocusId={activeFocusId}
                 onFocus={onFocus}
-                onActivate={() =>
-                  onStatusChange(`SubHunter + ffsubsync 已对齐并保护人工字幕：${item.title}`)
-                }
-                surface="soft"
-                className="px-3 py-1.5 text-[14px] font-medium"
-              >
-                运行 SubHunter 字幕检索与时间轴对齐
-              </FocusButton>
+                onStatusChange={onStatusChange}
+              />
             }
           />
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2.5 text-[14.5px] sm:grid-cols-2">

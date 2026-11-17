@@ -28,7 +28,11 @@ def test_manifest_matches_v2_schema_and_requirements() -> None:
     assert manifest["kind"] == "provider"
     assert manifest["domain"] == "media"
     assert manifest["entry"] == "plugin:create_plugin"
-    assert set(manifest["provides"]) == {"subtitle.fetch.v1", "subtitle.sync.v1"}
+    assert set(manifest["provides"]) == {
+        "subtitle.fetch.v1",
+        "subtitle.sync.v1",
+        "subtitle.translate.v1",
+    }
 
     allowed_top = set(schema["properties"].keys())
     assert set(manifest.keys()).issubset(allowed_top)
@@ -45,11 +49,15 @@ def test_manifest_matches_v2_schema_and_requirements() -> None:
         "download_root",
         "max_download_mb",
         "ffsubsync_bin",
+        "translation_concurrency",
+        "subtitle_output_mode",
         "overwrite_policy",
     }
     assert required_keys.issubset(fields.keys())
     assert fields["assrt_token"]["type"] == "secret"
     assert fields["max_download_mb"]["type"] == "int"
+    assert fields["subtitle_output_mode"]["default"] == "bilingual"
+    assert fields["subtitle_output_mode"]["options"] == ["bilingual", "translated", "original"]
     assert fields["overwrite_policy"]["default"] == "protect_manual"
     assert "protect_manual" in fields["overwrite_policy"]["options"]
 
@@ -85,6 +93,7 @@ async def test_lifecycle_secret_isolation_and_status(tmp_path: Path) -> None:
 
     assert ctx.capabilities.has("subtitle.fetch.v1")
     assert ctx.capabilities.has("subtitle.sync.v1")
+    assert ctx.capabilities.has("subtitle.translate.v1")
 
     st = await ctx.capabilities.call("subtitle.fetch.v1", {"action": "status"})
     assert st.ok is True
@@ -107,9 +116,10 @@ async def test_lifecycle_secret_isolation_and_status(tmp_path: Path) -> None:
 
     await invoke_lifecycle_hook(plugin.on_unload)
     summary = await ctx.acleanup()
-    assert summary["capabilities"] == 2
+    assert summary["capabilities"] == 3
     assert not ctx.capabilities.has("subtitle.fetch.v1")
     assert not ctx.capabilities.has("subtitle.sync.v1")
+    assert not ctx.capabilities.has("subtitle.translate.v1")
 
 
 @pytest.mark.asyncio

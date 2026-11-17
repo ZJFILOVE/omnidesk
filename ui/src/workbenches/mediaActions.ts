@@ -1,6 +1,177 @@
 import { callCapability, formatRpcError } from '../api';
 import type { MediaItem } from '../data/mock';
 
+interface SubtitleCandidate {
+  id?: string;
+  provider?: string;
+  title?: string;
+  language?: string;
+  filename?: string;
+}
+
+interface SubtitleDownloadFile {
+  path?: string;
+  filename?: string;
+}
+
+export type SubtitleOutputMode = 'bilingual' | 'translated' | 'original';
+
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+export async function runSubHunterPipeline(
+  item: MediaItem,
+  options: {
+    outputMode?: SubtitleOutputMode;
+    onProgress?: (message: string) => void;
+  } = {},
+): Promise<{ ok: boolean; message: string; outputPath?: string }> {
+  const outputMode = options.outputMode ?? 'bilingual';
+  const onProgress = options.onProgress;
+  const title = item.title.trim();
+  if (!title) {
+    return { ok: false, message: '当前媒体缺少片名，无法检索字幕' };
+  }
+
+  onProgress?.('SubHunter 正在检索字幕…');
+  const search = await callCapability<{ results?: SubtitleCandidate[] }>({
+    capability: 'subtitle.fetch.v1',
+    payload: { action: 'search', title, timeout_sec: 60 },
+    timeoutMs: 90_000,
+  });
+  if (!search.available) {
+    return { ok: false, message: '离线预览模式不可调用 subtitle.fetch.v1' };
+  }
+  if (!search.ok) {
+    return { ok: false, message: `字幕检索失败 ${formatRpcError(search.error)}` };
+  }
+
+  const results = Array.isArray(search.data.results) ? search.data.results : [];
+  if (!results.length) {
+    return { ok: false, message: `未找到「${title}」的字幕候选` };
+  }
+  const candidate =
+    results.find((entry) => /双|bilingual/i.test(entry.language ?? '')) ??
+    results.find((entry) => /eng|english|英/i.test(entry.language ?? '')) ??
+    results[0];
+  if (!candidate.id || !candidate.provider) {
+    return { ok: false, message: '字幕候选缺少 provider/id，无法下载' };
+  }
+
+  onProgress?.(`找到 ${results.length} 条候选，正在下载「${candidate.title ?? title}」…`);
+  const download = await callCapability<{ files?: SubtitleDownloadFile[] }>({
+    capability: 'subtitle.fetch.v1',
+    payload: {
+      action: 'download',
+      provider: candidate.provider,
+      id: candidate.id,
+      language: candidate.language,
+      filename: candidate.filename,
+      timeout_sec: 120,
+    },
+    timeoutMs: 180_000,
+  });
+  if (!download.available) {
+    return { ok: false, message: '离线预览模式不可调用 subtitle.fetch.v1' };
+  }
+  if (!download.ok) {
+    return { ok: false, message: `字幕下载失败 ${formatRpcError(download.error)}` };
+  }
+  const downloadedPath = download.data.files?.[0]?.path;
+  if (!downloadedPath) {
+    return { ok: false, message: '字幕下载完成，但没有返回可用的本地路径' };
+  }
+
+  let translatedPath = downloadedPath;
+  let translateNote = '';
+  const language = candidate.language ?? '';
+  const languageText = `${language} ${candidate.title ?? ''}`;
+  const alreadyBilingual =
+    /双|bilingual|中英/i.test(languageText) ||
+    (/zh|chs|cht/i.test(language) && /en|eng|英/i.test(language));
+  const alreadyChinese = /zh|中|简|繁|chs|cht/i.test(languageText);
+  if (outputMode === 'original') {
+    translateNote = '仅保留原字幕';
+  } else if (alreadyBilingual && outputMode === 'bilingual') {
+    translateNote = '已使用现成双语字幕，跳过翻译';
+  } else if (alreadyChinese) {
+    translateNote = '已使用中文字幕，跳过翻译';
+  } else {
+    onProgress?.(
+      outputMode === 'bilingual'
+        ? '字幕已下载，正在生成双语字幕…'
+        : '字幕已下载，正在生成中文译文…',
+    );
+    const translate = await callCapability<{
+      output_path?: string;
+      translated_count?: number;
+      skipped?: boolean;
+    }>({
+      capability: 'subtitle.translate.v1',
+      payload: {
+        action: 'translate',
+        subtitle_path: downloadedPath,
+        target_lang: 'zh-CN',
+        output_mode: outputMode,
+        timeout_sec: 900,
+      },
+      timeoutMs: 900_000,
+    });
+    if (!translate.available) {
+      translateNote = '当前运行时不支持字幕翻译，已保留原字幕';
+    } else if (!translate.ok) {
+      translateNote = `字幕翻译失败（${formatRpcError(translate.error)}），已保留原字幕`;
+    } else if (translate.data.output_path) {
+      translatedPath = translate.data.output_path;
+    }
+  }
+
+  const mediaPath = item.nasMeta?.path?.trim();
+  if (!mediaPath) {
+    const suffix = translateNote ? `；${translateNote}` : '';
+    return {
+      ok: true,
+      message: `字幕已就绪：${basename(translatedPath)}${suffix}（缺少视频路径，未做时间轴对齐）`,
+      outputPath: translatedPath,
+    };
+  }
+
+  onProgress?.('正在用 ffsubsync 对齐字幕时间轴…');
+  const sync = await callCapability<{ output_path?: string; skipped?: boolean }>({
+    capability: 'subtitle.sync.v1',
+    payload: {
+      action: 'sync',
+      subtitle_path: translatedPath,
+      reference_path: mediaPath,
+      timeout_sec: 900,
+    },
+    timeoutMs: 960_000,
+  });
+  const suffix = translateNote ? `；${translateNote}` : '';
+  if (!sync.available) {
+    return {
+      ok: true,
+      message: `字幕已生成：${basename(translatedPath)}${suffix}；运行时离线，未做时间轴对齐`,
+      outputPath: translatedPath,
+    };
+  }
+  if (!sync.ok) {
+    return {
+      ok: false,
+      message: `字幕已生成：${basename(translatedPath)}${suffix}；时间轴对齐失败 ${formatRpcError(sync.error)}`,
+      outputPath: translatedPath,
+    };
+  }
+  const finalPath = sync.data.output_path ?? translatedPath;
+  return {
+    ok: true,
+    message: `已完成：${basename(finalPath)}${suffix}`,
+    outputPath: finalPath,
+  };
+}
+
 export async function runMediaInspectorCapability(statusMsg: string): Promise<string> {
   if (statusMsg.includes('FunASR')) {
     const res = await callCapability({

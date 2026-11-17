@@ -39,7 +39,7 @@ v1 外部仓共 22 个（不含仅有 marketplace 条目的 `journals`）；v2 �
 | `music` | `plugins/plugin-music` | `media.playlist.v1` / `media.source.v1` |
 | `pdf-babeldoc` | `plugins/plugin-pdf-babeldoc` | `book.source.v1` / `book.bilingual_pdf.v1` |
 | `sponsorblock` | `plugins/plugin-sponsorblock` | `player.timeline.v1` |
-| `sub-hunter` | `plugins/plugin-sub-hunter` | `subtitle.fetch.v1` / `subtitle.sync.v1` |
+| `sub-hunter` | `plugins/plugin-sub-hunter` | `subtitle.fetch.v1` / `subtitle.sync.v1` / `subtitle.translate.v1` |
 | `youtube` | `plugins/plugin-youtube` | `media.source.v1` / `media.youtube.v1` |
 | `zlib` | `plugins/plugin-zlib` | `book.search.v1` |
 | `zhihu` | `plugins/plugin-zhihu` | `text.source.v1` / `text.comments.v1` / `zhihu.companion.v1` |
@@ -75,13 +75,13 @@ MCP 侧已有统一入口：`omnidesk_list_plugins`、`omnidesk_list_capabilitie
 | 网页嵌入 / Cookie | `web.embed.v1` / `web.cookies.v1` | 已注册，可调用 |
 | 电子书正文 / 生词 | `book.source.v1` / `vocab.sm2.v1` | 已注册，可调用 |
 | PDF 双栏对照 | `book.bilingual_pdf.v1` | 已注册，可调用 |
-| 字幕搜索 / 下载 / 同步 | `subtitle.fetch.v1` / `subtitle.sync.v1` | 已注册，可调用 |
+| 字幕搜索 / 下载 / 同步 / 翻译 | `subtitle.fetch.v1` / `subtitle.sync.v1` / `subtitle.translate.v1` | 已注册，可调用；翻译复用 `llm.translate.v1`，支持双语 / 仅译文 / 仅原文三档输出、1-8 路并发与断点缓存 |
 | 语音转写 | `speech.asr.v1` | 已注册，可调用 |
 | 推荐流 / 策展 | `recommend.feed.v1` / `ai.curation.v1` | 已注册，可调用 |
 | 书籍下载 / 送 NAS / 打开阅读器 | `book.search.v1` 的 `download` / `send_to_nas` / `open_in_babeldoc` / `open_in_ebook` 动作 | 已注册，可调用 |
 | 统一上下文收集 | `context.collect.v1` | 已注册；`ai.agent.v1` 传 `context_refs` 时自动收集 |
 
-**当前边界**：`context.collect.v1` 只接受白名单能力（web/book/subtitle/speech/text/media），会剥离 secret/token/cookie 等敏感字段，并限制总字符数与单项超时；多个上下文按最多 6 路并发收集，单项可传 `provider_plugin_id` 指定来源。`ai.agent.v1` 传 `context_refs` 时会自动收集；不传时仍只消费调用方给的 `context` / `selection`。UI 的 Text/Book/Media 伴读栏会按当前条目自动附带 `context_refs`。
+**当前边界**：`context.collect.v1` 只接受白名单能力（web/book/subtitle/speech/text/media），会剥离 secret/token/cookie 等敏感字段，并限制总字符数与单项超时；多个上下文按最多 6 路并发收集，单项可传 `provider_plugin_id` 指定来源。`ai.agent.v1` 传 `context_refs` 时会自动收集；不传时仍只消费调用方给的 `context` / `selection`。UI 的 Text/Book/Media 伴读栏会按当前条目自动附带 `context_refs`。`subtitle.translate.v1` 目前直接解析 `.srt` / `.vtt`；`.ass` / `.ssa` 需先经 ffmpeg 转为 SRT。
 
 推荐与下载已经有独立 MCP 工具，同时也保留通用 `omnidesk_call_capability`。所有副作用动作（下载、送 NAS、播放列表写入、Apple Music 写回、生词/同步写入等）都要求 `confirm=true` 且提供 `reason`，并通过 0600 JSONL 审计日志记录；日志位于 `<XDG_DATA_HOME>/omnidesk/audit/agent-actions.jsonl`。`omnidesk-pm rpc` 支持 `--provider <plugin_id>`，MCP 侧支持 `provider_plugin_id`。
 

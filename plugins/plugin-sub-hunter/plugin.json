@@ -2,19 +2,21 @@
   "schema_version": 2,
   "id": "plugin-sub-hunter",
   "name": "SubHunter & ffsubsync Aligner",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "runtime": "python",
   "entry": "plugin:create_plugin",
   "kind": "provider",
   "domain": "media",
   "author": "OmniDesk",
-  "description": "SubHD / ASSRT / custom subtitle search, secure <=16MB archive extraction with UTF-8 conversion, and ffsubsync VAD / linear subtitle synchronization.",
+  "description": "SubHD / ASSRT / custom subtitle search, secure <=16MB archive extraction with UTF-8 conversion, ffsubsync VAD / linear sync, and resumable bilingual translation via llm.translate.v1.",
   "provides": [
     "subtitle.fetch.v1",
-    "subtitle.sync.v1"
+    "subtitle.sync.v1",
+    "subtitle.translate.v1"
   ],
   "consumes": [
-    "web.cookies.v1"
+    "web.cookies.v1",
+    "llm.translate.v1"
   ],
   "permissions": [
     "network:wan",
@@ -61,6 +63,21 @@
       "type": "string",
       "default": "ffsubsync",
       "description": "Executable name on PATH or absolute path to ffsubsync"
+    },
+    {
+      "key": "translation_concurrency",
+      "label": "字幕翻译并发数",
+      "type": "int",
+      "default": 4,
+      "description": "llm.translate.v1 同时翻译的分段数，范围 1-8（默认 4，沿用 qwen-translator 的 translation_concurrency）"
+    },
+    {
+      "key": "subtitle_output_mode",
+      "label": "字幕输出模式",
+      "type": "select",
+      "default": "bilingual",
+      "options": ["bilingual", "translated", "original"],
+      "description": "bilingual=译文在上原文在下；translated=只显示译文；original=只保留原字幕"
     },
     {
       "key": "overwrite_policy",
