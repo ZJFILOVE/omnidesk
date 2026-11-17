@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -39,6 +40,78 @@ except ImportError:
     )
 
 _VALID_REPEAT_POLICIES = frozenset({"allow_any", "prefer_familiar", "session_dedup_only"})
+_CHART_INTENT_RE = re.compile(
+    r"最火|热门|热歌|热榜|榜单|排行榜|排行|流行榜|trending|top\s*(?:songs?|tracks?|hits?)",
+    re.IGNORECASE,
+)
+_GENRE_RE = re.compile(r"爵士|摇滚|古典|钢琴|氛围|民谣|电子|说唱|嘻哈|lo-?fi|jazz|rock|classical|piano|ambient|folk", re.IGNORECASE)
+_NON_MUSIC_MEDIA_RE = re.compile(r"视频|电影|影视|剧集|播客|video|movie|film|podcast|youtube|bilibili|b站", re.IGNORECASE)
+_COUNT_ARABIC_RE = re.compile(r"(\d{1,2})\s*(?:首|个|条|支|tracks?|songs?)", re.IGNORECASE)
+_COUNT_CN_RE = re.compile(r"([一二两三四五六七八九十]{1,3})\s*(?:首|个|条|支)")
+_CN_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _chinese_count(raw: str) -> int:
+    if raw == "十":
+        return 10
+    if "十" in raw:
+        tens_raw, ones_raw = raw.split("十", 1)
+        tens = _CN_DIGITS.get(tens_raw, 1) if tens_raw else 1
+        ones = _CN_DIGITS.get(ones_raw, 0) if ones_raw else 0
+        return tens * 10 + ones
+    return _CN_DIGITS.get(raw, 0)
+
+
+def _requested_count(prompt: str, default: int = 5) -> int:
+    """Parse a bounded track count such as 五首 / 5 songs; never invent a huge batch."""
+    for match in _COUNT_ARABIC_RE.finditer(prompt):
+        count = int(match.group(1))
+        if 1 <= count <= 15:
+            return count
+    for match in _COUNT_CN_RE.finditer(prompt):
+        count = _chinese_count(match.group(1))
+        if 1 <= count <= 15:
+            return count
+    return default
+
+
+async def _fetch_chart_candidates(
+    ctx: PluginContext,
+    limit: int,
+    *,
+    force_refresh: bool,
+) -> tuple[list[dict[str, Any]], str]:
+    """Fetch real CN chart candidates from `media.charts.v1`; no placeholders on failure."""
+    if not ctx.capabilities.has("media.charts.v1"):
+        return [], "media.charts.v1 不可用，无法获取实时榜单候选"
+    res = await ctx.capabilities.call(
+        "media.charts.v1",
+        {
+            "action": "top_songs",
+            "storefront": "cn",
+            "limit": limit,
+            "force_refresh": force_refresh,
+        },
+    )
+    if not res.ok:
+        return [], res.error or "Apple Music 国区实时榜单获取失败"
+    items: list[dict[str, Any]] = []
+    for raw in res.data.get("items") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        extra = dict(item.get("extra")) if isinstance(item.get("extra"), Mapping) else {}
+        rank = int(extra.get("chart_rank") or len(items) + 1)
+        extra["chart_rank"] = rank
+        extra.setdefault("why_recommended", f"Apple Music 国区实时热门榜第 {rank} 位")
+        extra.setdefault("listening_or_reading_cue", "想快速了解当下流行风向时播放")
+        extra["curation_mode"] = "interactive_ephemeral"
+        item["extra"] = extra
+        item.setdefault("curation_mode", "interactive_ephemeral")
+        item.setdefault("summary", f"Apple Music 国区热门歌曲排行第 {rank} 位")
+        item.setdefault("listening_cue", "想快速了解当下流行风向时播放")
+        items.append(item)
+    return items, "" if items else "Apple Music 国区榜单未返回有效曲目"
 
 
 async def handle_curation(
@@ -252,48 +325,88 @@ async def _handle_curate_interactive(
         return fail_result("curate_interactive 需要非空的 prompt 或候选条目", error_code="invalid_argument", secret=secret)
 
     session_id = str(req.get("session_id") or "ix-default").strip() or "ix-default"
-    await emit_progress(ctx, session_id, "interactive_ephemeral", "searching", "正在检索本地归档与候选条目")
-
-    archive_media: list[dict[str, Any]] = []
-    archive_texts: list[dict[str, Any]] = []
-    archive_books: list[dict[str, Any]] = []
-    if ctx.capabilities.has("recommend.feed.v1"):
-        search_res = await ctx.capabilities.call(
-            "recommend.feed.v1",
-            {
-                "action": "search_archive",
-                "query": str(req.get("query") or prompt),
-                "domains": list(req.get("domains") or []),
-                "limit": int(req.get("limit") or 20),
-            },
-        )
-        if search_res.ok:
-            archive_media, archive_texts, archive_books = collect_archive_buckets(search_res.data)
-
-    pool_media, pool_texts, pool_books = req_media + archive_media, req_texts + archive_texts, req_books + archive_books
-    auth_m, auth_t, auth_b = build_auth_index(pool_media), build_auth_index(pool_texts), build_auth_index(pool_books)
-    llm_ok, llm_m, llm_t, llm_b, llm_title = await llm_select_interactive(
-        skill_dir, prompt, repeat_policy, pool_media, pool_texts, pool_books, req.get("active_entity"), call_chat
+    allowed_domains = {str(d).lower() for d in (req.get("domains") or []) if isinstance(d, str)}
+    media_allowed = not allowed_domains or "media" in allowed_domains
+    chart_requested = (
+        media_allowed
+        and bool(_CHART_INTENT_RE.search(prompt))
+        and not _GENRE_RE.search(prompt)
+        and not _NON_MUSIC_MEDIA_RE.search(prompt)
     )
-    if llm_ok:
-        cand_media = [
-            matched if (matched := match_authentic(m, auth_m)) is not None else dict(m)
-            for m in llm_m if match_authentic(m, auth_m) is not None or extract_song_id(m)
-        ]
-        cand_texts = [matched for t in llm_t if (matched := match_authentic(t, auth_t)) is not None]
-        cand_books = [matched for b in llm_b if (matched := match_authentic(b, auth_b)) is not None]
+    chart_count = _requested_count(prompt) if chart_requested else 0
+    chart_items: list[dict[str, Any]] = []
+    chart_error = ""
+    chart_fast = False
+
+    if chart_requested:
+        await emit_progress(ctx, session_id, "interactive_ephemeral", "fetching_charts", "正在拉取 Apple Music 国区实时榜单")
+        chart_items, chart_error = await _fetch_chart_candidates(
+            ctx,
+            max(chart_count * 2, chart_count + 5),
+            force_refresh=bool(req.get("force_refresh_charts", False)),
+        )
+        if not chart_items:
+            return fail_result(
+                f"实时榜单不可用，已拒绝用本地归档冒充“最火”推荐：{chart_error}",
+                error_code="chart_unavailable",
+                secret=secret,
+                data={
+                    "mode": "interactive_ephemeral",
+                    "chart_requested": True,
+                    "chart_error": chart_error,
+                    "feed_written": False,
+                    "playlist_synced": False,
+                },
+            )
+
+    if chart_items:
+        chart_fast = True
+        cand_media = chart_items
+        cand_texts, cand_books = [], []
+        llm_title = f"Apple Music 国区实时热门 · {chart_count} 首"
     else:
-        cand_media, cand_texts, cand_books = list(pool_media), list(pool_texts), list(pool_books)
+        await emit_progress(ctx, session_id, "interactive_ephemeral", "searching", "正在检索本地归档与候选条目")
+        archive_media: list[dict[str, Any]] = []
+        archive_texts: list[dict[str, Any]] = []
+        archive_books: list[dict[str, Any]] = []
+        if ctx.capabilities.has("recommend.feed.v1"):
+            search_res = await ctx.capabilities.call(
+                "recommend.feed.v1",
+                {
+                    "action": "search_archive",
+                    "query": str(req.get("query") or prompt),
+                    "domains": list(req.get("domains") or []),
+                    "limit": int(req.get("limit") or 20),
+                },
+            )
+            if search_res.ok:
+                archive_media, archive_texts, archive_books = collect_archive_buckets(search_res.data)
+
+        pool_media, pool_texts, pool_books = req_media + archive_media, req_texts + archive_texts, req_books + archive_books
+        auth_m, auth_t, auth_b = build_auth_index(pool_media), build_auth_index(pool_texts), build_auth_index(pool_books)
+        llm_ok, llm_m, llm_t, llm_b, llm_title = await llm_select_interactive(
+            skill_dir, prompt, repeat_policy, pool_media, pool_texts, pool_books, req.get("active_entity"), call_chat
+        )
+        if llm_ok:
+            cand_media = [
+                matched if (matched := match_authentic(m, auth_m)) is not None else dict(m)
+                for m in llm_m if match_authentic(m, auth_m) is not None or extract_song_id(m)
+            ]
+            cand_texts = [matched for t in llm_t if (matched := match_authentic(t, auth_t)) is not None]
+            cand_books = [matched for b in llm_b if (matched := match_authentic(b, auth_b)) is not None]
+        else:
+            cand_media, cand_texts, cand_books = list(pool_media), list(pool_texts), list(pool_books)
 
     await emit_progress(ctx, session_id, "interactive_ephemeral", "verifying", "正在核验国区可播性与归档来源")
     final_media, _ = await _verify_music_candidates(ctx, cand_media)
     final_texts, final_books = cand_texts, cand_books
 
-    allowed_domains = {str(d).lower() for d in (req.get("domains") or []) if isinstance(d, str)}
     if allowed_domains:
         final_media = final_media if "media" in allowed_domains else []
         final_texts = final_texts if "text" in allowed_domains else []
         final_books = final_books if "book" in allowed_domains else []
+    if chart_fast:
+        final_media = final_media[:chart_count]
 
     await _attach_provenance(ctx, final_media + final_texts + final_books)
 

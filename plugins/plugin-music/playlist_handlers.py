@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -14,10 +15,12 @@ if __package__:
         AppleMusicClient,
         AppleMusicClientProtocol,
         AppleMusicCredentials,
+        extract_catalog_ids,
     )
     from .curation_gate import scan_repo_anomalies, verify_clean_git_repo
     from .daily_sync import execute_sync_daily, validate_numeric_ids
     from .interactive_sync import execute_interactive
+    from .legacy_credentials import load_legacy_credentials
     from .qwen_bridge import QwenModules, load_qwen_modules, probe_adam_listener
     from .state_store import (
         PROTECTED_DAILY_PLAYLIST_ID,
@@ -39,10 +42,12 @@ else:
         AppleMusicClient,
         AppleMusicClientProtocol,
         AppleMusicCredentials,
+        extract_catalog_ids,
     )
     from curation_gate import scan_repo_anomalies, verify_clean_git_repo
     from daily_sync import execute_sync_daily, validate_numeric_ids
     from interactive_sync import execute_interactive
+    from legacy_credentials import load_legacy_credentials
     from qwen_bridge import QwenModules, load_qwen_modules, probe_adam_listener
     from state_store import (
         PROTECTED_DAILY_PLAYLIST_ID,
@@ -107,6 +112,7 @@ class PlaylistService:
         self._qwen_loader = qwen_loader or load_qwen_modules
         self._verified_ids: set[str] = set()
         self._unplayable_ids: set[str] = set()
+        self._credential_source = "none"
 
     def _ctx(self) -> PluginContext:
         ctx = self._get_ctx()
@@ -118,6 +124,14 @@ class PlaylistService:
         dev = str(ctx.get_secret("apple_music_developer_token") or "").strip()
         user = str(ctx.get_secret("apple_music_user_token") or "").strip()
         cookie = str(ctx.get_secret("apple_music_cookie") or "").strip()
+        source = "secret_vault" if dev or user or cookie else "none"
+        if not dev or not user:
+            legacy = load_legacy_credentials(ctx.data_dir)
+            if legacy.usable:
+                dev = dev or legacy.developer_token
+                user = user or legacy.user_token
+                source = "secret_vault+adam_local" if source == "secret_vault" else legacy.source
+        self._credential_source = source
         return AppleMusicCredentials(developer_token=dev, user_token=user, cookie=cookie)
 
     def _build_client(
@@ -289,6 +303,7 @@ class PlaylistService:
             issues.append("history_anomaly_2026_11_06")
 
         remote_playlists: list[dict[str, Any]] = []
+        remote_coverage: dict[str, Any] | None = None
         remote_reachable: bool | None = None
         if include_remote:
             if not creds.has_write_auth and self._client_factory is None:
@@ -305,6 +320,45 @@ class PlaylistService:
                         }
                         for item in raw_remote
                     ]
+                    remote_tracks = await client.get_playlist_tracks(PROTECTED_DAILY_PLAYLIST_ID)
+                    remote_ids = extract_catalog_ids(remote_tracks)
+                    manifests: list[tuple[str, list[str]]] = []
+                    if music_repo is not None and (music_repo / "recommendations").is_dir():
+                        for manifest_path in sorted((music_repo / "recommendations").glob("*/*/*.json")):
+                            try:
+                                doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+                            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                                continue
+                            raw_tracks = doc.get("tracks") if isinstance(doc, Mapping) else None
+                            tracks = raw_tracks if isinstance(raw_tracks, list) else []
+                            ids = [
+                                str((track.get("apple_music") or {}).get("song_id") or "")
+                                for track in tracks
+                                if isinstance(track, Mapping)
+                            ]
+                            if ids:
+                                manifests.append((manifest_path.stem, ids))
+                    partial = [
+                        {
+                            "date": day,
+                            "present": sum(1 for sid in ids if sid in remote_ids),
+                            "expected": len(ids),
+                        }
+                        for day, ids in manifests
+                        if 0 < sum(1 for sid in ids if sid in remote_ids) < len(ids)
+                    ]
+                    missing = [
+                        day
+                        for day, ids in manifests
+                        if not any(sid in remote_ids for sid in ids)
+                    ]
+                    remote_coverage = {
+                        "total_dates": len(manifests),
+                        "fully_synced_dates": len(manifests) - len(partial) - len(missing),
+                        "partial_dates": partial,
+                        "missing_dates": missing,
+                        "remote_track_count": len(remote_ids),
+                    }
                     remote_reachable = True
                 except (GateError, AppleMusicApiError):
                     remote_reachable = False
@@ -320,6 +374,7 @@ class PlaylistService:
                 "has_user_token": bool(creds.user_token.strip()),
                 "has_cookie": bool(creds.cookie.strip()),
                 "has_write_auth": creds.has_write_auth,
+                "credential_source": self._credential_source,
                 "adam_listener_ready": probe_adam_listener(qwen),
                 "qwen_translator": qwen.status_dict(),
             },
@@ -361,5 +416,6 @@ class PlaylistService:
                 },
                 "interactive_playlists": ix_playlists,
                 "remote_playlists": remote_playlists,
+                "remote_coverage": remote_coverage,
             },
         })

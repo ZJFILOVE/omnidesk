@@ -10,6 +10,7 @@ import {
   mpvPause,
   mpvResume,
   mpvSeek,
+  mpvSetSpeed,
   mpvStatus,
   mpvVolume,
   type MpvPlaybackState,
@@ -31,6 +32,7 @@ export interface MpvPlaybackController {
   positionSec: number;
   durationSec: number | null;
   volume: number;
+  speed: number;
   busy: boolean;
   embedded: boolean;
   embedDetail: string;
@@ -41,6 +43,7 @@ export interface MpvPlaybackController {
   toggle: (item: MediaItem) => Promise<MpvActionResult>;
   seek: (item: MediaItem, seconds: number) => Promise<MpvActionResult>;
   setVolume: (volume: number) => Promise<MpvActionResult>;
+  setSpeed: (speed: number) => Promise<MpvActionResult>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -69,6 +72,10 @@ function stateSummary(state: MpvPlaybackState): string {
   if (!state.available) return 'mpv 不可用';
   if (state.stopped) return 'mpv 已停止';
   return state.paused ? 'mpv 已暂停' : 'mpv 播放中';
+}
+
+function formatSpeed(speed: number): string {
+  return `${Number(speed.toFixed(2))}×`;
 }
 
 export function useMpvPlayback(): MpvPlaybackController {
@@ -296,6 +303,21 @@ export function useMpvPlayback(): MpvPlaybackController {
     [enabled, ensureEmbedded, run],
   );
 
+  const setSpeed = useCallback(
+    async (speed: number): Promise<MpvActionResult> => {
+      if (!enabled) {
+        return { ok: false, message: '离线预览：当前没有连接 Tauri/mpv' };
+      }
+      await ensureEmbedded();
+      const clamped = Math.max(0.25, Math.min(4, Number(speed.toFixed(2))));
+      return run(
+        () => mpvSetSpeed(clamped),
+        (next) => `mpv 播放速度 ${formatSpeed(next.speed)}`,
+      );
+    },
+    [enabled, ensureEmbedded, run],
+  );
+
   return {
     enabled,
     state,
@@ -303,6 +325,7 @@ export function useMpvPlayback(): MpvPlaybackController {
     positionSec: state?.positionSec ?? 0,
     durationSec: state?.durationSec && state.durationSec > 0 ? state.durationSec : null,
     volume: state?.volume ?? 85,
+    speed: state?.speed && state.speed > 0 ? state.speed : 1,
     busy,
     embedded,
     embedDetail,
@@ -310,5 +333,6 @@ export function useMpvPlayback(): MpvPlaybackController {
     toggle,
     seek,
     setVolume,
+    setSpeed,
   };
 }

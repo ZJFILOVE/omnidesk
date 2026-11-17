@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ from omnidesk_sdk import LyricLine, MediaItem, MediaSource
 
 if __package__:
     from .state_store import (
+        atomic_write_json,
         is_valid_iso_date,
         read_private_json,
         resolve_data_root,
@@ -27,6 +31,7 @@ if __package__:
     )
 else:
     from state_store import (
+        atomic_write_json,
         is_valid_iso_date,
         read_private_json,
         resolve_data_root,
@@ -46,6 +51,10 @@ _PAGE_SIZE = 50
 _NOTES_RE = re.compile(r"<!--\s*AUTO:END\s*-->\s*(.*)$", re.DOTALL)
 _AM_PREFIX_RE = re.compile(r"^(?:am-[a-z]{2}-|ix-am-)(.+)$")
 _URL_SONG_RE = re.compile(r"https?://music\.apple\.com/[a-z]{2}/song/(?:[^/]+/)?([0-9]+)")
+_CJK_RE = re.compile(r"[\u3400-\u9fff]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+TranslateLines = Callable[[Sequence[str], str], Awaitable[tuple[list[str] | None, str]]]
 
 
 def normalize_song_id(raw_id: str) -> str:
@@ -86,10 +95,14 @@ class AppleMusicMediaSource(MediaSource):
         get_config: Callable[[], Mapping[str, Any]],
         get_data_dir: Callable[[], Path],
         get_qwen: Callable[[], QwenModules] | None = None,
+        translate_lines: TranslateLines | None = None,
     ) -> None:
         self._get_config = get_config
         self._get_data_dir = get_data_dir
         self._get_qwen = get_qwen
+        self._translate_lines = translate_lines
+        self.last_translation_error = ""
+        self.last_translated_count = 0
 
     def categories(self) -> list[str]:
         return list(_CATEGORIES)
@@ -103,6 +116,104 @@ class AppleMusicMediaSource(MediaSource):
     def _lyrics_dir(self) -> Path:
         return self._get_data_dir().expanduser().resolve() / "lyrics"
 
+    def _translation_cache_path(self) -> Path:
+        return self._get_data_dir().expanduser().resolve() / "lyrics_translations.json"
+
+    def _load_translation_cache(self) -> dict[str, dict[str, str]]:
+        path = self._translation_cache_path()
+        if not path.is_file() or path.is_symlink():
+            return {}
+        try:
+            raw = read_private_json(path)
+        except Exception:
+            return {}
+        songs = raw.get("songs")
+        if not isinstance(songs, Mapping):
+            return {}
+        clean: dict[str, dict[str, str]] = {}
+        for song_id, entries in songs.items():
+            if not isinstance(entries, Mapping):
+                continue
+            clean[str(song_id)] = {
+                str(key): str(value)
+                for key, value in entries.items()
+                if isinstance(value, str) and value.strip()
+            }
+        return clean
+
+    @staticmethod
+    def _text_key(text: str) -> str:
+        return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()
+
+    def _apply_translation_cache(self, song_id: str, lines: list[LyricLine]) -> None:
+        cached = self._load_translation_cache().get(song_id, {})
+        if not cached:
+            return
+        for line in lines:
+            if not line.translation:
+                line.translation = cached.get(self._text_key(line.original), "")
+
+    def _save_translation_cache(self, song_id: str, lines: list[LyricLine]) -> None:
+        entries = {
+            self._text_key(line.original): line.translation
+            for line in lines
+            if line.translation and line.original.strip()
+        }
+        if not entries:
+            return
+        cache = self._load_translation_cache()
+        cache.setdefault(song_id, {}).update(entries)
+        try:
+            atomic_write_json(
+                self._translation_cache_path(),
+                {"version": 1, "songs": cache},
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _needs_translation(text: str) -> bool:
+        stripped = text.strip()
+        if not stripped or not _LATIN_RE.search(stripped):
+            return False
+        return not _CJK_RE.search(stripped)
+
+    async def _finalize_lyrics(
+        self, song_id: str, lines: list[LyricLine], title: str
+    ) -> list[LyricLine]:
+        self.last_translation_error = ""
+        self.last_translated_count = 0
+        if not lines:
+            return lines
+        self._apply_translation_cache(song_id, lines)
+        cfg = self._get_config()
+        if cfg.get("auto_translate_lyrics", True) is not True or self._translate_lines is None:
+            return lines
+        missing = [
+            index
+            for index, line in enumerate(lines)
+            if not line.translation and self._needs_translation(line.original)
+        ]
+        if not missing:
+            return lines
+        texts = [lines[index].original for index in missing]
+        try:
+            translated, error = await self._translate_lines(texts, title)
+        except Exception as exc:
+            self.last_translation_error = f"translation_failed:{type(exc).__name__}"
+            return lines
+        if error:
+            self.last_translation_error = error
+            return lines
+        if translated is None or len(translated) != len(missing):
+            self.last_translation_error = "llm.translate.v1_invalid_response"
+            return lines
+        for index, value in zip(missing, translated):
+            lines[index].translation = value.strip()
+        self.last_translated_count = len(missing)
+        self._save_translation_cache(song_id, lines)
+        return lines
+
     def _catalog_cache(self) -> dict[str, dict[str, Any]]:
         path = self._get_data_dir().expanduser().resolve() / "catalog_cache.json"
         if not path.is_file() or path.is_symlink():
@@ -113,6 +224,133 @@ class AppleMusicMediaSource(MediaSource):
             return {}
         tracks = raw.get("tracks")
         return dict(tracks) if isinstance(tracks, Mapping) else {}
+
+    def _metadata_from_track(
+        self, track: Mapping[str, Any], song_id: str
+    ) -> tuple[str, str, str, float] | None:
+        am = track.get("apple_music") if isinstance(track.get("apple_music"), Mapping) else {}
+        ids = {
+            str(am.get("song_id") or ""),
+            str(track.get("apple_music_song_id") or ""),
+            str(track.get("song_id") or ""),
+            normalize_song_id(str(track.get("id") or "")),
+            normalize_song_id(str(track.get("play_url") or "")),
+        }
+        if song_id not in ids:
+            return None
+        title = str(track.get("title") or "").strip()
+        artist = str(track.get("artist") or track.get("creator") or "").strip()
+        if not title and not artist:
+            return None
+        album = str(track.get("album") or track.get("subtitle") or "").strip()
+        try:
+            duration = float(track.get("duration_sec") or am.get("duration_sec") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        return title, artist, album, duration
+
+    def _load_play_history(self) -> list[dict[str, Any]]:
+        path = self._get_data_dir().expanduser().resolve() / "play_history.json"
+        if not path.is_file() or path.is_symlink():
+            return []
+        try:
+            raw = read_private_json(path)
+        except Exception:
+            return []
+        tracks = raw.get("tracks") if isinstance(raw, Mapping) else None
+        return [dict(item) for item in tracks if isinstance(item, Mapping)] if isinstance(tracks, list) else []
+
+    def _load_interactive_tracks(self) -> list[dict[str, Any]]:
+        store_path = resolve_interactive_store_path(self._get_data_dir())
+        sessions_dir = store_path.parent / "sessions"
+        if not sessions_dir.is_dir():
+            return []
+        tracks: list[dict[str, Any]] = []
+        for path in sorted(sessions_dir.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            items = raw.get("media_items") if isinstance(raw, Mapping) else None
+            if isinstance(items, list):
+                tracks.extend(dict(item) for item in items if isinstance(item, Mapping))
+        return tracks
+
+    def _resolve_track_metadata(self, song_id: str) -> tuple[str, str, str, float]:
+        for _, tracks in self._load_daily_records():
+            for track in tracks:
+                found = self._metadata_from_track(track, song_id)
+                if found is not None:
+                    return found
+        for track in self._load_play_history():
+            found = self._metadata_from_track(track, song_id)
+            if found is not None:
+                return found
+        for track in self._load_interactive_tracks():
+            found = self._metadata_from_track(track, song_id)
+            if found is not None:
+                return found
+        cached = self._catalog_cache().get(song_id, {})
+        title = str(cached.get("title") or "")
+        artist = str(cached.get("artistName") or cached.get("artist") or "")
+        album = str(cached.get("albumName") or cached.get("album") or "")
+        try:
+            duration = float(cached.get("duration_sec") or cached.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        return title, artist, album, duration
+
+    async def _fetch_online_lyrics(
+        self, title: str, artist: str, album: str, duration_sec: float
+    ) -> list[LyricLine]:
+        if not title or not artist or not 1 <= duration_sec <= 3600:
+            return []
+        qwen = self._qwen()
+        lyrics_mod = qwen.module("music_lyrics")
+        repo_cls = getattr(lyrics_mod, "LyricsRepository", None) if lyrics_mod is not None else None
+        if not callable(repo_cls):
+            return []
+        cfg = self._get_config()
+        if cfg.get("enable_lrclib", True) is not True:
+            return []
+        try:
+            repo = repo_cls(cache_dir=self._lyrics_dir())
+            result = await asyncio.wait_for(
+                repo.get(
+                    {
+                        "title": title,
+                        "artist": artist,
+                        "album": album,
+                        "duration": duration_sec,
+                    },
+                    {
+                        "music_lyrics_online": True,
+                        "music_translation_enabled": False,
+                        "text_provider": "none",
+                    },
+                ),
+                timeout=20.0,
+            )
+        except Exception:
+            return []
+        raw_lines = result.get("lines") if isinstance(result, Mapping) else None
+        if not isinstance(raw_lines, list):
+            return []
+        return [
+            LyricLine(
+                time_sec=(
+                    float(line["start"])
+                    if isinstance(line.get("start"), (int, float)) and line["start"] >= 0
+                    else 0.0
+                ),
+                original=str(line.get("text") or ""),
+                translation=str(line.get("translation") or ""),
+            )
+            for line in raw_lines
+            if isinstance(line, dict) and str(line.get("text") or "").strip()
+        ]
 
     def _has_cached_lyrics(self, song_id: str) -> bool:
         ldir = self._lyrics_dir()
@@ -349,23 +587,7 @@ class AppleMusicMediaSource(MediaSource):
         if not qwen.available:
             return []
 
-        title, artist, album, duration_sec = "", "", "", 0.0
-        for _, tracks in self._load_daily_records():
-            for tr in tracks:
-                am = tr.get("apple_music") if isinstance(tr.get("apple_music"), Mapping) else {}
-                if str(am.get("song_id") or "") == song_id:
-                    title = str(tr.get("title") or "")
-                    artist = str(tr.get("artist") or "")
-                    album = str(tr.get("album") or "")
-                    break
-            if title:
-                break
-
-        cached = self._catalog_cache().get(song_id, {})
-        title = title or str(cached.get("title") or "")
-        artist = artist or str(cached.get("artist") or "")
-        album = album or str(cached.get("album") or "")
-        duration_sec = float(cached.get("duration_sec") or 0.0)
+        title, artist, album, duration_sec = self._resolve_track_metadata(song_id)
 
         lines = read_cached_lyrics(
             song_id=song_id,
@@ -376,11 +598,10 @@ class AppleMusicMediaSource(MediaSource):
             lyrics_cache_dir=self._lyrics_dir(),
             qwen=qwen,
         )
-        if lines:
-            return lines
-
-        if song_id.isdigit():
+        if not lines and song_id.isdigit():
             raw_lrc = fetch_adam_lrc(song_id, str(self._get_config().get("storefront") or "cn"), qwen)
             if raw_lrc:
-                return parse_lrc_to_lyric_lines(raw_lrc, qwen)
-        return []
+                lines = parse_lrc_to_lyric_lines(raw_lrc, qwen)
+        if not lines:
+            lines = await self._fetch_online_lyrics(title, artist, album, duration_sec)
+        return await self._finalize_lyrics(song_id, lines, title)

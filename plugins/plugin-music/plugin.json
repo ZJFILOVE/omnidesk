@@ -10,6 +10,7 @@
   "author": "OmniDesk",
   "description": "Reuses qwen-translator Apple Music/Adam/bilingual lyrics modules with CN catalog preflight, gated ChatGPT Daily 5 sync, and MediaSource archive playback.",
   "provides": [
+    "media.charts.v1",
     "media.playlist.v1",
     "media.source.v1"
   ],

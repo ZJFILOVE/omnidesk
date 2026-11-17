@@ -89,6 +89,10 @@ describe('MediaWorkbench real mpv integration', () => {
         state = { ...state, volume: Number(payload?.args?.volume ?? state.volume) };
         return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
       }
+      if (cmd === 'mpv_set_speed') {
+        state = { ...state, speed: Number(payload?.args?.speed ?? state.speed) };
+        return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
+      }
       return { ok: true, data: {}, error: '' };
     });
 
@@ -137,6 +141,14 @@ describe('MediaWorkbench real mpv integration', () => {
     fireEvent.change(screen.getByLabelText('音量'), { target: { value: '40' } });
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('mpv_volume', { args: { volume: 40 } });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '1.5×' }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_set_speed', { args: { speed: 1.5 } });
+      expect(screen.getByRole('button', { name: '1.5×' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      );
     });
 
     fireEvent.click(screen.getByRole('button', { name: '暂停播放' }));

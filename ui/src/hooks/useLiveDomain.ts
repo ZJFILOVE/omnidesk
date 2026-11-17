@@ -176,6 +176,13 @@ export function toMediaItem(raw: unknown): MediaItem | null {
   if (!id) return null;
   const kind = str(item.kind, 'video');
   const duration = num(item.duration_sec);
+  const extra = dict(item.extra);
+  const playUrl = str(item.play_url);
+  const appleMusicSongId =
+    str(extra.apple_music_song_id) ||
+    str(extra.song_id) ||
+    playUrl.match(/music\.apple\.com\/[a-z]{2}\/song\/(?:[^/]+\/)?(\d+)/)?.[1] ||
+    '';
   return {
     id,
     sourceId: str(item.source_id, 'media.source.v1'),
@@ -192,9 +199,10 @@ export function toMediaItem(raw: unknown): MediaItem | null {
     previouslyRecommendedOn: (item.previously_recommended_on as string) || undefined,
     thumbGradient: gradientFor(id),
     thumbTag: str(item.source_badge, kind.toUpperCase()),
-    playUrl: str(item.play_url),
+    playUrl,
     summary: str(item.summary),
     listeningCue: str(item.listening_cue) || undefined,
+    appleMusicSongId: appleMusicSongId || undefined,
     chapters: arr(item.chapters).map((entry, index) => {
       const ch = dict(entry);
       return {

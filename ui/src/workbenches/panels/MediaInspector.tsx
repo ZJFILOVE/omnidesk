@@ -31,15 +31,24 @@ export function formatMediaTime(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+
+function formatSpeed(speed: number): string {
+  return `${Number(speed.toFixed(2))}×`;
+}
+
 export interface MediaInspectorProps {
   item: MediaItem;
   playing: boolean;
   currentSec: number;
   durationSec?: number;
   volume?: number;
+  speed?: number;
   playbackBackend?: 'mpv' | 'libmpv' | 'preview';
   videoSurface?: React.ReactNode;
   activeLyricIndex: number;
+  lyricsLoading?: boolean;
+  lyricsMessage?: string;
   nextSponsorSegment: ChapterSegment | null;
   inEphemeralQueue: boolean;
   activeFocusId: string;
@@ -47,6 +56,7 @@ export interface MediaInspectorProps {
   onTogglePlay: () => void;
   onSeek: (sec: number) => void;
   onVolumeChange?: (volume: number) => void;
+  onSpeedChange?: (speed: number) => void;
   onSkipSponsor: (seg: ChapterSegment) => void;
   onQueueEphemeral: (id: string) => void;
   onStatusChange: (msg: string) => void;
@@ -58,9 +68,12 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   currentSec,
   durationSec,
   volume = 85,
+  speed = 1,
   playbackBackend = 'preview',
   videoSurface,
   activeLyricIndex,
+  lyricsLoading = false,
+  lyricsMessage = '',
   nextSponsorSegment,
   inEphemeralQueue,
   activeFocusId,
@@ -68,6 +81,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   onTogglePlay,
   onSeek,
   onVolumeChange,
+  onSpeedChange,
   onSkipSponsor,
   onQueueEphemeral,
   onStatusChange,
@@ -274,6 +288,39 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
           </div>
         ) : null}
 
+        {onSpeedChange ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="w-12 shrink-0 text-[13.5px] text-[var(--text-muted)]">倍速</span>
+            <div
+              role="group"
+              aria-label="播放倍速"
+              className="flex flex-wrap items-center gap-1.5"
+            >
+              {SPEED_OPTIONS.map((option) => {
+                const selected = Math.abs(speed - option) < 0.005;
+                return (
+                  <FocusButton
+                    key={option}
+                    focusId={`media:player:speed:${option}`}
+                    activeFocusId={activeFocusId}
+                    onFocus={onFocus}
+                    onActivate={() => onSpeedChange(option)}
+                    selected={selected}
+                    tone="media"
+                    surface="soft"
+                    className="px-2.5 py-1 font-mono text-[13.5px]"
+                  >
+                    {formatSpeed(option)}
+                  </FocusButton>
+                );
+              })}
+            </div>
+            <span className="ml-auto font-mono text-[13.5px] text-[var(--text-subtle)]">
+              当前 {formatSpeed(speed)}
+            </span>
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <FocusButton
@@ -384,7 +431,11 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
             </EditorialCallout>
           ) : null}
 
-          {item.lyrics?.length ? (
+          {lyricsLoading ? (
+            <p className="px-1 text-[14.5px] text-[var(--text-muted)]">
+              正在拉取真实歌词…
+            </p>
+          ) : item.lyrics?.length ? (
             <div className="flex flex-col gap-2.5">
               <PanelSectionHeading title="双语歌词与乐段同步" meta="点击跳转时间轴" />
               <div className="flex flex-col gap-1.5">
@@ -418,6 +469,10 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 })}
               </div>
             </div>
+          ) : lyricsMessage ? (
+            <p className="px-1 text-[14.5px] leading-[1.7] text-[var(--text-muted)]">
+              {lyricsMessage}
+            </p>
           ) : null}
         </div>
       ) : null}

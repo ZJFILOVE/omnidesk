@@ -26,6 +26,49 @@ import {
 } from './aiWorkbenchHelpers';
 import type { RepeatPolicy } from './panels/AiChatPane';
 
+const CURATION_INTENT_RE =
+  /推荐|来几首|来点|歌单|最火|热门|榜单|听什么|找.{0,6}(歌|曲|专辑|论文|书|视频)|recommend|playlist|top\s*songs?/i;
+
+function looksLikeCurationPrompt(text: string): boolean {
+  return CURATION_INTENT_RE.test(text);
+}
+
+function curationDomains(text: string): string[] | undefined {
+  if (/歌|曲|音乐|专辑|歌单|听|playlist|song|music/i.test(text)) return ['media'];
+  if (/论文|期刊|paper|journal|研究/i.test(text)) return ['text'];
+  if (/书|book|阅读/i.test(text)) return ['book'];
+  return undefined;
+}
+
+function cardsFromCuration(data: Record<string, unknown>): AiStructuredCard[] {
+  const cards: AiStructuredCard[] = [];
+  const push = (raw: unknown, domain: AiStructuredCard['domain'], badge: string) => {
+    if (!raw || typeof raw !== 'object') return;
+    const item = raw as Record<string, unknown>;
+    const id = String(item.id ?? '').trim();
+    const title = String(item.title ?? '').trim();
+    if (!id || !title) return;
+    const subtitleParts = [
+      item.creator ?? item.author ?? item.source_name,
+      item.subtitle ?? item.source_badge,
+    ]
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean);
+    cards.push({
+      id: `${domain}:${id}`,
+      domain,
+      title,
+      subtitle: subtitleParts.join(' · ') || '已核验推荐',
+      badge,
+      verifiedCn: domain === 'media' ? true : undefined,
+    });
+  };
+  for (const item of Array.isArray(data.media_items) ? data.media_items : []) push(item, 'media', '已核验');
+  for (const item of Array.isArray(data.text_items) ? data.text_items : []) push(item, 'text', '已核验');
+  for (const item of Array.isArray(data.book_items) ? data.book_items : []) push(item, 'book', '已核验');
+  return cards;
+}
+
 export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null) {
   const tauriAvailable = isTauriAvailable();
   const [route, setRoute] = useState<MagpieRouteState>(() => ({
@@ -189,6 +232,76 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
       }
 
       setIsSending(true);
+      if (effectiveMode === 'interactive_ephemeral' && looksLikeCurationPrompt(text)) {
+        const sessionId = `ix-chat-${Date.now()}`;
+        const domains = curationDomains(text);
+        const curation = await callCapability<Record<string, unknown>>({
+          capability: 'ai.curation.v1',
+          payload: {
+            action: 'curate_interactive',
+            mode: 'interactive_ephemeral',
+            session_id: sessionId,
+            title: text.slice(0, 40),
+            prompt: text,
+            repeat_policy: repeatPolicy,
+            domains,
+            sync_apple_music: 'ephemeral_playlist',
+            enqueue_now: true,
+            replace_session_items: false,
+            auto_focus: true,
+          },
+          timeoutMs: 180000,
+        });
+        if (!mountedRef.current) return;
+        setIsSending(false);
+        const replyTs = nowHHMM();
+        const cards = curation.available && curation.data ? cardsFromCuration(curation.data) : [];
+        const feedWritten = Boolean(curation.data?.feed_written);
+        if (curation.available && (curation.ok || feedWritten) && cards.length > 0) {
+          const playlistSynced = Boolean(curation.data?.playlist_synced);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `ai-msg-a-${turn}`,
+              role: 'assistant',
+              timestamp: replyTs,
+              mode: effectiveMode,
+              servedModel: 'ai.curation.v1 · 已核验',
+              content: `已反写 ${cards.length} 条推荐到卡片页，并写入交互推荐池。灵感歌单${
+                playlistSynced ? '已同步' : '未同步（卡片已保留）'
+              }。会话：${sessionId}`,
+              cards,
+            },
+          ]);
+          appendLog(`${replyTs} · ai.curation.v1 → ${cards.length} 张卡片 · ${sessionId}`);
+          return;
+        }
+        const errorCode = curation.available && !curation.ok ? curation.error.code : 'no_cards';
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-msg-err-${turn}`,
+            role: 'system',
+            timestamp: replyTs,
+            mode: effectiveMode,
+            servedModel: `错误 · ${errorCode}`,
+            isError: true,
+            content:
+              errorCode === 'no_verified_candidates'
+                ? '没有通过归档溯源与 Apple Music 国区可播性核验的候选，已按规则拒绝生成占位推荐。'
+                : errorCode === 'chart_unavailable'
+                  ? `实时榜单不可用，已拒绝用旧归档冒充“最火”推荐：${
+                      curation.error ? formatRpcError(curation.error) : '未知错误'
+                    }`
+                  : `策展反写失败：${
+                      curation.error ? formatRpcError(curation.error) : '后端不可用或未返回错误详情'
+                    }`,
+          },
+        ]);
+        appendLog(`${replyTs} · ai.curation.v1 FAIL ${errorCode}`);
+        return;
+      }
+
       const payload: LlmChatRequestPayload = {
         system_prompt: `你是 OmniDesk AI 工作台助手（mode=${effectiveMode}, repeat_policy=${repeatPolicy}）。严禁编造未核验的曲目、DOI 或链接。`,
         messages: [...priorHistory, { role: 'user', content: text }],

@@ -24,6 +24,7 @@ export interface MediaItem {
   playUrl: string;
   summary: string;
   listeningCue?: string;
+  appleMusicSongId?: string;
   chapters?: ChapterSegment[];
   lyrics?: LyricLine[];
   nasMeta?: { codec: string; resolution: string; path: string; subtitleStatus: string; imdbRating: string; clipQuote?: string };

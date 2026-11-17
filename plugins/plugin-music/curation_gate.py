@@ -51,6 +51,18 @@ def git_blob_sha(raw: bytes) -> str:
     return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\x00" + raw).hexdigest()
 
 
+def _is_canonical_song_url(url: str, song_id: str) -> bool:
+    """Accept both compact and slugged Apple Music song URLs for one catalog id."""
+    if not song_id:
+        return False
+    return bool(
+        re.fullmatch(
+            rf"https://music\.apple\.com/cn/song/(?:[^/\s]+/)?{re.escape(song_id)}",
+            url,
+        )
+    )
+
+
 async def _run_git(ctx: PluginContext, repo: Path, *args: str) -> bytes:
     res = await ctx.exec_subprocess(["git", "-C", str(repo), *args], timeout_sec=10.0)
     if not res.ok:
@@ -127,7 +139,7 @@ def parse_music_manifest(
         if (
             not _SONG_ID_RE.match(sid)
             or sf != "cn"
-            or url != f"https://music.apple.com/cn/song/{sid}"
+            or not _is_canonical_song_url(url, sid)
             or not title
             or not artist
             or canonical != f"{artist}::{title}"
@@ -283,7 +295,17 @@ async def scan_repo_anomalies(ctx: PluginContext, music_repo: Path, music_head: 
         if not is_valid_iso_date(day):
             continue
         raw = await read_committed_bytes(ctx, music_repo, music_head, rel)
-        _, _, _, anomaly = parse_music_manifest(raw, day)
+        try:
+            _, _, _, anomaly = parse_music_manifest(raw, day)
+        except GateError as exc:
+            dates.append(day)
+            anomalies.append({
+                "date": day,
+                "reason": "manifest_invalid",
+                "error_code": exc.error_code,
+                "error": exc.message,
+            })
+            continue
         dates.append(day)
         if anomaly is not None:
             anomalies.append(anomaly)

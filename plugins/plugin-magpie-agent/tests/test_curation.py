@@ -395,3 +395,85 @@ async def test_run_daily_pipeline_guards_dry_run_and_partial_success(tmp_path: P
 
     await invoke_lifecycle_hook(plugin.on_unload)
     await ctx.acleanup()
+
+
+@pytest.mark.asyncio
+async def test_curate_interactive_chart_prompt_uses_live_chart_without_llm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_plugin_module()
+    plugin = module.create_plugin()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path, config_schema=manifest["config_schema"])
+    ctx.set_config("skill_dir", str(_create_skill_fixture(tmp_path)))
+    ctx.set_config("gateway_url", _closed_loopback_url())
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    chart_requests: list[dict[str, Any]] = []
+    feed_requests: list[dict[str, Any]] = []
+
+    def handle_charts(req: dict[str, Any]) -> CapabilityResult:
+        chart_requests.append(dict(req))
+        return CapabilityResult.ok({
+            "storefront": "cn",
+            "chart": "most-played",
+            "items": [
+                {
+                    "id": f"am-cn-{sid}",
+                    "title": f"Chart Track {sid}",
+                    "creator": f"Chart Artist {sid}",
+                    "kind": "music",
+                    "subtitle": f"Chart Artist {sid} · 国区实时榜 #{rank}",
+                    "source_badge": f"Apple Music CN 实时榜 #{rank}",
+                    "play_url": f"https://music.apple.com/cn/song/{sid}",
+                    "extra": {"apple_music_song_id": sid, "song_id": sid, "chart_rank": rank},
+                }
+                for rank, sid in enumerate(("9001", "9002", "9003"), start=1)
+            ],
+        })
+
+    def handle_playlist(req: dict[str, Any]) -> CapabilityResult:
+        if req.get("action") == "preflight_cn_catalog":
+            ids = [str(x) for x in req.get("track_ids") or []]
+            return CapabilityResult.ok({"verified_ids": ids, "songs": []})
+        return CapabilityResult.ok({})
+
+    def handle_feed(req: dict[str, Any]) -> CapabilityResult:
+        feed_requests.append(dict(req))
+        if req.get("action") == "lookup_provenance":
+            return CapabilityResult.ok({"matches": []})
+        if req.get("action") == "push_interactive_set":
+            return CapabilityResult.ok({"session_id": req.get("session_id"), "accepted": True})
+        raise AssertionError(f"chart path must not call {req.get('action')}")
+
+    async def fail_llm(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("chart fast path must not call the LLM selector")
+
+    ctx.capabilities.register("media.charts.v1", handle_charts, plugin_id="plugin-music")
+    ctx.capabilities.register("media.playlist.v1", handle_playlist, plugin_id="plugin-music")
+    ctx.capabilities.register("recommend.feed.v1", handle_feed, plugin_id="plugin-ai-curator")
+    monkeypatch.setattr(module._curation_mod, "llm_select_interactive", fail_llm)
+
+    try:
+        res = await ctx.capabilities.call(
+            "ai.curation.v1",
+            {
+                "action": "curate_interactive",
+                "mode": "interactive_ephemeral",
+                "session_id": "ix-chart-test",
+                "prompt": "写三首目前最火的歌到歌单",
+                "domains": ["media"],
+                "sync_apple_music": "none",
+            },
+        )
+        assert res.ok
+        assert chart_requests and chart_requests[0]["limit"] >= 6
+        assert [item["extra"]["chart_rank"] for item in res.data["media_items"]] == [1, 2, 3]
+        assert [item["extra"]["apple_music_song_id"] for item in res.data["media_items"]] == ["9001", "9002", "9003"]
+        assert res.data["feed_written"] is True
+        assert res.data["playlist_synced"] is False
+        assert [r["action"] for r in feed_requests] == ["lookup_provenance", "push_interactive_set"]
+        assert feed_requests[1]["title"] == "Apple Music 国区实时热门 · 3 首"
+    finally:
+        await invoke_lifecycle_hook(plugin.on_unload)
+        await ctx.acleanup()

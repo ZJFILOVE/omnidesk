@@ -234,6 +234,69 @@ describe('PluginStore real Tauri RPC and bus health updates', () => {
 });
 
 describe('AiWorkbench & CompanionDock real capability RPC', () => {
+  it('routes chart-style prompts through ai.curation.v1 and renders verified cards', async () => {
+    const invokedCapabilities: string[] = [];
+    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call_capability') {
+        const cap = String(payload?.args?.capability ?? '');
+        invokedCapabilities.push(cap);
+        const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
+        if (cap === 'llm.router.v1') {
+          return {
+            ok: true,
+            provider_plugin_id: 'plugin-magpie-agent',
+            data: { gateway_running: true, online: true, group_id: 'omnidesk-active', primary_member: 'gemini/carbon:high', routing: 'order' },
+            error: '',
+          };
+        }
+        if (cap === 'ai.curation.v1') {
+          expect(capPayload?.action).toBe('curate_interactive');
+          expect(capPayload?.prompt).toContain('最火');
+          return {
+            ok: true,
+            provider_plugin_id: 'plugin-magpie-agent',
+            data: {
+              mode: 'interactive_ephemeral',
+              session_id: 'ix-chat-test',
+              feed_written: true,
+              playlist_synced: true,
+              media_items: [
+                { id: 'am-cn-9001', title: 'Chart Track 9001', creator: 'Artist A', subtitle: 'Artist A · 国区实时榜 #1' },
+                { id: 'am-cn-9002', title: 'Chart Track 9002', creator: 'Artist B', subtitle: 'Artist B · 国区实时榜 #2' },
+                { id: 'am-cn-9003', title: 'Chart Track 9003', creator: 'Artist C', subtitle: 'Artist C · 国区实时榜 #3' },
+              ],
+            },
+            error: '',
+          };
+        }
+      }
+      return { ok: true, data: {}, error: '' };
+    });
+
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'],
+      },
+    };
+
+    render(<AiWorkbench />);
+    await waitFor(() => {
+      expect(screen.getByTestId('ai-gateway-badge').textContent).toContain('ONLINE');
+    });
+
+    const input = screen.getByLabelText('AI 策展对话输入框');
+    fireEvent.change(input, { target: { value: '写三首目前最火的歌到歌单' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送执行' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/已反写 3 条推荐到卡片页/)).not.toBeNull();
+    });
+    expect(screen.getByText('Chart Track 9001')).not.toBeNull();
+    expect(screen.getByText('Chart Track 9002')).not.toBeNull();
+    expect(screen.getByText('Chart Track 9003')).not.toBeNull();
+    expect(invokedCapabilities).not.toContain('llm.chat.v1');
+  });
+
   it('sends llm.chat.v1 in AiWorkbench and surfaces real reply or real backend error', async () => {
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
       if (cmd === 'call_capability') {

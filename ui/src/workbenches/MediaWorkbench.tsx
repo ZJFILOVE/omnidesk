@@ -18,6 +18,7 @@ import { MEDIA_ITEMS, type ChapterSegment, type MediaItem } from '../data/mock';
 import { useLiveMedia } from '../hooks/useLiveDomain';
 import { enqueueEphemeralTrack, runMediaInspectorCapability } from './mediaActions';
 import MediaInspector from './panels/MediaInspector';
+import { useMediaLyrics } from './useMediaLyrics';
 import { useMpvPlayback } from './useMpvPlayback';
 
 type MediaFilterId =
@@ -169,12 +170,21 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       mediaItems[0],
     [mediaItems, selectedId, filteredItems],
   );
+  const mediaLyrics = useMediaLyrics(selectedItem);
+  const displayItem = useMemo(
+    () =>
+      selectedItem && mediaLyrics.lines.length > 0
+        ? { ...selectedItem, lyrics: mediaLyrics.lines }
+        : selectedItem,
+    [mediaLyrics.lines, selectedItem],
+  );
 
   const currentSec = mpv.enabled ? mpv.positionSec : previewSec;
   const effectiveDuration =
     mpv.enabled && mpv.durationSec ? mpv.durationSec : (selectedItem?.durationSec ?? 0);
   const playing = mpv.enabled ? mpv.playing : previewPlaying;
   const volume = volumeDraft ?? (mpv.enabled ? mpv.volume : previewVolume);
+  const speed = mpv.enabled ? mpv.speed : 1;
 
   useEffect(() => {
     if (!mpv.embedded) return undefined;
@@ -214,13 +224,13 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   }, [mpv.enabled, previewPlaying, selectedItem]);
 
   const activeLyricIndex = useMemo(() => {
-    if (!selectedItem?.lyrics?.length) return -1;
+    if (!displayItem?.lyrics?.length) return -1;
     let idx = 0;
-    for (let i = 0; i < selectedItem.lyrics.length; i += 1) {
-      if (selectedItem.lyrics[i].timeSec <= currentSec) idx = i;
+    for (let i = 0; i < displayItem.lyrics.length; i += 1) {
+      if (displayItem.lyrics[i].timeSec <= currentSec) idx = i;
     }
     return idx;
-  }, [selectedItem, currentSec]);
+  }, [displayItem, currentSec]);
 
   const nextSponsorSegment = useMemo(() => {
     if (!selectedItem?.chapters?.length) return null;
@@ -305,6 +315,16 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     }, 120);
   };
 
+  const handleSpeedChange = (nextSpeed: number) => {
+    if (!mpv.enabled) {
+      setActionStatus('离线预览：倍速仅对真实 mpv 播放生效');
+      return;
+    }
+    void mpv.setSpeed(nextSpeed).then((result) => {
+      if (mountedRef.current) setActionStatus(result.message);
+    });
+  };
+
   const handleQueueEphemeral = async (id: string) => {
     const result = await enqueueEphemeralTrack(selectedItem);
     if (!mountedRef.current) return;
@@ -372,13 +392,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
         <div className="flex flex-col gap-6 p-6 @[860px]/workbench:flex-row">
           {/* Primary Cinema / Studio Stage */}
           <div className="min-w-0 flex-1">
-            {selectedItem ? (
+            {displayItem ? (
               <MediaInspector
-                item={selectedItem}
+                item={displayItem}
                 playing={playing}
                 currentSec={currentSec}
                 durationSec={effectiveDuration}
                 volume={volume}
+                speed={speed}
                 playbackBackend={mpv.embedded ? 'libmpv' : mpv.enabled ? 'mpv' : 'preview'}
                 videoSurface={
                   selectedItem.kind === 'video' && mpv.embedded ? (
@@ -386,6 +407,8 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                   ) : undefined
                 }
                 activeLyricIndex={activeLyricIndex}
+                lyricsLoading={mediaLyrics.loading}
+                lyricsMessage={mediaLyrics.message}
                 nextSponsorSegment={nextSponsorSegment}
                 inEphemeralQueue={ephemeralQueue.includes(selectedItem.id)}
                 activeFocusId={activeFocusId}
@@ -393,6 +416,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                 onTogglePlay={() => void handleTogglePlay()}
                 onSeek={handleSeek}
                 onVolumeChange={handleVolumeChange}
+                onSpeedChange={handleSpeedChange}
                 onSkipSponsor={handleSkipSponsor}
                 onQueueEphemeral={(id) => void handleQueueEphemeral(id)}
                 onStatusChange={(msg) => void handleInspectorAction(msg)}
