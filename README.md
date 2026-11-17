@@ -67,6 +67,11 @@ cargo build --release --features custom-protocol --manifest-path shell-tauri/Car
 ./shell-tauri/target/release/omnidesk
 # 注意：npm run dev 的独立浏览器页面仅用于示例预览，没有 Tauri IPC。
 
+# 已启动 Core 且已有策展数据时，验证原生 IPC → control.sock → 真实数据源
+cargo test --manifest-path shell-tauri/Cargo.toml --test live_data_flow -- --ignored --nocapture
+# 强制验证 libmpv 实际视频帧与独立 mpv IPC（需要 mpv、libmpv、ffmpeg）
+OMNIDESK_MPV_E2E=1 OMNIDESK_MPV_NULL_AUDIO=1 cargo test --manifest-path shell-tauri/Cargo.toml
+
 # 4. 使用 omnidesk-pm（实际已实现命令：list / init / verify / install / update / rollback / enable / disable / config / mcp-serve / reload / rpc / emit / ping）
 uv run omnidesk-pm list
 uv run omnidesk-pm init plugins/plugin-mytool --id plugin-mytool --domain text --kind workspace --provides text.source.v1

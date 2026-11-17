@@ -40,6 +40,10 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(ShellState::new(client, bridge, daemon, mpv, mpris))
         .setup(move |app| {
+            // GTK has applied the user's locale by now. libmpv rejects non-C
+            // numeric locales, so reset this category before any media workers.
+            crate::embedded_mpv::initialize_numeric_locale()
+                .map_err(|err| std::io::Error::other(err.message))?;
             let sink: Arc<dyn EventSink> = Arc::new(app.handle().clone());
             mpv_for_setup.set_event_sink(Arc::clone(&sink));
             bridge_for_setup.start(Arc::clone(&sink));

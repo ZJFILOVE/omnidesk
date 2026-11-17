@@ -29,6 +29,18 @@ use crate::redact::redact_text;
 
 pub const MPV_FRAME_CHANNEL: &str = "omnidesk:mpv-frame";
 
+/// Restore libmpv's numeric-locale requirement after GTK initializes the locale.
+/// Call once on the application setup thread, before starting media workers;
+/// changing the process locale in individual playback requests is unsafe.
+pub fn initialize_numeric_locale() -> Result<(), RpcError> {
+    // SAFETY: the static C string is valid and only LC_NUMERIC is changed at startup.
+    let locale = unsafe { libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr()) };
+    if locale.is_null() {
+        return Err(RpcError::internal_error("Unable to set LC_NUMERIC=C for libmpv"));
+    }
+    Ok(())
+}
+
 const MPV_FORMAT_STRING: c_int = 1;
 const MPV_FORMAT_FLAG: c_int = 3;
 const MPV_FORMAT_INT64: c_int = 4;
@@ -1125,6 +1137,12 @@ mod tests {
             .expect("ffmpeg should be available");
         assert!(status.success(), "ffmpeg failed to create test media");
 
+        // GTK adopts the user's locale before Tauri setup. Reproduce that here;
+        // otherwise a Rust test starts in C and misses mpv_create returning NULL.
+        let locale_name = std::env::var("OMNIDESK_MPV_TEST_LOCALE").unwrap_or_else(|_| "C".into());
+        let locale_name = CString::new(locale_name).unwrap();
+        assert!(!unsafe { libc::setlocale(libc::LC_NUMERIC, locale_name.as_ptr()) }.is_null());
+        initialize_numeric_locale().expect("numeric locale should be restored after GUI startup");
         let mpv = EmbeddedMpv::new().expect("embedded libmpv should initialize");
         let frames = Arc::new(Mutex::new(Vec::new()));
         mpv.set_event_sink(Arc::new(CaptureSink {

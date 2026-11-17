@@ -437,6 +437,9 @@ fn mpv_ipc_playback_control_roundtrip_and_honest_failure_states() {
 #[test]
 fn real_mpv_binary_ipc_playback_smoke_if_installed() {
     let probe_res = probe();
+    if std::env::var("OMNIDESK_MPV_E2E").ok().as_deref() == Some("1") {
+        assert!(probe_res.available, "explicit mpv E2E must not silently skip: {probe_res:?}");
+    }
     if !probe_res.available {
         return;
     }

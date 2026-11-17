@@ -163,6 +163,42 @@ fn read_source_prevents_payload_injection_and_supports_colon_multi_source_ids() 
 }
 
 #[test]
+fn domain_invoke_preserves_source_method_through_native_command_and_socket() {
+    block_on(async {
+        let env = TempEnv::new("omnidesk-domain-method", false);
+        let listener = bind_0600(&env.socket_path);
+        let server = tokio::spawn(async move {
+            for (domain, method) in [("media", "fetch_items"), ("text", "fetch_feed"), ("book", "list_books")] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["op"], "domain.invoke");
+                assert_eq!(req["domain"], domain);
+                assert_eq!(req["method"], method);
+                assert_eq!(req["source_id"], "plugin-ai-curator");
+                assert_eq!(req["caller"], "shell-tauri");
+                assert!(req.get("jsonrpc").is_none());
+                let response = json!({"id": req["id"], "ok": true, "data": {"result": [{"id": "live-item"}]}, "error": ""});
+                write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+            }
+        });
+        let client = ControlClient::new(env.paths.clone());
+        for (domain, method) in [("media", "fetch_items"), ("text", "fetch_feed"), ("book", "list_books")] {
+            let result = exec_call_args(&client, &json!({
+                "op": "domain.invoke", "params": {
+                    "domain": domain, "method": method, "source_id": "plugin-ai-curator", "payload": {}
+                }
+            })).await;
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["data"]["result"][0]["id"], "live-item");
+        }
+        server.await.unwrap();
+    });
+}
+
+#[test]
 fn call_raw_blocks_reserved_keys_disallowed_ops_and_fixes_bus_timeout() {
     block_on(async {
         let env = TempEnv::new("omnidesk-raw-sec", false);

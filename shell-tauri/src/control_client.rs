@@ -154,7 +154,11 @@ impl ControlClient {
         };
         let req_id = next_request_id();
         for key in RESERVED_RPC_KEYS {
-            body.remove(*key);
+            // domain.invoke uses `method` as a source operation, not as the RPC
+            // envelope selector. The authoritative operation is always `op` below.
+            if !(*key == "method" && valid_op == "domain.invoke") {
+                body.remove(*key);
+            }
         }
         body.insert("id".to_string(), Value::String(req_id.clone()));
         body.insert("op".to_string(), Value::String(valid_op.to_string()));
@@ -311,7 +315,7 @@ fn validate_timeout_seconds(op: &str, val: Option<&Value>) -> Result<(), RpcErro
 
 fn validate_raw_op_params(op: &str, body: &mut Map<String, Value>) -> Result<Option<String>, RpcError> {
     for reserved in RESERVED_RPC_KEYS {
-        if body.contains_key(*reserved) {
+        if body.contains_key(*reserved) && !(*reserved == "method" && op == "domain.invoke") {
             return Err(RpcError::invalid_argument(format!("Reserved RPC field '{reserved}' is not permitted in params")));
         }
     }

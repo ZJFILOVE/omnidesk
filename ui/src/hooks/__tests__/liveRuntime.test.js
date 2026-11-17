@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 // Opt-in smoke test: OMNIDESK_LIVE_SOCKET=/run/user/<uid>/omnidesk/control.sock npm test -- liveRuntime
+// This covers Core + UI mapping only. Pair with shell-tauri/tests/live_data_flow.rs
+// to verify the native WebView argument validation and socket serialization too.
 import { createConnection } from 'node:net';
 import { cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
