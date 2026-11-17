@@ -136,10 +136,42 @@ export function useCompanionChat({
       const contextLabel = contextEntity
         ? `${contextEntity.title}${contextEntity.subtitle ? ` — ${contextEntity.subtitle}` : ''}`
         : contextTitle;
+      const contextRefs = contextEntity
+        ? [
+            {
+              capability:
+                effectiveDomain === 'book'
+                  ? 'book.source.v1'
+                  : effectiveDomain === 'media'
+                    ? 'media.source.v1'
+                    : 'text.source.v1',
+              label: contextEntity.title,
+              payload:
+                effectiveDomain === 'book'
+                  ? {
+                      action: 'fetch_spread',
+                      book_id: contextEntity.itemId,
+                      source_id: contextEntity.sourceId,
+                    }
+                  : effectiveDomain === 'media'
+                    ? {
+                        action: 'fetch_chapters',
+                        item_id: contextEntity.itemId,
+                        source_id: contextEntity.sourceId,
+                      }
+                    : {
+                        action: 'fetch_article',
+                        article_id: contextEntity.itemId,
+                        source_id: contextEntity.sourceId,
+                      },
+            },
+          ]
+        : undefined;
       const payload: AiAgentRequestPayload = {
         action: action ?? 'chat',
         domain: effectiveDomain,
         context: contextLabel,
+        context_refs: contextRefs,
         prompt: trimmed,
         messages: priorHistory,
         timeout_ms: 60000,

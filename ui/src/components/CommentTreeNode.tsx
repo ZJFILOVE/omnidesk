@@ -96,11 +96,11 @@ export const CommentTreeNode: React.FC<CommentTreeNodeProps> = ({
               'min-w-0 flex-1 cursor-pointer rounded-[8px] px-1.5 py-0.5 text-left',
             )}
           >
-            <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[12px]">
+            <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[13.5px]">
               <span className="font-mono font-semibold text-[var(--text-primary)]">{node.author}</span>
               {node.roleBadge ? (
                 <span
-                  className="rounded-full px-2 py-0.5 text-[12px] font-medium"
+                  className="rounded-full px-2 py-0.5 text-[13.5px] font-medium"
                   style={{
                     backgroundColor: 'var(--status-info-bg, #E7F0FA)',
                     color: 'var(--status-info-fg, #185194)',
@@ -111,7 +111,7 @@ export const CommentTreeNode: React.FC<CommentTreeNodeProps> = ({
               ) : null}
               <span style={{ color: 'var(--text-subtle, #635E56)' }}>{node.timeAgo}</span>
               {depth > 0 ? (
-                <span className="font-mono text-[12px]" style={{ color: 'var(--text-subtle, #635E56)' }}>
+                <span className="font-mono text-[13.5px]" style={{ color: 'var(--text-subtle, #635E56)' }}>
                   L{depth}
                 </span>
               ) : null}
@@ -137,7 +137,7 @@ export const CommentTreeNode: React.FC<CommentTreeNodeProps> = ({
               selected={voted}
               tone="text"
               surface="surface"
-              className="px-2 py-1 font-mono text-[12px]"
+              className="px-2 py-1 font-mono text-[13.5px]"
             >
               ▲ {node.score + (voted ? 1 : 0)}
             </FocusButton>
@@ -148,7 +148,7 @@ export const CommentTreeNode: React.FC<CommentTreeNodeProps> = ({
                 onFocus={onFocus}
                 onActivate={() => onToggleCollapse(node.id)}
                 surface="surface"
-                className="px-2 py-1 text-[12px] font-medium"
+                className="px-2 py-1 text-[13.5px] font-medium"
               >
                 {collapsed ? `展开 (${descendantCount})` : '折叠'}
               </FocusButton>
@@ -159,7 +159,7 @@ export const CommentTreeNode: React.FC<CommentTreeNodeProps> = ({
         {hasChildren && collapsed ? (
           <div
             data-testid={`comment-collapsed-summary-${node.id}`}
-            className="rounded-[8px] px-3 py-1.5 text-[12px]"
+            className="rounded-[8px] px-3 py-1.5 text-[13.5px]"
             style={{
               backgroundColor: 'var(--bg-soft, #E6E2DA)',
               color: 'var(--text-muted, #59544D)',

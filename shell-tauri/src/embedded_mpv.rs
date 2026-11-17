@@ -334,6 +334,11 @@ impl EmbeddedMpv {
                 ));
             }
         }
+        if std::env::var("OMNIDESK_MPV_NULL_AUDIO").ok().as_deref() == Some("1") {
+            if let (Ok(c_name), Ok(c_value)) = (CString::new("ao"), CString::new("null")) {
+                unsafe { (lib.set_option_string)(handle.0, c_name.as_ptr(), c_value.as_ptr()) };
+            }
+        }
 
         let rc = unsafe { (lib.initialize)(handle.0) };
         if rc < 0 {
@@ -1081,8 +1086,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires libmpv + ffmpeg and a video output/audio device"]
     fn embedded_mpv_renders_real_frames() {
+        if std::env::var("OMNIDESK_MPV_E2E").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skipping embedded libmpv frame test: set OMNIDESK_MPV_E2E=1 (needs libmpv + ffmpeg)"
+            );
+            return;
+        }
         let probe = EmbeddedMpv::probe();
         assert!(probe.available, "{probe:?}");
 

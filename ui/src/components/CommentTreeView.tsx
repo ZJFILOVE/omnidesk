@@ -258,7 +258,7 @@ export const CommentTreeView: React.FC<CommentTreeViewProps> = ({
           onActivate={() => setVisibleLimit((prev) => prev + Math.max(1, pageSize))}
           tone="text"
           surface="soft"
-          className="mt-1 px-3 py-2 text-center text-[12px] font-medium"
+          className="mt-1 px-3 py-2 text-center text-[13.5px] font-medium"
         >
           加载更多评论 (还有 {remainingCount} 条可见)
         </FocusButton>

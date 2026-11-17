@@ -73,28 +73,28 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   const components = useMemo<Components>(
     () => ({
       h1: ({ children }) => (
-        <h1 className="mt-3 mb-2 text-[21px] leading-[1.35] font-bold tracking-tight first:mt-0 last:mb-0">
+        <h1 className="mt-3 mb-2 text-[23px] leading-[1.35] font-bold tracking-tight first:mt-0 last:mb-0">
           {children}
         </h1>
       ),
       h2: ({ children }) => (
-        <h2 className="mt-2.5 mb-2 text-[19px] leading-[1.38] font-bold tracking-tight first:mt-0 last:mb-0">
+        <h2 className="mt-2.5 mb-2 text-[20.5px] leading-[1.38] font-bold tracking-tight first:mt-0 last:mb-0">
           {children}
         </h2>
       ),
       h3: ({ children }) => (
-        <h3 className="mt-2 mb-1.5 text-[17px] leading-[1.42] font-semibold first:mt-0 last:mb-0">
+        <h3 className="mt-2 mb-1.5 text-[18.5px] leading-[1.42] font-semibold first:mt-0 last:mb-0">
           {children}
         </h3>
       ),
       h4: ({ children }) => (
-        <h4 className="mt-2 mb-1 text-[15.5px] leading-[1.45] font-semibold first:mt-0 last:mb-0">
+        <h4 className="mt-2 mb-1 text-[17px] leading-[1.45] font-semibold first:mt-0 last:mb-0">
           {children}
         </h4>
       ),
       p: ({ children }) => (
         <p
-          className={`${compact ? 'my-1 text-[13.5px] leading-[1.72]' : 'my-2 text-[16px] leading-[1.78]'} first:mt-0 last:mb-0`}
+          className={`${compact ? 'my-1 text-[15px] leading-[1.72]' : 'my-2 text-[17.5px] leading-[1.78]'} first:mt-0 last:mb-0`}
         >
           {children}
         </p>
@@ -112,14 +112,14 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
       ),
       ul: ({ children }) => (
         <ul
-          className={`${compact ? 'my-1 text-[13.5px] leading-[1.72]' : 'my-2 text-[16px] leading-[1.78]'} list-disc space-y-1.5 pl-5 first:mt-0 last:mb-0`}
+          className={`${compact ? 'my-1 text-[15px] leading-[1.72]' : 'my-2 text-[17.5px] leading-[1.78]'} list-disc space-y-1.5 pl-5 first:mt-0 last:mb-0`}
         >
           {children}
         </ul>
       ),
       ol: ({ children }) => (
         <ol
-          className={`${compact ? 'my-1 text-[13.5px] leading-[1.72]' : 'my-2 text-[16px] leading-[1.78]'} list-decimal space-y-1.5 pl-5 first:mt-0 last:mb-0`}
+          className={`${compact ? 'my-1 text-[15px] leading-[1.72]' : 'my-2 text-[17.5px] leading-[1.78]'} list-decimal space-y-1.5 pl-5 first:mt-0 last:mb-0`}
         >
           {children}
         </ol>
@@ -130,7 +130,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
           className="my-3 overflow-x-auto rounded-[12px] first:mt-0 last:mb-0"
           style={{ backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-page)' }}
         >
-          <table className="w-full border-collapse text-left text-[13.5px] leading-[1.65]">{children}</table>
+          <table className="w-full border-collapse text-left text-[15px] leading-[1.65]">{children}</table>
         </div>
       ),
       thead: ({ children }) => (
@@ -180,7 +180,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
           return (
             <span
               data-blocked-image="true"
-              className="inline-block rounded-md px-2 py-0.5 font-mono text-[12px]"
+              className="inline-block rounded-md px-2 py-0.5 font-mono text-[13.5px]"
               style={{
                 backgroundColor: 'var(--status-err-bg, #FCE9ED)',
                 color: 'var(--status-err-fg, #AA1D33)',
@@ -216,7 +216,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         if (!info) {
           return (
             <pre
-              className="my-2.5 overflow-x-auto rounded-[12px] p-4 font-mono text-[13px] leading-[1.68]"
+              className="my-2.5 overflow-x-auto rounded-[12px] p-4 font-mono text-[14.5px] leading-[1.68]"
               style={{ backgroundColor: 'var(--bg-sunken, #EDEAE3)' }}
             >
               {children}
@@ -230,7 +230,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             style={{ backgroundColor: 'var(--bg-sunken, #EDEAE3)' }}
           >
             <div
-              className="flex items-center justify-between border-b px-4 py-1.5 font-mono text-[12px] uppercase"
+              className="flex items-center justify-between border-b px-4 py-1.5 font-mono text-[13.5px] uppercase"
               style={{
                 borderColor: HAIRLINE,
                 color: 'var(--text-muted, #59544D)',
@@ -240,7 +240,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                 {resolvedLanguage}
               </span>
             </div>
-            <pre className="m-0 overflow-x-auto p-4 font-mono text-[13px] leading-[1.68]">
+            <pre className="m-0 overflow-x-auto p-4 font-mono text-[14.5px] leading-[1.68]">
               <code className={`hljs language-${resolvedLanguage}`}>{nodes}</code>
             </pre>
           </div>

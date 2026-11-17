@@ -14,9 +14,9 @@ export interface KeycapProps {
 }
 
 const SIZE_CLASSES: Record<NonNullable<KeycapProps['size']>, string> = {
-  xs: 'px-1.5 py-[2px] text-[11px] leading-none rounded-[5px] min-w-[19px] h-[19px]',
-  sm: 'px-1.5 py-[2px] text-[11.5px] leading-none rounded-[5px] min-w-[21px] h-[21px]',
-  md: 'px-2 py-1 text-[12px] leading-none rounded-[6px] min-w-[24px] h-[24px]',
+  xs: 'px-1.5 py-[2px] text-[12.5px] leading-none rounded-[5px] min-w-[19px] h-[19px]',
+  sm: 'px-1.5 py-[2px] text-[13px] leading-none rounded-[5px] min-w-[21px] h-[21px]',
+  md: 'px-2 py-1 text-[13.5px] leading-none rounded-[6px] min-w-[24px] h-[24px]',
 };
 
 export function Keycap({

@@ -74,7 +74,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             selected={curationMode === 'interactive_ephemeral'}
             tone="core"
             surface="soft"
-            className="px-3 py-1.5 text-[12.5px] font-semibold"
+            className="px-3 py-1.5 text-[14px] font-semibold"
           >
             可重复灵感 · interactive_ephemeral
           </FocusButton>
@@ -86,12 +86,12 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             selected={curationMode === 'daily_immutable'}
             tone="ok"
             surface="soft"
-            className="px-3 py-1.5 text-[12.5px] font-semibold"
+            className="px-3 py-1.5 text-[14px] font-semibold"
           >
             每日账本 · daily_immutable
           </FocusButton>
         </div>
-        <span className="font-mono text-[12px] text-[var(--text-muted)]">
+        <span className="font-mono text-[13.5px] text-[var(--text-muted)]">
           {curationMode === 'daily_immutable'
             ? '永久账本去重 + 歌单同步'
             : '只读历史 · 零仓库污染'}
@@ -110,7 +110,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
               selected={repeatPolicy === pol}
               tone="core"
               surface="surface"
-              className="px-2.5 py-1 font-mono text-[12px]"
+              className="px-2.5 py-1 font-mono text-[13.5px]"
             >
               {REPEAT_LABELS[pol]}
             </FocusButton>
@@ -151,7 +151,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
                 boxShadow: !isUser && !msg.isError ? 'var(--shadow-page)' : undefined,
               }}
             >
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[13.5px]">
                 <span
                   className="font-semibold"
                   style={{
@@ -176,12 +176,12 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
                       {msg.mode}
                     </TagChip>
                   ) : null}
-                  <span className="font-mono text-[12px] text-[var(--text-subtle)]">
+                  <span className="font-mono text-[13.5px] text-[var(--text-subtle)]">
                     {msg.timestamp}
                   </span>
                 </div>
               </div>
-              <p className="whitespace-pre-wrap text-[15px] leading-[1.76]">{msg.content}</p>
+              <p className="whitespace-pre-wrap text-[16.5px] leading-[1.76]">{msg.content}</p>
             </div>
 
             {msg.cards?.length ? (
@@ -200,7 +200,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
                       surface="surface"
                       className="flex flex-col gap-1.5 p-4 text-left"
                     >
-                      <div className="flex items-center justify-between gap-2 text-[12px]">
+                      <div className="flex items-center justify-between gap-2 text-[13.5px]">
                         <span className="truncate font-mono font-semibold" style={{ color: 'var(--domain-core)' }}>
                           {card.domain.toUpperCase()} · {card.badge}
                         </span>
@@ -209,10 +209,10 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
                           <span>{isPinned ? '已暂存 ✓' : '+ 反写暂存'}</span>
                         </span>
                       </div>
-                      <div className="text-[14px] font-semibold text-[var(--text-primary)]">
+                      <div className="text-[15.5px] font-semibold text-[var(--text-primary)]">
                         {card.title}
                       </div>
-                      <div className="text-[13px] leading-[1.55] text-[var(--text-muted)]">{card.subtitle}</div>
+                      <div className="text-[14.5px] leading-[1.55] text-[var(--text-muted)]">{card.subtitle}</div>
                     </FocusButton>
                   );
                 })}
@@ -249,7 +249,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             onFocus={onFocus}
             onActivate={() => onRunPreset(preset)}
             surface="soft"
-            className="px-3 py-1 text-[12px] font-medium"
+            className="px-3 py-1 text-[13.5px] font-medium"
           >
             {preset.label}
           </FocusButton>
@@ -274,7 +274,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
           {...focusableInputProps('ai:composer:input', activeFocusId, onFocus)}
           className={focusClass(
             activeFocusId === 'ai:composer:input',
-            'min-w-0 flex-1 rounded-[12px] border p-3 text-[14.5px] leading-[1.65]',
+            'min-w-0 flex-1 rounded-[12px] border p-3 text-[16px] leading-[1.65]',
           )}
           style={{
             backgroundColor: 'var(--bg-canvas)',
@@ -288,7 +288,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
           onActivate={onSend}
           selected
           tone="core"
-          className="inline-flex shrink-0 items-center gap-1.5 px-4 py-2.5 text-[13px] font-semibold"
+          className="inline-flex shrink-0 items-center gap-1.5 px-4 py-2.5 text-[14.5px] font-semibold"
         >
           <Send className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{isSending ? '执行中...' : '发送执行'}</span>

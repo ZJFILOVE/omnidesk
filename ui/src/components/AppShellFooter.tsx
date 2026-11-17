@@ -27,7 +27,7 @@ export function AppShellFooter({
 }: AppShellFooterProps) {
   return (
     <footer
-      className="h-8 shrink-0 border-t px-4 flex items-center justify-between gap-3 text-[12px] text-muted select-none"
+      className="h-8 shrink-0 border-t px-4 flex items-center justify-between gap-3 text-[13.5px] text-muted select-none"
       style={{
         backgroundColor: 'var(--bg-sunken)',
         borderColor: 'var(--border-subtle)',
@@ -53,14 +53,14 @@ export function AppShellFooter({
           ·
         </span>
 
-        <span className="hidden sm:inline-flex items-center gap-1 font-mono text-[12px] text-subtle truncate max-w-[240px]">
+        <span className="hidden sm:inline-flex items-center gap-1 font-mono text-[13.5px] text-subtle truncate max-w-[240px]">
           <span>焦点:</span>
           <span className="text-muted truncate">{focusedId ?? 'none'}</span>
         </span>
 
         <span
           data-testid="shell-runtime-status"
-          className="hidden md:inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[12px] font-medium"
+          className="hidden md:inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[13.5px] font-medium"
           style={{
             backgroundColor: !inTauri
               ? 'var(--status-warn-bg)'
@@ -80,7 +80,7 @@ export function AppShellFooter({
         </span>
 
         <span
-          className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[12px] font-medium shrink-0"
+          className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[13.5px] font-medium shrink-0"
           style={
             isComposing
               ? {
@@ -98,7 +98,7 @@ export function AppShellFooter({
         </span>
       </div>
 
-      <div className="hidden lg:flex items-center gap-3 shrink-0 text-[12px] text-muted">
+      <div className="hidden lg:flex items-center gap-3 shrink-0 text-[13.5px] text-muted">
         <span className="inline-flex items-center gap-1">
           <Keycap size="xs">hjkl</Keycap>
           <span>移动</span>

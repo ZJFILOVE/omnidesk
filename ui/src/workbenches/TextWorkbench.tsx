@@ -20,6 +20,7 @@ import {
   type TextArticle,
   type TextChannelId,
 } from '../data/mock';
+import { useLiveArticleDetail, useLiveTextFeed, usePersistentNotes } from '../hooks/useLiveDomain';
 import CommentTreePanel, { type BilingualMode } from './panels/CommentTreePanel';
 import TextArticleReader from './panels/TextArticleReader';
 
@@ -53,7 +54,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const [bilingualMode, setBilingualMode] = useState<BilingualMode>('bilingual');
   const [collapsedComments, setCollapsedComments] = useState<Record<string, boolean>>({});
   const [votedComments, setVotedComments] = useState<Record<string, boolean>>({});
-  const [notesByArticle, setNotesByArticle] = useState<Record<string, string[]>>({
+  const [seedNotes] = useState<Record<string, string[]>>({
     'text-journal-kv-compression': [
       '与 Magpie 长上下文缓存策略对照：可将注意力熵阈值接入前置压缩探针。',
     ],
@@ -61,6 +62,9 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const [noteDraft, setNoteDraft] = useState<string>('');
   const [actionBanner, setActionBanner] = useState<string>('双语精读排版就绪');
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const liveFeed = useLiveTextFeed('', activeChannel === 'all' ? '' : activeChannel);
+  const articles = liveFeed.live && liveFeed.items.length > 0 ? liveFeed.items : TEXT_ARTICLES;
+  const { notesByItem, addNote } = usePersistentNotes('text');
 
   useEffect(() => {
     if (searchTrigger && searchTrigger > 0) searchRef.current?.focus();
@@ -68,7 +72,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
 
   const filteredArticles = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return TEXT_ARTICLES.filter((article) => {
+    return articles.filter((article) => {
       if (activeChannel !== 'all' && article.channelId !== activeChannel) return false;
       if (dailyOnly && article.curationMode !== 'daily_immutable') return false;
       if (!q) return true;
@@ -79,7 +83,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
         article.tags.some((t) => t.toLowerCase().includes(q))
       );
     });
-  }, [activeChannel, dailyOnly, query]);
+  }, [articles, activeChannel, dailyOnly, query]);
 
   const selectedArticle: TextArticle | undefined = useMemo(
     () =>
@@ -87,6 +91,19 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
       filteredArticles[0],
     [selectedArticleId, filteredArticles],
   );
+
+  const liveDetail = useLiveArticleDetail(
+    liveFeed.live ? selectedArticle?.id ?? '' : '',
+    liveFeed.sourceId,
+  );
+  const readerArticle: TextArticle | undefined = useMemo(() => {
+    if (!selectedArticle) return undefined;
+    if (!liveFeed.live) return selectedArticle;
+    const blocks = liveDetail.blocks.length > 0 ? liveDetail.blocks : selectedArticle.blocks;
+    const comments = liveDetail.comments.length > 0 ? liveDetail.comments : selectedArticle.comments;
+    if (blocks === selectedArticle.blocks && comments === selectedArticle.comments) return selectedArticle;
+    return { ...selectedArticle, blocks, comments };
+  }, [liveDetail.blocks, liveDetail.comments, liveFeed.live, selectedArticle]);
 
   useEffect(() => {
     if (!onContextChange) return;
@@ -107,12 +124,9 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const handleAddNote = () => {
     if (!selectedArticle || !noteDraft.trim()) return;
     const text = noteDraft.trim();
-    setNotesByArticle((prev) => ({
-      ...prev,
-      [selectedArticle.id]: [...(prev[selectedArticle.id] ?? []), text],
-    }));
+    addNote(selectedArticle.id, text);
     setNoteDraft('');
-    setActionBanner('已写入本地 ## Notes 区块（隔离于自动生成内容）');
+    setActionBanner('已写入 ## Notes 区块并持久化到本地存储');
   };
 
   const handleSelectionAction = (event: SelectionActionEvent) => {
@@ -165,7 +179,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
             selected={tocOpen}
             tone="text"
             surface="soft"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[14px] font-medium"
           >
             {tocOpen ? (
               <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />
@@ -193,7 +207,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
             selected={dailyOnly}
             tone="ok"
             surface="soft"
-            className="px-3 py-1.5 text-[12.5px] font-medium"
+            className="px-3 py-1.5 text-[14px] font-medium"
           >
             {dailyOnly ? '仅每日精选 ✓' : '每日精选'}
           </FocusButton>
@@ -211,7 +225,16 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
             tone="text"
             ariaLabel="文章频道筛选"
           />
-          <span className="text-[12.5px] text-[var(--text-muted)]">{actionBanner}</span>
+          <span className="text-[14px] text-[var(--text-muted)]">
+            {liveFeed.live ? (
+              <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
+                LIVE ·{' '}
+                {liveFeed.sources.find((s) => s.sourceId === liveFeed.sourceId)?.title ??
+                  liveFeed.sourceId}
+              </span>
+            ) : null}
+            {actionBanner}
+          </span>
         </div>
       }
       leftPane={
@@ -304,9 +327,9 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
                       selected={isSelected}
                       tone="text"
                       surface={isSelected ? 'surface' : 'ghost'}
-                      className="shrink-0 max-w-[220px] truncate px-2.5 py-1 text-left text-[12.5px] font-medium"
+                      className="shrink-0 max-w-[220px] truncate px-2.5 py-1 text-left text-[14px] font-medium"
                     >
-                      <span className="mr-1.5 font-mono text-[11.5px] opacity-75">
+                      <span className="mr-1.5 font-mono text-[13px] opacity-75">
                         {article.sourceName.split(' ')[0]}
                       </span>
                       <span>{article.titleZh}</span>
@@ -317,16 +340,16 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
             </nav>
           ) : null}
 
-          {selectedArticle ? (
+          {readerArticle ? (
             <TextArticleReader
-              article={selectedArticle}
+              article={readerArticle}
               bilingualMode={bilingualMode}
               activeFocusId={activeFocusId}
               onFocus={emitFocus}
               onBilingualModeChange={setBilingualMode}
               onSendToBabelDoc={() => {
-                setActionBanner(`已提交至 book.bilingual_pdf.v1：${selectedArticle.titleZh}`);
-                onNavigateWorkbench?.('book', { fromArticleId: selectedArticle.id });
+                setActionBanner(`已提交至 book.bilingual_pdf.v1：${readerArticle.titleZh}`);
+                onNavigateWorkbench?.('book', { fromArticleId: readerArticle.id });
               }}
               onOpenChromeApp={() => setActionBanner('已唤起托管 Chrome --app + MV3 双语扩展')}
               onSelectBlock={(blockId) =>
@@ -353,17 +376,20 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
         </div>
       }
       rightPane={
-        selectedArticle ? (
+        readerArticle ? (
           <CommentTreePanel
-            articleId={selectedArticle.id}
-            comments={selectedArticle.comments}
+            articleId={readerArticle.id}
+            comments={readerArticle.comments}
             bilingualMode={bilingualMode}
             collapsedComments={collapsedComments}
             votedComments={votedComments}
-            notes={notesByArticle[selectedArticle.id] ?? []}
+            notes={[
+              ...(seedNotes[readerArticle.id] ?? []),
+              ...(notesByItem[readerArticle.id] ?? []).map((note) => note.text),
+            ]}
             noteDraft={noteDraft}
             activeFocusId={activeFocusId}
-            error={selectedArticle.commentsError ?? null}
+            error={readerArticle.commentsError ?? liveDetail.error ?? null}
             onFocus={emitFocus}
             onToggleCollapse={(id) =>
               setCollapsedComments((prev) => ({ ...prev, [id]: !prev[id] }))

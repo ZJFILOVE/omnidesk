@@ -156,8 +156,8 @@ export function CompanionDock({
             style={{ backgroundColor: DOMAIN_CSS_VARS[effectiveDomain] }}
           />
           <Bot className="h-4 w-4 shrink-0 text-[var(--text-primary)]" aria-hidden="true" />
-          <span className="truncate text-[14px] font-semibold">F8 伴读栏</span>
-          <span className="rounded-full bg-[var(--bg-soft)] px-2.5 py-0.5 text-[12px] font-medium text-[var(--text-muted)]">
+          <span className="truncate text-[15.5px] font-semibold">F8 伴读栏</span>
+          <span className="rounded-full bg-[var(--bg-soft)] px-2.5 py-0.5 text-[13.5px] font-medium text-[var(--text-muted)]">
             {DOMAIN_LABELS[effectiveDomain]}
           </span>
         </div>
@@ -205,7 +205,7 @@ export function CompanionDock({
         <StatusBanner mode="error" compact testId="dock-error-banner" error={dockError} />
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-[var(--bg-sunken)]/55 px-4 py-2 text-[12px]">
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-[var(--bg-sunken)]/55 px-4 py-2 text-[13.5px]">
         <div className="flex min-w-0 items-center gap-1.5 text-[var(--text-muted)]">
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--domain-core)]" aria-hidden="true" />
           <span className="truncate font-medium" title={contextTitle}>
@@ -213,7 +213,7 @@ export function CompanionDock({
           </span>
         </div>
         <span
-          className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-mono text-[12px]"
+          className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-mono text-[13.5px]"
           style={{
             backgroundColor:
               tauriAvailable && routeOnline ? 'var(--status-ok-bg)' : 'var(--status-warn-bg)',
@@ -233,7 +233,7 @@ export function CompanionDock({
             type="button"
             disabled={isSending}
             onClick={() => void submitPrompt(`${preset.promptPrefix}：${contextTitle}`, preset.id)}
-            className="cursor-pointer rounded-[8px] bg-[var(--bg-soft)] px-2.5 py-1 text-[12px] font-medium text-[var(--text-primary)] hover:brightness-95 disabled:opacity-50"
+            className="cursor-pointer rounded-[8px] bg-[var(--bg-soft)] px-2.5 py-1 text-[13.5px] font-medium text-[var(--text-primary)] hover:brightness-95 disabled:opacity-50"
           >
             {preset.label}
           </button>
@@ -242,7 +242,7 @@ export function CompanionDock({
           <button
             type="button"
             onClick={onOpenAiWorkbench}
-            className="cursor-pointer rounded-[8px] px-2.5 py-1 text-[12px] text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
+            className="cursor-pointer rounded-[8px] px-2.5 py-1 text-[13.5px] text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
           >
             AI 工作台
           </button>
@@ -251,7 +251,7 @@ export function CompanionDock({
           <button
             type="button"
             onClick={onOpenPluginStore}
-            className="cursor-pointer rounded-[8px] px-2.5 py-1 text-[12px] text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
+            className="cursor-pointer rounded-[8px] px-2.5 py-1 text-[13.5px] text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
           >
             插件中心
           </button>
@@ -261,7 +261,7 @@ export function CompanionDock({
       <div
         data-testid="companion-messages"
         aria-live="polite"
-        className="flex-1 space-y-3 overflow-y-auto px-4 py-3.5 text-[14px] leading-[1.72]"
+        className="flex-1 space-y-3 overflow-y-auto px-4 py-3.5 text-[15.5px] leading-[1.72]"
       >
         {messages.map((msg) => (
           <div
@@ -281,7 +281,7 @@ export function CompanionDock({
                 : undefined
             }
           >
-            <div className="mb-1 flex items-center justify-between gap-2 text-[12px] opacity-80">
+            <div className="mb-1 flex items-center justify-between gap-2 text-[13.5px] opacity-80">
               <span className="font-medium">
                 {msg.role === 'user'
                   ? '你'
@@ -295,14 +295,14 @@ export function CompanionDock({
             </div>
             <p className="whitespace-pre-wrap">{msg.content}</p>
             {msg.servedModel && (
-              <div className="mt-1.5 font-mono text-[12px] opacity-75">{msg.servedModel}</div>
+              <div className="mt-1.5 font-mono text-[13.5px] opacity-75">{msg.servedModel}</div>
             )}
           </div>
         ))}
         {isSending && (
           <div
             data-testid="dock-pending-status"
-            className="mr-2 rounded-[10px] bg-[var(--bg-soft)] px-3.5 py-2.5 text-[12.5px] text-[var(--text-muted)]"
+            className="mr-2 rounded-[10px] bg-[var(--bg-soft)] px-3.5 py-2.5 text-[14px] text-[var(--text-muted)]"
           >
             正在等待 ai.agent.v1 返回...
           </div>
@@ -328,13 +328,13 @@ export function CompanionDock({
             {...ime.compositionProps}
             aria-label="伴读栏提问输入"
             placeholder="针对当前阅读/媒体内容提问（Enter 发送，Shift+Enter 换行）..."
-            className="w-full resize-none bg-transparent text-[13.5px] leading-[1.65] text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
+            className="w-full resize-none bg-transparent text-[15px] leading-[1.65] text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
           />
           <div className="mt-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
+            <div className="flex items-center gap-2 text-[13.5px] text-[var(--text-muted)]">
               <span>{effectiveLayout === 'side' ? '右侧分栏' : '底部分栏'}</span>
               {ime.isComposing && (
-                <span className="rounded-full bg-[var(--status-info-bg)] px-2 py-0.5 text-[12px] text-[var(--status-info-fg)]">
+                <span className="rounded-full bg-[var(--status-info-bg)] px-2 py-0.5 text-[13.5px] text-[var(--status-info-fg)]">
                   IME 选词中
                 </span>
               )}
@@ -343,7 +343,7 @@ export function CompanionDock({
               type="submit"
               disabled={!draft.trim() || isSending}
               aria-label="发送伴读提问"
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-[8px] bg-[var(--bg-active)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--text-primary)] hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-45"
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-[8px] bg-[var(--bg-active)] px-3 py-1.5 text-[14px] font-medium text-[var(--text-primary)] hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-45"
             >
               <Send className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{isSending ? '发送中' : '发送'}</span>

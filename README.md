@@ -8,11 +8,11 @@
 
 ## 五大核心板块
 
-1. **零编译插件中心 (Plugin Store & `omnidesk-pm`)**：废除 CMake 编译与 `.so` ABI 指纹锁死；内置纯 Python 插件以 `plugin.json + plugin.py` 形态运行，支持 `uv` 环境管理、热重载、`0600` 配置/密钥表单与冒烟验证。当前 `omnidesk-pm` CLI 已支持 `list` / `init` / `verify` / `install` / `update` / `rollback` / `enable` / `disable` / `config` / `mcp-serve` / `reload` / `rpc` / `emit` / `ping`；插件独立 `python_dependencies` 的自动隔离安装仍为 **TODO / 规划中**。
+1. **零编译插件中心 (Plugin Store & `omnidesk-pm`)**：废除 CMake 编译与 `.so` ABI 指纹锁死；内置纯 Python 插件以 `plugin.json + plugin.py` 形态运行，支持 `uv` 环境管理、热重载、`0600` 配置/密钥表单与冒烟验证。当前 `omnidesk-pm` CLI 已支持 `list` / `init` / `verify` / `install` / `update` / `rollback` / `enable` / `disable` / `config` / `mcp-serve` / `reload` / `rpc` / `emit` / `ping` / `curate` / `rehydrate`；插件 `python_dependencies` 会在安装/更新时自动装入 `<plugin_data>/python-env` 独立 venv，并在加载时临时注入 `sys.path`。
 2. **影视与音乐 (Media Workbench)**：16:9 视频卡片流、1:1 封面与双语 LRC 歌词对照舞台、飞牛 fnOS 私有影库视图与空降章节导航；已迁入 `plugin-music`、`plugin-bilibili`、`plugin-youtube`、`plugin-fnos-nas`、`plugin-arr-imdb`、`plugin-sub-hunter`、`plugin-sponsorblock`（`libmpv` 软件渲染画布、MPRIS2 媒体键、真实播放状态与 UI 双向同步已接入）。
 3. **文字 · 社区 · 科学期刊 (Text Workbench)**：高密度阅读排版，原生支持 Markdown、KaTeX 公式、代码块高亮、三态双语对照与可折叠嵌套评论树；`zhihu`、`v2ex`、`linuxdo`、`shuiyuan`、`reddit`、`x`、`blog`、`feed-recipe` 均已迁入/完成并通过离线测试，`journals` 按 v2 规范完成 arXiv / Nature / bioRxiv / PubMed / Crossref 链路。
-4. **书本与 PDF (Book Workbench)**：2:3 书架、BabelDOC PDF 左右双栏对照、EPUB/MOBI 原版书划词伴读（联动 `media.clip_jump.v1` 跳转本地台词切片）及 SM-2 间隔重复生词闪卡；已迁入 `plugin-pdf-babeldoc`、`plugin-ebook`、`plugin-zlib`、`plugin-annas-archive`（前端工作台实时源接入进行中）。
-5. **AI Agent 进驻与双模策展反写中心 (AI Workbench & Curation)**：内驻 Magpie Agent（复用本机 `127.0.0.1:3425` 网关与专属组 `group/omnidesk-active`）与外部入站 Agent（`control.sock` / `omnidesk-pm rpc`）共享唯一渐进式 Skill（[`.agents/skills/omnidesk-curation-writeback/SKILL.md`](.agents/skills/omnidesk-curation-writeback/SKILL.md)），自动克隆 [`ZJFILOVE/obsidian-vault`](https://github.com/ZJFILOVE/obsidian-vault) 与 [`ZJFILOVE/music-daily`](https://github.com/ZJFILOVE/music-daily) 回灌全量历史推荐，并用硬防火墙隔离 **「每日不重复精选（`daily_immutable`）」** 与 **「按需可重复推荐（`interactive_ephemeral`）」** 反写工作台与 Apple Music 歌单（严格失败关闭：禁止合成占位推荐，Apple Music 须经国区实时 `verified_ids` 预检，每日发布须具备匹配的 `PUBLISHED` 事务收据）。
+4. **书本与 PDF (Book Workbench)**：2:3 书架、BabelDOC PDF 左右双栏对照、EPUB/MOBI 原版书划词伴读（联动 `media.clip_jump.v1` 跳转本地台词切片）及 SM-2 间隔重复生词闪卡；已迁入 `plugin-pdf-babeldoc`、`plugin-ebook`、`plugin-zlib`、`plugin-annas-archive`，前端书架、书页与生词卡均已接 `domain.invoke` / `vocab.sm2.v1` 实时源。
+5. **AI Agent 进驻与双模策展反写中心 (AI Workbench & Curation)**：内驻 Magpie Agent（复用本机 `127.0.0.1:3425` 网关与专属组 `group/omnidesk-active`）与外部入站 Agent（`control.sock` / `omnidesk-pm rpc` / MCP）共享唯一渐进式 Skill（[`.agents/skills/omnidesk-curation-writeback/SKILL.md`](.agents/skills/omnidesk-curation-writeback/SKILL.md)），自动克隆 [`ZJFILOVE/obsidian-vault`](https://github.com/ZJFILOVE/obsidian-vault) 与 [`ZJFILOVE/music-daily`](https://github.com/ZJFILOVE/music-daily) 回灌全量历史推荐，并用硬防火墙隔离 **「每日不重复精选（`daily_immutable`）」** 与 **「按需可重复推荐（`interactive_ephemeral`）」** 反写工作台与 Apple Music 歌单（严格失败关闭：禁止合成占位推荐，Apple Music 须经国区实时 `verified_ids` 预检，每日发布须具备匹配的 `PUBLISHED` 事务收据）。`context.collect.v1` 可把网页、电子书、字幕、语音转写和媒体源的白名单上下文收敛成有界 Markdown，供 `ai.agent.v1` 的 `context_refs` 自动引用；MCP 侧另有 `omnidesk_collect_context` / `omnidesk_recommend` / `omnidesk_download_book`。
 
 > 架构总览见 [ARCHITECTURE.md](ARCHITECTURE.md)；插件规范与标准 Capability 协议见 [PLUGIN_SPEC.md](PLUGIN_SPEC.md) 与 [docs/PLUGIN_INTERFACE_PROTOCOL.md](docs/PLUGIN_INTERFACE_PROTOCOL.md)；Web 社区统一登录与会话桥接见 [docs/WEB_AUTH_AND_SESSION_PROTOCOL.md](docs/WEB_AUTH_AND_SESSION_PROTOCOL.md)；AI 策展回灌与反写协议见 [docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md](docs/AI_AGENT_RECOMMENDATION_PROTOCOL.md)。
 
@@ -78,5 +78,7 @@ uv run omnidesk-pm reload plugin-demo
 uv run omnidesk-pm emit entity.recommend.updated '{"mode":"interactive_ephemeral","domains":["media"],"written_count":1}'
 uv run omnidesk-pm rpc recommend.feed.v1 '{"action":"bootstrap_and_rehydrate","pull_remote":true}'
 uv run omnidesk-pm rpc ai.curation.v1 '{"action":"curate_interactive","prompt":"来5首适合深夜写代码的器乐爵士，以前推过的也可以","sync_apple_music":"ephemeral_playlist"}'
-# 注：插件独立 python_dependencies 的自动隔离安装仍为 TODO；curate / rehydrate 等高层编排命令未纳入 CLI，需通过能力 RPC 调用。
+uv run omnidesk-pm rpc context.collect.v1 '{"items":[{"capability":"web.extract.v1","payload":{"url":"https://example.com"}}]}'
+uv run omnidesk-pm rpc book.source.v1 '{"action":"list_books"}' --provider plugin-pdf-babeldoc
+# 注：curate / rehydrate 已是一等 CLI 命令，无需手写 capability RPC。
 ```

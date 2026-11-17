@@ -47,6 +47,7 @@ from .errors import (
 )
 from .jobs import JobCenter
 from .manifest import PluginManifest, load_manifest, scaffold_plugin
+from .search import SearchIndex
 from .paths import OmnideskPaths, safe_child_path, validate_plugin_id
 from .registry import CapabilityRegistry, CapabilityResult as CoreCapabilityResult
 from .vault import SecretVault
@@ -332,7 +333,11 @@ class _DomainAdapter:
                 idx = self._anon_seq.get(plugin_id, 0) + 1
                 self._anon_seq[plugin_id] = idx
             sid = plugin_id if idx == 1 else f"{plugin_id}:{idx}"
-        self._core.register(kind, sid, source, plugin_id=plugin_id, replace=True)
+        try:
+            priority = int(getattr(source, "priority", 0) or 0)
+        except (TypeError, ValueError):
+            priority = 0
+        self._core.register(kind, sid, source, plugin_id=plugin_id, priority=priority, replace=True)
         return source
 
     def register_media_source(self, plugin_id: str, source: Any) -> Any:
@@ -609,6 +614,7 @@ class PluginManager:
         capabilities: CapabilityRegistry | None = None,
         domains: DomainRegistry | None = None,
         jobs: JobCenter | None = None,
+        search: SearchIndex | None = None,
         config_store: ConfigStore | None = None,
         secret_vault: SecretVault | None = None,
         isolate_errors: bool = False,
@@ -622,6 +628,7 @@ class PluginManager:
         )
         self.domains = domains or DomainRegistry()
         self.jobs = jobs or JobCenter(bus=self.bus, secret_provider=self.secret_vault.secret_values)
+        self.search = search
         self.config_store = config_store or ConfigStore(self.paths.config_dir)
         self._cap_adapter = _CapabilityAdapter(self.capabilities)
         self._domain_adapter = _DomainAdapter(self.domains)
@@ -828,6 +835,25 @@ class PluginManager:
         self.bus.unsubscribe_plugin(plugin_id)
         await self.jobs.cancel_plugin(plugin_id, reason="plugin unloaded")
         _purge_plugin_modules(f"{_PKG_NAMESPACE}.{_pkg_ident(plugin_id)}", plugin_dir, owned_mods)
+        env_site = self._plugin_env_site_packages(plugin_id)
+        if env_site is not None:
+            try:
+                sys.path.remove(str(env_site))
+            except ValueError:
+                pass
+
+    def _plugin_env_site_packages(self, plugin_id: str) -> Path | None:
+        """Resolve an isolated ``python-env`` site-packages directory created by the installer."""
+        env_json = self.paths.plugin_data_dir(plugin_id) / "python-env" / "env.json"
+        try:
+            payload = json.loads(env_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        site = payload.get("site_packages") if isinstance(payload, Mapping) else None
+        if not isinstance(site, str) or not site.strip():
+            return None
+        candidate = Path(site)
+        return candidate if candidate.is_dir() else None
 
     async def _load_unlocked(
         self, plugin_dir: Path, *, is_reload: bool = False, isolate: bool = False, prev_reloads: int = 0
@@ -854,12 +880,17 @@ class PluginManager:
             capabilities=self._cap_adapter,
             bus=self.bus,
             domains=self._domain_adapter,
+            jobs=self.jobs,
+            search=self.search,
             config_store=self.config_store,
             secret_vault=self.secret_vault,
             config_schema=[f.model_dump() for f in manifest.config_schema],
             secret_keys=manifest.secret_keys(),
         )
         owned_mods: set[str] = set()
+        env_site = self._plugin_env_site_packages(pid)
+        if env_site is not None and str(env_site) not in sys.path:
+            sys.path.insert(0, str(env_site))
         try:
             factory, owned_mods = _import_plugin_instance(manifest, plugin_dir)
             instance = factory()

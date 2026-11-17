@@ -55,7 +55,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <span
             data-testid="ai-gateway-badge"
-            className="rounded-full px-2.5 py-1 font-mono text-[12px] font-medium"
+            className="rounded-full px-2.5 py-1 font-mono text-[13.5px] font-medium"
             style={{
               backgroundColor: !ctrl.tauriAvailable
                 ? 'var(--status-warn-bg)'
@@ -84,7 +84,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
             selected={drawerOpen}
             tone="core"
             surface="soft"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[14px] font-medium"
           >
             <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
             <span>{drawerOpen ? '收起路由与账本' : '路由与账本'}</span>

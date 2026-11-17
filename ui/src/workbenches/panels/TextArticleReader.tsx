@@ -125,7 +125,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
       {/* Magazine / Journal Editorial Masthead */}
       <header className="flex flex-col gap-4 border-b pb-6" style={{ borderColor: HAIRLINE_BORDER }}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+          <div className="flex flex-wrap items-center gap-2 text-[14px]">
             <span className="font-semibold tracking-wide uppercase" style={{ color: 'var(--domain-text)' }}>
               {article.sourceName}
             </span>
@@ -148,20 +148,20 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
         </div>
 
         <div className="pt-1">
-          <h2 className="omni-editorial-title text-[26px] leading-[1.32] font-bold text-[var(--text-primary)] sm:text-[28px]">
+          <h2 className="omni-editorial-title text-[26px] leading-[1.32] font-bold text-[var(--text-primary)] sm:text-[30px]">
             {article.titleZh}
           </h2>
-          <p className="mt-2 font-serif text-[15.5px] leading-[1.55] italic text-[var(--text-muted)]">
+          <p className="mt-2 font-serif text-[17px] leading-[1.55] italic text-[var(--text-muted)]">
             {article.title}
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-[var(--text-muted)]">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[14.5px] text-[var(--text-muted)]">
           <span>作者：{article.author}</span>
           {article.journalName ? <span>刊物：{article.journalName}</span> : null}
           {article.impactScore ? <span>{article.impactScore}</span> : null}
           {article.doi ? (
-            <span className="font-mono text-[12px] text-[var(--text-subtle)]">DOI {article.doi}</span>
+            <span className="font-mono text-[13.5px] text-[var(--text-subtle)]">DOI {article.doi}</span>
           ) : null}
         </div>
 
@@ -184,7 +184,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
               onFocus={onFocus}
               onActivate={onSendToBabelDoc}
               surface="soft"
-              className="px-3 py-1.5 text-[12.5px] font-medium"
+              className="px-3 py-1.5 text-[14px] font-medium"
             >
               转交 BabelDOC
             </FocusButton>
@@ -195,7 +195,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
               onActivate={onOpenChromeApp}
               selected
               tone="text"
-              className="px-3 py-1.5 text-[12.5px] font-medium"
+              className="px-3 py-1.5 text-[14px] font-medium"
             >
               Chrome --app 阅读
             </FocusButton>

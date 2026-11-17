@@ -105,7 +105,7 @@ export function AppShell({
             {/* Brand Lockup inside Sunken Rail */}
             <div className="flex items-center justify-center md:justify-start gap-2.5 px-1.5 pt-0.5">
               <span
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-[13px] font-bold"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-[14.5px] font-bold"
                 style={{
                   backgroundColor: `color-mix(in srgb, ${activeAccent} 14%, var(--bg-surface))`,
                   color: activeAccent,
@@ -116,10 +116,10 @@ export function AppShell({
                 万
               </span>
               <div className="hidden md:flex flex-col min-w-0 leading-none">
-                <span className="text-[14px] font-semibold tracking-tight text-ink">
+                <span className="text-[15.5px] font-semibold tracking-tight text-ink">
                   OmniDesk
                 </span>
-                <span className="mt-1 font-mono text-[11px] text-subtle">Atelier v2</span>
+                <span className="mt-1 font-mono text-[12.5px] text-subtle">Atelier v2</span>
               </div>
             </div>
 
@@ -164,7 +164,7 @@ export function AppShell({
                         <Icon className="h-4 w-4" aria-hidden="true" />
                       </span>
                       <span
-                        className={`hidden md:block truncate text-[13.5px] leading-tight ${
+                        className={`hidden md:block truncate text-[15px] leading-tight ${
                           isCurrent ? 'font-semibold text-ink' : 'font-medium text-ink-secondary'
                         }`}
                       >
@@ -188,7 +188,7 @@ export function AppShell({
 
           {/* Quiet Theme & Dock Status */}
           <div
-            className="hidden md:flex flex-col gap-1.5 pt-3 px-2 text-[12px] text-muted"
+            className="hidden md:flex flex-col gap-1.5 pt-3 px-2 text-[13.5px] text-muted"
             style={{ borderTop: '1px solid var(--border-subtle)' }}
           >
             <div className="flex items-center justify-between gap-1.5">
@@ -201,7 +201,7 @@ export function AppShell({
                 aria-hidden="true"
               />
             </div>
-            <div className="flex items-center justify-between text-[12px] text-subtle">
+            <div className="flex items-center justify-between text-[13.5px] text-subtle">
               <span>伴读停靠</span>
               <span>{dockLayout === 'side' ? '右侧' : '底部'}</span>
             </div>
@@ -220,10 +220,10 @@ export function AppShell({
                 style={{ backgroundColor: activeAccent }}
                 aria-hidden="true"
               />
-              <span className="text-[13px] font-semibold text-ink md:hidden truncate">
+              <span className="text-[14.5px] font-semibold text-ink md:hidden truncate">
                 {activeMeta.label}
               </span>
-              <span className="hidden md:inline-flex items-center gap-2 text-[12.5px] text-muted truncate">
+              <span className="hidden md:inline-flex items-center gap-2 text-[14px] text-muted truncate">
                 <span
                   className="h-1.5 w-1.5 rounded-full shrink-0"
                   style={{ backgroundColor: activeAccent }}
@@ -249,7 +249,7 @@ export function AppShell({
                 label="打开命令面板 (Ctrl+K)"
                 priority={5}
                 onActivate={onOpenPalette}
-                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[14px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
               >
                 <Command className="h-3.5 w-3.5 text-muted" aria-hidden="true" />
                 <span className="hidden sm:inline">命令</span>
@@ -263,7 +263,7 @@ export function AppShell({
                 label="屏幕焦点闪跳提示 (f)"
                 priority={4}
                 onActivate={onTriggerHints}
-                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[14px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
               >
                 <Crosshair className="h-3.5 w-3.5 text-muted" aria-hidden="true" />
                 <span className="hidden md:inline">闪跳</span>
@@ -278,7 +278,7 @@ export function AppShell({
                 priority={3}
                 onActivate={onToggleDock}
                 aria-pressed={dockOpen}
-                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[14px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
                 style={
                   dockOpen
                     ? {
@@ -306,7 +306,7 @@ export function AppShell({
                 label="切换 Paper / Graphite 主题 (t / Alt+T)"
                 priority={2}
                 onActivate={onToggleTheme}
-                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[14px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
               >
                 {theme === 'paper' ? (
                   <Sun className="h-3.5 w-3.5 text-muted" aria-hidden="true" />
@@ -327,7 +327,7 @@ export function AppShell({
                   label="查看快捷键帮助 (?)"
                   priority={1}
                   onActivate={onToggleHelp}
-                  className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[14px] font-medium text-ink-secondary hover:bg-[var(--hover-fill)] hover:text-ink cursor-pointer transition-colors"
                 >
                   <HelpCircle className="h-3.5 w-3.5 text-muted" aria-hidden="true" />
                   <span className="hidden lg:inline">快捷键</span>

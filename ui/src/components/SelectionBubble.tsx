@@ -331,7 +331,7 @@ export const SelectionBubble: React.FC<SelectionBubbleProps> = ({
             onMouseDown={(e) => e.preventDefault()}
             onMouseEnter={() => setActiveIndex(idx)}
             onClick={() => executeAction(item.id)}
-            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12px] font-medium transition-colors ${
+            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[13.5px] font-medium transition-colors ${
               isActive ? 'omni-focus-ring' : 'hover:bg-[var(--hover-fill)]'
             }`}
             style={{

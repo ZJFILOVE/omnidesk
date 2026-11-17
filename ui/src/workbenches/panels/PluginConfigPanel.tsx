@@ -41,13 +41,13 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
 
   const renderFieldHeader = (field: ConfigFieldSchema, fieldFocusId: string) => (
     <div className="flex items-center justify-between gap-2">
-      <label htmlFor={fieldFocusId} className="text-[13px] font-semibold text-[var(--text-primary)]">
+      <label htmlFor={fieldFocusId} className="text-[14.5px] font-semibold text-[var(--text-primary)]">
         {field.label}
         {field.required ? (
           <span style={{ color: 'var(--status-err-fg, #AA1D33)' }}> *</span>
         ) : null}
       </label>
-      <span className="font-mono text-[12px] text-[var(--text-subtle)]">{field.key}</span>
+      <span className="font-mono text-[13.5px] text-[var(--text-subtle)]">{field.key}</span>
     </div>
   );
 
@@ -68,7 +68,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
             {...focusableInputProps(fieldFocusId, activeFocusId, onFocus)}
             className={focusClass(
               activeFocusId === fieldFocusId,
-              'w-full rounded-[10px] border px-3 py-2 font-mono text-[13px]',
+              'w-full rounded-[10px] border px-3 py-2 font-mono text-[14.5px]',
             )}
             style={{
               backgroundColor: 'var(--bg-canvas, #F6F5F3)',
@@ -95,7 +95,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
             {...focusableInputProps(fieldFocusId, activeFocusId, onFocus)}
             className={focusClass(
               activeFocusId === fieldFocusId,
-              'w-full rounded-[10px] border px-3 py-2 font-mono text-[13px]',
+              'w-full rounded-[10px] border px-3 py-2 font-mono text-[14.5px]',
             )}
             style={{
               backgroundColor: 'var(--bg-canvas, #F6F5F3)',
@@ -113,7 +113,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
             {...focusableInputProps(fieldFocusId, activeFocusId, onFocus)}
             className={focusClass(
               activeFocusId === fieldFocusId,
-              'w-full rounded-[10px] border px-3 py-2 font-mono text-[13px]',
+              'w-full rounded-[10px] border px-3 py-2 font-mono text-[14.5px]',
             )}
             style={{
               backgroundColor: 'var(--bg-canvas, #F6F5F3)',
@@ -124,7 +124,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
         )}
 
         {field.description ? (
-          <p className="text-[12px] leading-[1.6] text-[var(--text-muted)]">
+          <p className="text-[13.5px] leading-[1.6] text-[var(--text-muted)]">
             {field.description}
           </p>
         ) : null}
@@ -154,7 +154,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
           {/* Group 1: General & Connection Parameters */}
           {generalFields.length > 0 ? (
             <section aria-label="常规与连接参数" className="flex flex-col gap-3.5">
-              <div className="text-[12.5px] font-semibold tracking-wide text-[var(--text-muted)]">
+              <div className="text-[14px] font-semibold tracking-wide text-[var(--text-muted)]">
                 常规与连接参数
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -171,7 +171,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
               style={{ backgroundColor: 'var(--bg-canvas)' }}
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-[var(--text-primary)]">
+                <span className="inline-flex items-center gap-1.5 text-[14px] font-semibold text-[var(--text-primary)]">
                   <Lock className="h-3.5 w-3.5 text-[var(--domain-core)]" aria-hidden="true" />
                   <span>安全凭据与令牌</span>
                 </span>
@@ -202,7 +202,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
                           {...focusableInputProps(fieldFocusId, activeFocusId, onFocus)}
                           className={focusClass(
                             activeFocusId === fieldFocusId,
-                            'min-w-0 flex-1 rounded-[10px] border px-3 py-2 font-mono text-[13px]',
+                            'min-w-0 flex-1 rounded-[10px] border px-3 py-2 font-mono text-[14.5px]',
                           )}
                           style={{
                             backgroundColor: 'var(--bg-surface)',
@@ -216,13 +216,13 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
                           onFocus={onFocus}
                           onActivate={() => onToggleSecretReveal(secretKey)}
                           surface="soft"
-                          className="shrink-0 px-3 py-2 text-[12px] font-medium"
+                          className="shrink-0 px-3 py-2 text-[13.5px] font-medium"
                         >
                           {isRevealed ? '隐藏' : '显示'}
                         </FocusButton>
                       </div>
                       {field.description ? (
-                        <p className="text-[12px] leading-[1.6] text-[var(--text-muted)]">
+                        <p className="text-[13.5px] leading-[1.6] text-[var(--text-muted)]">
                           {field.description}
                         </p>
                       ) : null}
@@ -236,7 +236,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
           {/* Group 3: Feature Toggles & Policies */}
           {toggleFields.length > 0 ? (
             <section aria-label="行为开关与策略" className="flex flex-col gap-2.5">
-              <div className="text-[12.5px] font-semibold tracking-wide text-[var(--text-muted)]">
+              <div className="text-[14px] font-semibold tracking-wide text-[var(--text-muted)]">
                 行为开关与策略
               </div>
               <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
@@ -259,14 +259,14 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
                       className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-left"
                     >
                       <span className="min-w-0">
-                        <span className="block truncate text-[13px] font-semibold">
+                        <span className="block truncate text-[14.5px] font-semibold">
                           {field.label}
                         </span>
-                        <span className="block font-mono text-[12px] opacity-75">
+                        <span className="block font-mono text-[13.5px] opacity-75">
                           {field.key}
                         </span>
                       </span>
-                      <span className="shrink-0 font-mono text-[12px] font-semibold">
+                      <span className="shrink-0 font-mono text-[13.5px] font-semibold">
                         {checked ? '已开启' : '已关闭'}
                       </span>
                     </FocusButton>
@@ -288,7 +288,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
           onFocus={onFocus}
           onActivate={onReset}
           surface="soft"
-          className="px-4 py-2 text-[12.5px] font-medium"
+          className="px-4 py-2 text-[14px] font-medium"
         >
           重置默认
         </FocusButton>
@@ -299,7 +299,7 @@ export const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
           onActivate={onSave}
           selected
           tone="core"
-          className="px-5 py-2 text-[13px] font-semibold"
+          className="px-5 py-2 text-[14.5px] font-semibold"
         >
           保存配置 (0600)
         </FocusButton>

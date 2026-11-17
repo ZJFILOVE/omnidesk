@@ -228,10 +228,10 @@ export function CommandPalette({
                 ? `omni-cmd-${filteredCommands[activeIndex].id}`
                 : undefined
             }
-            className="w-full bg-transparent text-[14.5px] text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
+            className="w-full bg-transparent text-[16px] text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
           />
           {ime.isComposing && (
-            <span className="shrink-0 rounded-full bg-[var(--status-info-bg)] px-2.5 py-0.5 text-[12px] font-medium text-[var(--status-info-fg)]">
+            <span className="shrink-0 rounded-full bg-[var(--status-info-bg)] px-2.5 py-0.5 text-[13.5px] font-medium text-[var(--status-info-fg)]">
               IME
             </span>
           )}
@@ -247,7 +247,7 @@ export function CommandPalette({
         </div>
 
         {(activeWorkbench || theme || typeof dockOpen === 'boolean') && (
-          <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-sunken)]/55 px-5 py-2 text-[12px] text-[var(--text-muted)]">
+          <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-sunken)]/55 px-5 py-2 text-[13.5px] text-[var(--text-muted)]">
             {activeWorkbench && <span>当前工作台：{activeWorkbench}</span>}
             {theme && <span>主题：{theme}</span>}
             {typeof dockOpen === 'boolean' && (
@@ -258,7 +258,7 @@ export function CommandPalette({
 
         <div role="listbox" aria-label="可用命令列表" className="max-h-[54vh] overflow-y-auto p-2.5">
           {filteredCommands.length === 0 ? (
-            <div className="px-4 py-10 text-center text-[14px] text-[var(--text-muted)]">
+            <div className="px-4 py-10 text-center text-[15.5px] text-[var(--text-muted)]">
               未找到匹配“{query}”的命令
             </div>
           ) : (
@@ -289,15 +289,15 @@ export function CommandPalette({
                     />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-[14px] font-medium text-[var(--text-primary)]">
+                        <span className="truncate text-[15.5px] font-medium text-[var(--text-primary)]">
                           {cmd.title}
                         </span>
-                        <span className="shrink-0 rounded-full bg-[var(--bg-soft)] px-2.5 py-0.5 text-[12px] text-[var(--text-muted)]">
+                        <span className="shrink-0 rounded-full bg-[var(--bg-soft)] px-2.5 py-0.5 text-[13.5px] text-[var(--text-muted)]">
                           {CATEGORY_LABELS[cmd.category]}
                         </span>
                       </div>
                       {cmd.subtitle && (
-                        <p className="mt-0.5 truncate text-[12.5px] text-[var(--text-muted)]">
+                        <p className="mt-0.5 truncate text-[14px] text-[var(--text-muted)]">
                           {cmd.subtitle}
                         </p>
                       )}
@@ -306,7 +306,7 @@ export function CommandPalette({
 
                   <div className="flex shrink-0 items-center gap-2">
                     {cmd.shortcut && (
-                      <kbd className="omni-keycap rounded-[5px] px-1.5 py-0.5 text-[12px]">
+                      <kbd className="omni-keycap rounded-[5px] px-1.5 py-0.5 text-[13.5px]">
                         {cmd.shortcut}
                       </kbd>
                     )}
@@ -320,7 +320,7 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-[var(--border-subtle)] bg-[var(--bg-sunken)]/55 px-5 py-2 text-[12px] text-[var(--text-muted)]">
+        <div className="flex items-center justify-between border-t border-[var(--border-subtle)] bg-[var(--bg-sunken)]/55 px-5 py-2 text-[13.5px] text-[var(--text-muted)]">
           <span className="inline-flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" aria-hidden="true" />
             <span>↑↓ 导航 · Enter 执行 · Esc 关闭</span>

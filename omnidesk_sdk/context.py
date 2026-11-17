@@ -146,6 +146,8 @@ class PluginContext:
         capabilities: Any = None,
         bus: Any = None,
         domains: Any = None,
+        jobs: Any = None,
+        search: Any = None,
         config_store: Any = None,
         secret_vault: Any = None,
         config_schema: Iterable[Any] | None = None,
@@ -161,6 +163,8 @@ class PluginContext:
         self._capabilities = capabilities if capabilities is not None else InMemoryCapabilityRegistry()
         self._bus = bus if bus is not None else InMemoryEntityBus()
         self._domains = domains if domains is not None else InMemoryDomainRegistry()
+        self._jobs = jobs
+        self._search = search
         self._config_store = config_store if config_store is not None else LocalConfigStore(config_dir)
         self._secret_vault = secret_vault if secret_vault is not None else LocalSecretVault(config_dir)
         self._config_schema = list(config_schema) if config_schema is not None else None
@@ -197,6 +201,16 @@ class PluginContext:
     @property
     def bus(self) -> Any:
         return self._bus
+
+    @property
+    def jobs(self) -> Any:
+        """Background job center injected by the core runtime (``None`` in bare unit tests)."""
+        return self._jobs
+
+    @property
+    def search(self) -> Any:
+        """Full-text search index injected by the core runtime (``None`` in bare unit tests)."""
+        return self._search
 
     @property
     def domains(self) -> Any:

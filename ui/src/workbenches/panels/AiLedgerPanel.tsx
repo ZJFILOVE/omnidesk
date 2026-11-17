@@ -25,7 +25,7 @@ export const AiLedgerPanel: React.FC<AiLedgerPanelProps> = ({
 }) => (
   <div className="flex flex-col gap-5 p-4.5">
     <EditorialCallout domain="core" title="双模反写防火墙">
-      <div className="flex flex-col gap-1 font-mono text-[12px] text-[var(--text-muted)]">
+      <div className="flex flex-col gap-1 font-mono text-[13.5px] text-[var(--text-muted)]">
         <div>模式：{curationMode}</div>
         <div>
           历史账本：
@@ -52,7 +52,7 @@ export const AiLedgerPanel: React.FC<AiLedgerPanelProps> = ({
               onFocus={onFocus}
               onActivate={onClearPinned}
               surface="soft"
-              className="px-2.5 py-1 text-[12px]"
+              className="px-2.5 py-1 text-[13.5px]"
             >
               清空
             </FocusButton>
@@ -76,9 +76,9 @@ export const AiLedgerPanel: React.FC<AiLedgerPanelProps> = ({
             onFocus={onFocus}
             onActivate={() => onTogglePinCard(card)}
             surface="canvas"
-            className="p-3.5 text-left text-[13px]"
+            className="p-3.5 text-left text-[14.5px]"
           >
-            <div className="flex items-center justify-between font-mono text-[12px]">
+            <div className="flex items-center justify-between font-mono text-[13.5px]">
               <span style={{ color: 'var(--domain-core)' }}>{card.domain}</span>
               <span className="text-[var(--text-muted)]">移除 ×</span>
             </div>
@@ -93,7 +93,7 @@ export const AiLedgerPanel: React.FC<AiLedgerPanelProps> = ({
       {auditLogs.map((log, idx) => (
         <div
           key={`log-${idx}`}
-          className="rounded-[10px] px-3 py-2 font-mono text-[12px] leading-[1.6]"
+          className="rounded-[10px] px-3 py-2 font-mono text-[13.5px] leading-[1.6]"
           style={{
             backgroundColor: 'var(--bg-canvas)',
             color: 'var(--text-muted)',

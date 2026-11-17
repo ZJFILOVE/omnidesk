@@ -113,14 +113,14 @@ export const ContentCard: React.FC<ContentCardProps> = ({
           <div className="relative flex h-full flex-col justify-between p-3 text-white">
             <div className="flex items-start justify-between gap-2">
               {coverTag ? (
-                <span className="rounded bg-black/50 px-2 py-0.5 font-mono text-[10px] font-medium tracking-wide backdrop-blur-xs">
+                <span className="rounded bg-black/50 px-2 py-0.5 font-mono text-[11.5px] font-medium tracking-wide backdrop-blur-xs">
                   {coverTag}
                 </span>
               ) : (
                 <span />
               )}
               {meta ? (
-                <span className="rounded bg-black/60 px-2 py-0.5 font-mono text-[10px] font-semibold">
+                <span className="rounded bg-black/60 px-2 py-0.5 font-mono text-[11.5px] font-semibold">
                   {meta}
                 </span>
               ) : null}
@@ -145,7 +145,7 @@ export const ContentCard: React.FC<ContentCardProps> = ({
           <div className="flex flex-wrap items-center gap-1.5">
             {badge ? (
               <span
-                className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium"
+                className="inline-flex items-center rounded px-1.5 py-0.5 text-[11.5px] font-medium"
                 style={{ backgroundColor: badgeStyle.bg, color: badgeStyle.fg }}
               >
                 {badge}
@@ -153,7 +153,7 @@ export const ContentCard: React.FC<ContentCardProps> = ({
             ) : null}
             {secondaryBadge ? (
               <span
-                className="inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[10px]"
+                className="inline-flex items-center rounded px-1.5 py-0.5 font-mono text-[11.5px]"
                 style={{
                   backgroundColor: 'var(--bg-soft, #F1EFEC)',
                   color: 'var(--text-muted, #66625D)',
@@ -165,7 +165,7 @@ export const ContentCard: React.FC<ContentCardProps> = ({
           </div>
         )}
 
-        <h3 className="line-clamp-2 text-[13.5px] leading-snug font-semibold">
+        <h3 className="line-clamp-2 text-[15px] leading-snug font-semibold">
           {title}
         </h3>
 
@@ -191,7 +191,7 @@ export const ContentCard: React.FC<ContentCardProps> = ({
 
         {footer ? (
           <div
-            className="mt-auto flex items-center justify-between gap-2 border-t pt-2 text-[11px]"
+            className="mt-auto flex items-center justify-between gap-2 border-t pt-2 text-[12.5px]"
             style={{
               borderColor: 'var(--border-line, rgba(36, 33, 29, 0.12))',
               color: 'var(--text-muted, #66625D)',

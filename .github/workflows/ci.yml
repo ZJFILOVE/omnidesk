@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Core + plugins (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Core tests
+        run: uv run pytest -q tests
+      - name: Plugin tests and manifest verification
+        run: |
+          set -euo pipefail
+          for dir in plugins/*/; do
+            [ -d "$dir/tests" ] || continue
+            uv run pytest -q "$dir/tests"
+            uv run omnidesk-pm verify "$dir"
+          done
+
+  ui:
+    name: UI (vitest + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm test -- --run
+      - run: npm run build
+
+  rust:
+    name: Native shell (cargo test + embedded libmpv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libmpv-dev ffmpeg \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Build frontend assets
+        run: |
+          npm ci --prefix ui
+          npm run build --prefix ui
+      - name: Cargo tests
+        run: cargo test --manifest-path shell-tauri/Cargo.toml
+      - name: Embedded libmpv renders real frames
+        env:
+          OMNIDESK_MPV_E2E: "1"
+          OMNIDESK_MPV_NULL_AUDIO: "1"
+        run: |
+          cargo test --manifest-path shell-tauri/Cargo.toml \
+            embedded_mpv_renders_real_frames -- --nocapture

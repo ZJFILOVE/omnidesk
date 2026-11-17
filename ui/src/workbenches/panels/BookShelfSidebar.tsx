@@ -66,7 +66,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
           widthClass="w-72"
         />
       ) : (
-        <span className="text-[12.5px] text-[var(--text-muted)]">
+        <span className="text-[14px] text-[var(--text-muted)]">
           2:3 书脊封面墙 · 选中书卷即进入双栏对照
         </span>
       )}
@@ -107,13 +107,13 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
                 }}
               >
                 <div className="flex items-center justify-between">
-                  <span className="rounded bg-black/45 px-1.5 py-0.5 font-mono text-[11px] uppercase">
+                  <span className="rounded bg-black/45 px-1.5 py-0.5 font-mono text-[12.5px] uppercase">
                     {book.format}
                   </span>
                   {isSelected ? <BookOpen className="h-3.5 w-3.5 text-white/90" aria-hidden="true" /> : null}
                 </div>
                 <div>
-                  <div className="line-clamp-3 text-[12.5px] leading-snug font-semibold">
+                  <div className="line-clamp-3 text-[14px] leading-snug font-semibold">
                     {book.title}
                   </div>
                   <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-black/30">
@@ -126,10 +126,10 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
               </div>
 
               <div className="px-0.5">
-                <div className="line-clamp-1 text-[12.5px] font-semibold text-[var(--text-primary)]">
+                <div className="line-clamp-1 text-[14px] font-semibold text-[var(--text-primary)]">
                   {book.badge}
                 </div>
-                <div className="line-clamp-1 text-[12px] text-[var(--text-muted)]">
+                <div className="line-clamp-1 text-[13.5px] text-[var(--text-muted)]">
                   {book.language} · {book.progressPct}%
                 </div>
               </div>
@@ -163,7 +163,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
             surface="surface"
             className="flex flex-col gap-1.5 p-4 text-left"
           >
-            <div className="flex items-center justify-between text-[12px]">
+            <div className="flex items-center justify-between text-[13.5px]">
               <span className="font-mono font-semibold" style={{ color: 'var(--domain-book)' }}>
                 {entry.format.toUpperCase()} · {entry.sizeLabel}
               </span>
@@ -172,10 +172,10 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
                 <span>导入书架</span>
               </span>
             </div>
-            <div className="text-[14px] font-semibold text-[var(--text-primary)]">
+            <div className="text-[15.5px] font-semibold text-[var(--text-primary)]">
               {entry.title}
             </div>
-            <div className="text-[12.5px] text-[var(--text-muted)]">{entry.author}</div>
+            <div className="text-[14px] text-[var(--text-muted)]">{entry.author}</div>
           </FocusButton>
         ))}
       </div>

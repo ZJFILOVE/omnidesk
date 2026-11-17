@@ -93,13 +93,13 @@
   --hljs-builtin: #6D28D9;
 
   /* Type Scale, Measure, Spacing & Radii */
-  --type-xs: 12px;
-  --type-sm: 13px;
-  --type-base: 14.5px;
-  --type-prose: 16px;
-  --type-lg: 18px;
-  --type-xl: 22px;
-  --type-editorial: 27px;
+  --type-xs: 13.5px;
+  --type-sm: 14.5px;
+  --type-base: 16px;
+  --type-prose: 17.5px;
+  --type-lg: 20px;
+  --type-xl: 24px;
+  --type-editorial: 29px;
 
   --leading-ui: 1.5;
   --leading-prose: 1.78;

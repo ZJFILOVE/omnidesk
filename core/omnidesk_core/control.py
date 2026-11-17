@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -24,17 +25,21 @@ from .config import ConfigStore, DEFAULT_SECRET_KEYS, ensure_private_dir
 from .domain import DomainRegistry
 from .errors import (
     CapabilityNotFoundError,
+    DomainSourceNotFoundError,
     ErrorCode,
     InvalidArgumentError,
     InvalidCapabilityIdError,
+    JobError,
     OmniDeskError,
     PathSafetyError,
     PluginError,
     redact_secrets,
 )
+from .jobs import JobCenter
 from .paths import OmnideskPaths, validate_plugin_id
 from .plugins import PluginManager
 from .registry import CapabilityRegistry, CapabilityResult, parse_capability_id
+from .search import SearchDocument, SearchIndex
 from .vault import SecretVault
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,28 @@ _SECRET_KEY_NAME_RE = re.compile(
     r"authorization)\Z"
 )
 _RESERVED_NATIVE_PARAMS = frozenset({"id", "op", "method", "caller", "params"})
+
+#: Methods a workbench may invoke on a registered domain source. Each entry lists the
+#: keyword arguments accepted from the caller's ``payload``; unknown keys are rejected so
+#: typos surface as ``invalid_argument`` instead of being silently dropped.
+_DOMAIN_METHOD_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
+    "media": {
+        "categories": (),
+        "fetch_items": ("category", "query", "page", "force_refresh"),
+        "fetch_chapters": ("item_id",),
+        "fetch_lyrics": ("item_id",),
+    },
+    "text": {
+        "channels": (),
+        "fetch_feed": ("channel_id", "query", "page", "force_refresh"),
+        "fetch_article": ("article_id",),
+    },
+    "book": {
+        "list_books": ("format_filter", "query"),
+        "fetch_spread": ("book_id", "page_number"),
+        "list_vocab": (),
+    },
+}
 
 _JSONRPC_CODES: dict[str, int] = {
     "invalid_json": -32700,
@@ -368,6 +395,8 @@ class ControlServer:
         bus: EntityBus | None = None,
         plugins: PluginManager | None = None,
         domains: DomainRegistry | None = None,
+        jobs: JobCenter | None = None,
+        search: SearchIndex | None = None,
         config_store: ConfigStore | None = None,
         secret_vault: SecretVault | None = None,
         secret_provider: Callable[[], Iterable[str]] | None = None,
@@ -382,6 +411,8 @@ class ControlServer:
         self._bus = bus or (plugins.bus if plugins is not None else EntityBus())
         self._capabilities = capabilities or (plugins.capabilities if plugins is not None else CapabilityRegistry(bus=self._bus))
         self._domains = domains or (plugins.domains if plugins is not None else DomainRegistry())
+        self._jobs = jobs or (plugins.jobs if plugins is not None else JobCenter(bus=self._bus))
+        self._search = search or (plugins.search if plugins is not None else None)
         self._config_store = config_store or (plugins.config_store if plugins is not None else ConfigStore(self._paths.config_dir))
         self._secret_vault = secret_vault or (plugins.secret_vault if plugins is not None else SecretVault(paths=self._paths))
         self._secret_provider = secret_provider or self._secret_vault.secret_values
@@ -392,6 +423,7 @@ class ControlServer:
         self._server: asyncio.AbstractServer | None = None
         self._stop_event = asyncio.Event()
         self._client_tasks: set[asyncio.Task[Any]] = set()
+        self._job_handlers: dict[str, Any] = {}
 
     @property
     def socket_path(self) -> Path:
@@ -1011,8 +1043,17 @@ class ControlServer:
             payload = params.get("payload", params.get("request", {}))
             if payload is not None and not isinstance(payload, Mapping):
                 return self._error_envelope(req_id, "Capability 'payload' must be a JSON object", error_code=ErrorCode.INVALID_ARGUMENT, jsonrpc=is_jsonrpc)
+            provider = params.get("provider_plugin_id") or raw_req.get("provider_plugin_id")
+            if provider is not None and not isinstance(provider, str):
+                return self._error_envelope(req_id, "'provider_plugin_id' must be a string", error_code=ErrorCode.INVALID_ARGUMENT, jsonrpc=is_jsonrpc)
             try:
-                res = await self._capabilities.call(cap_id.strip(), payload or {}, timeout=params.get("timeout"), isolate_errors=True)
+                res = await self._capabilities.call(
+                    cap_id.strip(),
+                    payload or {},
+                    timeout=params.get("timeout"),
+                    isolate_errors=True,
+                    plugin_id=provider.strip() if isinstance(provider, str) and provider.strip() else None,
+                )
             except CapabilityNotFoundError as exc:
                 return self._error_envelope(req_id, exc.message, error_code=ErrorCode.CAPABILITY_NOT_FOUND, jsonrpc=is_jsonrpc, details=exc.details)
             except (InvalidCapabilityIdError, InvalidArgumentError) as exc:
@@ -1037,6 +1078,12 @@ class ControlServer:
             )
         if op == "domain.snapshot":
             return self._execute_domain_snapshot(req_id, params, is_jsonrpc)
+        if op == "domain.invoke":
+            return await self._execute_domain_invoke(req_id, params, is_jsonrpc)
+        if op.startswith("job."):
+            return await self._execute_job_op(op, req_id, params, is_jsonrpc)
+        if op.startswith("search."):
+            return await self._execute_search_op(op, req_id, params, is_jsonrpc)
         if op.startswith("config."):
             return self._execute_config_op(op, req_id, params, is_jsonrpc)
         if op.startswith("plugin."):
@@ -1068,6 +1115,447 @@ class ControlServer:
                 "dock_widgets": [],
             }
         return self._ok_envelope(req_id, snapshot, jsonrpc=is_jsonrpc)
+
+    def _resolve_domain_entry(
+        self,
+        domain: str,
+        source_id: str | None,
+    ) -> Any:
+        """Resolve a registered domain source by id, or the highest-priority source."""
+        if source_id is not None:
+            entry = self._domains.get(domain, source_id)
+            if entry is None:
+                raise DomainSourceNotFoundError(
+                    f"No source {source_id!r} registered for domain {domain!r}",
+                    domain=domain,
+                    source_id=source_id,
+                )
+            return entry
+        entries = self._domains.list_sources(domain)
+        if not entries:
+            raise DomainSourceNotFoundError(
+                f"No sources registered for domain {domain!r}",
+                domain=domain,
+            )
+        return entries[0]
+
+    async def _execute_domain_invoke(
+        self,
+        req_id: Any,
+        params: Mapping[str, Any],
+        is_jsonrpc: bool,
+    ) -> dict[str, Any]:
+        """Invoke one whitelisted method on a live workbench domain source."""
+        raw_domain = params.get("domain")
+        if not isinstance(raw_domain, str) or not raw_domain.strip():
+            return self._error_envelope(
+                req_id,
+                "Missing 'domain' for domain.invoke",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        domain = raw_domain.strip().lower()
+        specs = _DOMAIN_METHOD_SPECS.get(domain)
+        if specs is None:
+            return self._error_envelope(
+                req_id,
+                f"Unsupported domain {domain!r}; expected one of {sorted(_DOMAIN_METHOD_SPECS)}",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        raw_method = params.get("method")
+        if not isinstance(raw_method, str) or not raw_method.strip():
+            return self._error_envelope(
+                req_id,
+                "Missing 'method' for domain.invoke",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        method = raw_method.strip()
+        if method not in specs:
+            return self._error_envelope(
+                req_id,
+                f"Unsupported method {method!r} for domain {domain!r}; expected one of {sorted(specs)}",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        raw_sid = params.get("source_id")
+        if raw_sid is not None and not isinstance(raw_sid, str):
+            return self._error_envelope(
+                req_id,
+                "'source_id' must be a string",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        source_id = raw_sid.strip() if isinstance(raw_sid, str) else ""
+        if isinstance(raw_sid, str) and not source_id:
+            return self._error_envelope(
+                req_id,
+                "'source_id' must not be empty",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        payload = params.get("payload") or {}
+        if not isinstance(payload, Mapping):
+            return self._error_envelope(
+                req_id,
+                "'payload' must be a JSON object",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        allowed = specs[method]
+        kwargs = {key: payload[key] for key in allowed if key in payload}
+        unexpected = sorted(set(payload) - set(allowed))
+        if unexpected:
+            return self._error_envelope(
+                req_id,
+                f"Unsupported arguments for {domain}.{method}: {unexpected}",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        try:
+            entry = self._resolve_domain_entry(domain, source_id or None)
+        except DomainSourceNotFoundError as exc:
+            return self._error_envelope(
+                req_id,
+                exc.message,
+                error_code=exc.code,
+                jsonrpc=is_jsonrpc,
+                details=exc.details,
+            )
+        handler = getattr(entry.source, method, None)
+        if not callable(handler):
+            return self._error_envelope(
+                req_id,
+                f"Source {entry.source_id!r} does not implement {method!r}",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                provider_plugin_id=entry.plugin_id,
+                jsonrpc=is_jsonrpc,
+            )
+        raw_timeout = params.get("timeout", params.get("timeout_ms"))
+        try:
+            timeout = float(raw_timeout) if raw_timeout is not None else 30.0
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                req_id,
+                "'timeout' must be a number of seconds",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        if not math.isfinite(timeout) or timeout <= 0:
+            return self._error_envelope(
+                req_id,
+                "'timeout' must be a positive finite number",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        try:
+            if inspect.iscoroutinefunction(handler):
+                result = await asyncio.wait_for(handler(**kwargs), timeout=min(timeout, MAX_STREAM_TIMEOUT_SEC))
+            else:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(handler, **kwargs), timeout=min(timeout, MAX_STREAM_TIMEOUT_SEC)
+                )
+        except asyncio.TimeoutError:
+            return self._error_envelope(
+                req_id,
+                f"{domain}.{method} timed out after {timeout:g}s",
+                error_code=ErrorCode.TIMEOUT,
+                provider_plugin_id=entry.plugin_id,
+                jsonrpc=is_jsonrpc,
+            )
+        except OmniDeskError as exc:
+            return self._error_envelope(
+                req_id,
+                exc.message,
+                error_code=exc.code,
+                provider_plugin_id=entry.plugin_id,
+                jsonrpc=is_jsonrpc,
+                details=exc.details,
+            )
+        except Exception as exc:  # noqa: BLE001 - plugin faults must not kill the control server
+            logger.exception("Domain source %s/%s failed in %s", domain, entry.source_id, method)
+            return self._error_envelope(
+                req_id,
+                f"{domain}.{method} failed: {type(exc).__name__}: {exc}",
+                error_code=ErrorCode.PLUGIN_FAULT,
+                provider_plugin_id=entry.plugin_id,
+                jsonrpc=is_jsonrpc,
+            )
+        data = _sanitize_json_value(result, self._extra_secrets())
+        return self._ok_envelope(
+            req_id,
+            {
+                "domain": domain,
+                "source_id": entry.source_id,
+                "plugin_id": entry.plugin_id,
+                "method": method,
+                "result": data,
+            },
+            provider_plugin_id=entry.plugin_id,
+            jsonrpc=is_jsonrpc,
+        )
+
+    def register_job_handler(self, kind: str, handler: Callable[..., Any]) -> None:
+        """Register a callable that backs `job.submit` requests for ``kind``."""
+        if not isinstance(kind, str) or not kind.strip():
+            raise InvalidArgumentError("Job kind must be a non-empty string")
+        if not callable(handler):
+            raise InvalidArgumentError("Job handler must be callable")
+        self._job_handlers[kind.strip()] = handler
+
+    async def _execute_job_op(
+        self,
+        op: str,
+        req_id: Any,
+        params: Mapping[str, Any],
+        is_jsonrpc: bool,
+    ) -> dict[str, Any]:
+        """Serve `job.submit` / `job.list` / `job.get` / `job.cancel` control operations."""
+        try:
+            if op == "job.submit":
+                raw_kind = params.get("kind")
+                if not isinstance(raw_kind, str) or not raw_kind.strip():
+                    return self._error_envelope(
+                        req_id,
+                        "Missing 'kind' for job.submit",
+                        error_code=ErrorCode.INVALID_ARGUMENT,
+                        jsonrpc=is_jsonrpc,
+                    )
+                kind = raw_kind.strip()
+                payload = params.get("payload") or {}
+                if not isinstance(payload, Mapping):
+                    return self._error_envelope(
+                        req_id,
+                        "'payload' must be a JSON object",
+                        error_code=ErrorCode.INVALID_ARGUMENT,
+                        jsonrpc=is_jsonrpc,
+                    )
+                raw_cap = params.get("capability")
+                if raw_cap is not None and (not isinstance(raw_cap, str) or not raw_cap.strip()):
+                    return self._error_envelope(
+                        req_id,
+                        "'capability' must be a non-empty string",
+                        error_code=ErrorCode.INVALID_ARGUMENT,
+                        jsonrpc=is_jsonrpc,
+                    )
+                capability = raw_cap.strip() if isinstance(raw_cap, str) else ""
+                if capability:
+                    capability_payload = dict(payload)
+
+                    async def worker() -> Any:
+                        res = await self._capabilities.call(
+                            capability, capability_payload, isolate_errors=True
+                        )
+                        if not res.ok:
+                            raise OmniDeskError(
+                                res.error or f"Capability {capability!r} failed",
+                                code=str(res.data.get("error_code") or ErrorCode.PLUGIN_FAULT),
+                            )
+                        return res.data
+                else:
+                    handler = self._job_handlers.get(kind)
+                    if handler is None:
+                        return self._error_envelope(
+                            req_id,
+                            f"No handler registered for job kind {kind!r}; pass 'capability' or register one",
+                            error_code=ErrorCode.INVALID_ARGUMENT,
+                            jsonrpc=is_jsonrpc,
+                            details={"known_kinds": sorted(self._job_handlers)},
+                        )
+                    handler_payload = dict(payload)
+
+                    async def worker() -> Any:  # type: ignore[misc]
+                        result = handler(handler_payload)
+                        if inspect.isawaitable(result):
+                            result = await result
+                        return result
+                raw_plugin = params.get("plugin_id")
+                plugin_id = "core"
+                if raw_plugin is not None:
+                    if not isinstance(raw_plugin, str):
+                        return self._error_envelope(
+                            req_id,
+                            "'plugin_id' must be a string",
+                            error_code=ErrorCode.INVALID_ARGUMENT,
+                            jsonrpc=is_jsonrpc,
+                        )
+                    plugin_id = validate_plugin_id(raw_plugin)
+                record = await self._jobs.submit(
+                    kind,
+                    worker,
+                    title=str(params.get("title") or kind),
+                    plugin_id=plugin_id,
+                    total_steps=params.get("total_steps"),
+                    metadata=params.get("metadata") if isinstance(params.get("metadata"), Mapping) else None,
+                )
+                return self._ok_envelope(
+                    req_id,
+                    {"job": _sanitize_json_value(record.to_dict(), self._extra_secrets())},
+                    jsonrpc=is_jsonrpc,
+                )
+            if op == "job.list":
+                raw_plugin = params.get("plugin_id")
+                plugin_id = validate_plugin_id(raw_plugin) if isinstance(raw_plugin, str) else None
+                raw_status = params.get("status")
+                status = raw_status.strip().lower() if isinstance(raw_status, str) else None
+                raw_kind = params.get("kind")
+                kind = raw_kind.strip() if isinstance(raw_kind, str) else None
+                jobs = self._jobs.list_jobs(plugin_id=plugin_id, status=status or None, kind=kind or None)
+                data = [_sanitize_json_value(j.to_dict(), self._extra_secrets()) for j in jobs]
+                return self._ok_envelope(req_id, {"jobs": data, "count": len(data)}, jsonrpc=is_jsonrpc)
+            if op in {"job.get", "job.cancel"}:
+                raw_id = params.get("id") or params.get("job_id")
+                if not isinstance(raw_id, str) or not raw_id.strip():
+                    return self._error_envelope(
+                        req_id,
+                        "Missing 'id' for job operation",
+                        error_code=ErrorCode.INVALID_ARGUMENT,
+                        jsonrpc=is_jsonrpc,
+                    )
+                job_id = raw_id.strip()
+                if op == "job.get":
+                    record = self._jobs.require(job_id)
+                else:
+                    record = await self._jobs.cancel(job_id, reason=str(params.get("reason") or "cancelled"))
+                return self._ok_envelope(
+                    req_id,
+                    {"job": _sanitize_json_value(record.to_dict(), self._extra_secrets())},
+                    jsonrpc=is_jsonrpc,
+                )
+            return self._error_envelope(
+                req_id,
+                f"Unknown control operation: {op}",
+                error_code="unknown_operation",
+                jsonrpc=is_jsonrpc,
+            )
+        except JobError as exc:
+            return self._error_envelope(
+                req_id,
+                exc.message,
+                error_code=exc.code,
+                jsonrpc=is_jsonrpc,
+                details=exc.details,
+            )
+        except (InvalidArgumentError, ValueError) as exc:
+            return self._error_envelope(
+                req_id,
+                str(exc),
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+
+    async def _execute_search_op(
+        self,
+        op: str,
+        req_id: Any,
+        params: Mapping[str, Any],
+        is_jsonrpc: bool,
+    ) -> dict[str, Any]:
+        """Serve `search.query` / `search.upsert` / `search.delete` control operations."""
+        if self._search is None:
+            return self._error_envelope(
+                req_id,
+                "Full-text search index is not enabled in this runtime",
+                error_code=ErrorCode.NOT_CONFIGURED,
+                jsonrpc=is_jsonrpc,
+            )
+        try:
+            if op == "search.query":
+                raw_query = params.get("query") or params.get("q")
+                if not isinstance(raw_query, str) or not raw_query.strip():
+                    return self._error_envelope(
+                        req_id,
+                        "Missing 'query' for search.query",
+                        error_code=ErrorCode.INVALID_ARGUMENT,
+                        jsonrpc=is_jsonrpc,
+                    )
+                hits = await asyncio.to_thread(
+                    self._search.search,
+                    raw_query,
+                    domain=str(params.get("domain") or "") or None,
+                    source_id=str(params.get("source_id") or "") or None,
+                    plugin_id=str(params.get("plugin_id") or "") or None,
+                    kind=str(params.get("kind") or "") or None,
+                    limit=int(params.get("limit") or 20),
+                    offset=int(params.get("offset") or 0),
+                    match_any=bool(params.get("match_any", False)),
+                )
+                data = [_sanitize_json_value(h.to_dict(), self._extra_secrets()) for h in hits]
+                return self._ok_envelope(
+                    req_id,
+                    {"hits": data, "total": len(data), "backend": self._search.last_backend},
+                    jsonrpc=is_jsonrpc,
+                )
+            if op == "search.upsert":
+                raw_docs = params.get("documents")
+                if isinstance(raw_docs, Mapping):
+                    raw_docs = [raw_docs]
+                if not isinstance(raw_docs, Sequence) or isinstance(raw_docs, (str, bytes)):
+                    return self._error_envelope(
+                        req_id,
+                        "'documents' must be an array of objects",
+                        error_code=ErrorCode.INVALID_ARGUMENT,
+                        jsonrpc=is_jsonrpc,
+                    )
+                docs: list[SearchDocument] = []
+                for entry in raw_docs:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    doc_id = entry.get("doc_id") or entry.get("id")
+                    if not isinstance(doc_id, str) or not doc_id.strip():
+                        return self._error_envelope(
+                            req_id,
+                            "Every document needs a non-empty 'id' or 'doc_id'",
+                            error_code=ErrorCode.INVALID_ARGUMENT,
+                            jsonrpc=is_jsonrpc,
+                        )
+                    tags = entry.get("tags")
+                    docs.append(
+                        SearchDocument(
+                            doc_id=doc_id.strip(),
+                            title=str(entry.get("title") or ""),
+                            body=str(entry.get("body") or entry.get("text") or ""),
+                            domain=str(entry.get("domain") or ""),
+                            source_id=str(entry.get("source_id") or ""),
+                            kind=str(entry.get("kind") or ""),
+                            tags=tuple(str(t) for t in tags) if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes)) else (),
+                            metadata=dict(entry.get("metadata")) if isinstance(entry.get("metadata"), Mapping) else {},
+                            updated_at=float(entry.get("updated_at") or 0.0),
+                        )
+                    )
+                written = await asyncio.to_thread(self._search.upsert_many, docs)
+                return self._ok_envelope(req_id, {"upserted": written}, jsonrpc=is_jsonrpc)
+            if op == "search.delete":
+                raw_id = params.get("id") or params.get("doc_id")
+                raw_source = params.get("source_id")
+                if isinstance(raw_id, str) and raw_id.strip():
+                    removed = await asyncio.to_thread(self._search.delete, raw_id.strip())
+                    return self._ok_envelope(req_id, {"deleted": removed, "id": raw_id.strip()}, jsonrpc=is_jsonrpc)
+                if isinstance(raw_source, str) and raw_source.strip():
+                    removed = await asyncio.to_thread(self._search.delete_by_source, raw_source.strip())
+                    return self._ok_envelope(
+                        req_id, {"deleted": removed, "source_id": raw_source.strip()}, jsonrpc=is_jsonrpc
+                    )
+                return self._error_envelope(
+                    req_id,
+                    "search.delete needs 'id' or 'source_id'",
+                    error_code=ErrorCode.INVALID_ARGUMENT,
+                    jsonrpc=is_jsonrpc,
+                )
+            return self._error_envelope(
+                req_id,
+                f"Unknown control operation: {op}",
+                error_code="unknown_operation",
+                jsonrpc=is_jsonrpc,
+            )
+        except (InvalidArgumentError, ValueError, TypeError) as exc:
+            return self._error_envelope(
+                req_id,
+                str(exc),
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
 
     def _plugin_config_context(self, plugin_id: str) -> tuple[Any, set[str], set[str], list[dict[str, Any]]]:
         manifest = None
@@ -1527,10 +2015,18 @@ class ControlClient:
             raise ControlRpcError(f"Cannot connect to control.sock at {self._socket_path}: {exc}", code=ErrorCode.SERVICE_OFFLINE, cause=exc) from exc
 
     @staticmethod
-    def _cap_req(cap_id: str, payload: Mapping[str, Any] | None, caller: str, timeout: float | None) -> dict[str, Any]:
+    def _cap_req(
+        cap_id: str,
+        payload: Mapping[str, Any] | None,
+        caller: str,
+        timeout: float | None,
+        provider_plugin_id: str | None = None,
+    ) -> dict[str, Any]:
         req: dict[str, Any] = {"id": uuid.uuid4().hex, "op": "capability.call", "capability": cap_id, "caller": caller, "payload": dict(payload or {})}
         if timeout is not None:
             req["timeout"] = timeout
+        if provider_plugin_id:
+            req["provider_plugin_id"] = provider_plugin_id
         return req
 
     @staticmethod
@@ -1549,14 +2045,36 @@ class ControlClient:
         return self.request_sync({"id": uuid.uuid4().hex, "op": "ping", "caller": self._caller})
 
     async def call_capability(
-        self, capability_id: str, payload: Mapping[str, Any] | None = None, *, caller: str | None = None, timeout: float | None = None
+        self,
+        capability_id: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        caller: str | None = None,
+        timeout: float | None = None,
+        provider_plugin_id: str | None = None,
     ) -> CapabilityResult:
-        return self._to_cap_result(await self.request(self._cap_req(capability_id, payload, caller or self._caller, timeout), timeout=timeout))
+        return self._to_cap_result(
+            await self.request(
+                self._cap_req(capability_id, payload, caller or self._caller, timeout, provider_plugin_id),
+                timeout=timeout,
+            )
+        )
 
     def call_capability_sync(
-        self, capability_id: str, payload: Mapping[str, Any] | None = None, *, caller: str | None = None, timeout: float | None = None
+        self,
+        capability_id: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        caller: str | None = None,
+        timeout: float | None = None,
+        provider_plugin_id: str | None = None,
     ) -> CapabilityResult:
-        return self._to_cap_result(self.request_sync(self._cap_req(capability_id, payload, caller or self._caller, timeout), timeout=timeout))
+        return self._to_cap_result(
+            self.request_sync(
+                self._cap_req(capability_id, payload, caller or self._caller, timeout, provider_plugin_id),
+                timeout=timeout,
+            )
+        )
 
     async def call_jsonrpc(
         self, method: str, params: Mapping[str, Any] | None = None, *, request_id: str | int | None = None, timeout: float | None = None

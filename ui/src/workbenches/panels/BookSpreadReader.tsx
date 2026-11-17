@@ -45,10 +45,10 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
       {/* Quiet Book Folio Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="omni-editorial-title truncate text-[21px] font-bold text-[var(--text-primary)]">
+          <h2 className="omni-editorial-title truncate text-[23px] font-bold text-[var(--text-primary)]">
             {book.title}
           </h2>
-          <div className="mt-0.5 text-[13px] text-[var(--text-muted)]">
+          <div className="mt-0.5 text-[14.5px] text-[var(--text-muted)]">
             {spread.chapterTitle} · {book.author}
           </div>
         </div>
@@ -60,12 +60,12 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
             onFocus={onFocus}
             onActivate={() => onTurnPage(-1)}
             surface="surface"
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-[14px] font-medium"
           >
             <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
             <span>上一跨页</span>
           </FocusButton>
-          <span className="px-2 font-mono text-[12.5px] text-[var(--text-muted)]">
+          <span className="px-2 font-mono text-[14px] text-[var(--text-muted)]">
             p.{spread.page} ({spreadIndex + 1}/{book.spreads.length})
           </span>
           <FocusButton
@@ -74,7 +74,7 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
             onFocus={onFocus}
             onActivate={() => onTurnPage(1)}
             surface="surface"
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-[14px] font-medium"
           >
             <span>下一跨页</span>
             <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -92,18 +92,18 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
           style={{ backgroundColor: 'var(--bg-surface)' }}
         >
           <div
-            className="flex items-center justify-between border-b pb-3 text-[12.5px] font-semibold"
+            className="flex items-center justify-between border-b pb-3 text-[14px] font-semibold"
             style={{ borderColor: HAIRLINE_BORDER, color: 'var(--domain-book)' }}
           >
             <span>{spread.leftTitle}</span>
-            <span className="font-mono text-[12px] text-[var(--text-subtle)]">ORIGINAL</span>
+            <span className="font-mono text-[13.5px] text-[var(--text-subtle)]">ORIGINAL</span>
           </div>
           {spread.leftParagraphs.map((para) => (
             <div key={para.id} className="flex flex-col gap-3">
               <MarkdownRenderer content={para.text} />
               {para.keyTerms?.length ? (
                 <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                  <span className="text-[12px] text-[var(--text-subtle)]">词元划查：</span>
+                  <span className="text-[13.5px] text-[var(--text-subtle)]">词元划查：</span>
                   {para.keyTerms.map((term) => (
                     <FocusButton
                       key={`${para.id}:${term}`}
@@ -114,7 +114,7 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
                       selected={activeVocab?.word.toLowerCase() === term.toLowerCase()}
                       tone="book"
                       surface="soft"
-                      className="px-2.5 py-0.5 font-mono text-[12px] font-medium"
+                      className="px-2.5 py-0.5 font-mono text-[13.5px] font-medium"
                     >
                       {term}
                     </FocusButton>
@@ -135,11 +135,11 @@ export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
           }}
         >
           <div
-            className="flex items-center justify-between border-b pb-3 text-[12.5px] font-semibold"
+            className="flex items-center justify-between border-b pb-3 text-[14px] font-semibold"
             style={{ borderColor: HAIRLINE_BORDER, color: 'var(--domain-book)' }}
           >
             <span>{spread.rightTitle}</span>
-            <span className="font-mono text-[12px] text-[var(--text-subtle)]">译文对照</span>
+            <span className="font-mono text-[13.5px] text-[var(--text-subtle)]">译文对照</span>
           </div>
           {spread.rightParagraphs.map((para) => (
             <MarkdownRenderer key={para.id} content={para.text} muted />

@@ -41,8 +41,15 @@ export type ControlOp =
   | 'core.ping'
   | 'capability.list'
   | 'capability.call'
+  | 'domain.snapshot'
+  | 'domain.invoke'
   | 'bus.publish'
   | 'bus.emit'
+  | 'job.submit'
+  | 'job.list'
+  | 'job.get'
+  | 'job.cancel'
+  | 'search.query'
   | 'plugin.list'
   | 'plugin.load'
   | 'plugin.unload'
@@ -259,6 +266,11 @@ export interface AiAgentRequestPayload {
   action?: 'chat' | 'summarize' | 'translate' | 'etymology' | 'clause_parse' | 'qa' | 'custom';
   domain?: ContentDomain;
   context?: string;
+  context_refs?: Array<{
+    capability: string;
+    label?: string;
+    payload?: Record<string, unknown>;
+  }>;
   system_prompt?: string;
   prompt: string;
   messages?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;

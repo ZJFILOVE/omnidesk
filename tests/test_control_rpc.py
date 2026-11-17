@@ -18,9 +18,11 @@ from omnidesk_core import (
     ControlRpcError,
     ControlServer,
     ErrorCode,
+    JobCenter,
     OmnideskPaths,
     PathSafetyError,
     PluginManager,
+    SearchIndex,
     scaffold_plugin,
 )
 
@@ -457,3 +459,218 @@ def create_plugin():
             "workspace_tabs": [],
             "dock_widgets": [],
         }
+
+
+@pytest.mark.asyncio
+async def test_domain_invoke_routes_by_source_id_and_validates_arguments(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    plugins_dir = tmp_path / "plugins"
+    pdir = plugins_dir / "plugin-domrpc"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "plugin-domrpc",
+                "name": "Domain RPC Plugin",
+                "version": "0.1.0",
+                "kind": "hybrid",
+                "domain": "text",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pdir / "plugin.py").write_text(
+        """
+from omnidesk_sdk import BasePlugin, PluginContext, TextSource
+from omnidesk_sdk.domain_models import TextFeedItem
+
+class AlphaText(TextSource):
+    source_id = "alpha-text"
+    display_name = "Alpha"
+    category = "blog"
+    priority = 1
+
+    async def fetch_feed(self, channel_id="", query="", page=1):
+        return [TextFeedItem(id="alpha-1", title="Alpha Article", channel_id=channel_id, tags=["alpha"])]
+
+    def channels(self):  # sync handler is offloaded to a worker thread
+        return [{"id": "alpha-channel", "name": "Alpha Channel"}]
+
+class BetaText(TextSource):
+    source_id = "beta-text"
+    display_name = "Beta"
+    category = "news"
+    priority = 9
+
+    async def fetch_feed(self, channel_id="", query="", page=1):
+        return [TextFeedItem(id="beta-1", title="Beta Article", channel_id=channel_id, tags=["beta"])]
+
+class DomRpcPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        await super().on_load(ctx)
+        ctx.register_text_source(AlphaText())
+        ctx.register_text_source(BetaText())
+
+def create_plugin():
+    return DomRpcPlugin()
+""",
+        encoding="utf-8",
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_dir, paths=paths)
+    sock_path = paths.control_socket_path
+
+    async with ControlServer(socket_path=sock_path, paths=paths, plugins=mgr):
+        client = ControlClient(socket_path=sock_path)
+        await mgr.load_plugin("plugin-domrpc")
+
+        # Default routing picks the highest-priority source and serializes pydantic models
+        default_call = await client.request(
+            {"op": "domain.invoke", "params": {"domain": "text", "method": "fetch_feed", "payload": {"query": "x"}}}
+        )
+        assert default_call["ok"] is True, default_call
+        assert default_call["provider_plugin_id"] == "plugin-domrpc"
+        assert default_call["data"]["source_id"] == "beta-text"
+        assert default_call["data"]["result"][0]["id"] == "beta-1"
+        json.dumps(default_call)
+
+        # Explicit source_id pins the lower-priority source
+        pinned = await client.request(
+            {
+                "op": "domain.invoke",
+                "params": {
+                    "domain": "text",
+                    "source_id": "alpha-text",
+                    "method": "fetch_feed",
+                    "payload": {"channel_id": "hot"},
+                },
+            }
+        )
+        assert pinned["ok"] is True, pinned
+        assert pinned["data"]["source_id"] == "alpha-text"
+        assert pinned["data"]["result"][0]["channel_id"] == "hot"
+
+        # Sync handlers work too
+        sync_call = await client.request(
+            {"op": "domain.invoke", "params": {"domain": "text", "source_id": "alpha-text", "method": "channels"}}
+        )
+        assert sync_call["ok"] is True, sync_call
+        assert sync_call["data"]["result"] == [{"id": "alpha-channel", "name": "Alpha Channel"}]
+
+        # Unknown source / method / argument all fail closed
+        missing = await client.request(
+            {"op": "domain.invoke", "params": {"domain": "text", "source_id": "nope", "method": "fetch_feed"}}
+        )
+        assert missing["ok"] is False
+        assert missing["error_code"] == ErrorCode.NOT_FOUND
+
+        bad_method = await client.request(
+            {"op": "domain.invoke", "params": {"domain": "text", "method": "drop_database"}}
+        )
+        assert bad_method["ok"] is False
+        assert bad_method["error_code"] == ErrorCode.INVALID_ARGUMENT
+
+        bad_arg = await client.request(
+            {
+                "op": "domain.invoke",
+                "params": {"domain": "text", "method": "fetch_feed", "payload": {"bogus": 1}},
+            }
+        )
+        assert bad_arg["ok"] is False
+        assert bad_arg["error_code"] == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_job_rpc_submit_get_list_cancel_and_search_rpc(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    sock_path = paths.control_socket_path
+    jobs = JobCenter()
+    search = SearchIndex(":memory:")
+    try:
+        async with ControlServer(
+            socket_path=sock_path,
+            paths=paths,
+            jobs=jobs,
+            search=search,
+        ) as srv:
+            client = ControlClient(socket_path=sock_path)
+
+            async def handler(payload: dict[str, Any]) -> dict[str, Any]:
+                return {"doubled": int(payload.get("n", 0)) * 2}
+
+            srv.register_job_handler("demo.double", handler)
+
+            submitted = await client.request(
+                {
+                    "op": "job.submit",
+                    "params": {"kind": "demo.double", "payload": {"n": 21}, "title": "Double"},
+                }
+            )
+            assert submitted["ok"] is True, submitted
+            job_id = submitted["data"]["job"]["job_id"]
+
+            record = None
+            for _ in range(100):
+                fetched = await client.request({"op": "job.get", "params": {"id": job_id}})
+                assert fetched["ok"] is True, fetched
+                record = fetched["data"]["job"]
+                if record["status"] in {"completed", "failed", "cancelled"}:
+                    break
+                await asyncio.sleep(0.01)
+            assert record is not None and record["status"] == "completed"
+            assert record["result"] == {"doubled": 42}
+
+            listed = await client.request({"op": "job.list", "params": {"kind": "demo.double"}})
+            assert listed["ok"] is True
+            assert [j["job_id"] for j in listed["data"]["jobs"]] == [job_id]
+
+            missing_kind = await client.request({"op": "job.submit", "params": {"kind": "nope"}})
+            assert missing_kind["ok"] is False
+            assert missing_kind["error_code"] == ErrorCode.INVALID_ARGUMENT
+
+            upserted = await client.request(
+                {
+                    "op": "search.upsert",
+                    "params": {
+                        "documents": [
+                            {
+                                "id": "doc-1",
+                                "title": "Attention Is All You Need",
+                                "body": "transformer attention mechanism",
+                                "domain": "text",
+                                "tags": ["paper", "nlp"],
+                            },
+                            {"id": "doc-2", "title": "Cooking Rice", "body": "wash and steam"},
+                        ]
+                    },
+                }
+            )
+            assert upserted["ok"] is True, upserted
+            assert upserted["data"]["upserted"] == 2
+
+            hits = await client.request(
+                {"op": "search.query", "params": {"query": "attention", "domain": "text"}}
+            )
+            assert hits["ok"] is True, hits
+            assert hits["data"]["hits"][0]["doc_id"] == "doc-1"
+            assert hits["data"]["total"] == 1
+
+            removed = await client.request({"op": "search.delete", "params": {"id": "doc-1"}})
+            assert removed["ok"] is True and removed["data"]["deleted"] is True
+            after = await client.request({"op": "search.query", "params": {"query": "attention"}})
+            assert after["ok"] is True and after["data"]["total"] == 0
+    finally:
+        search.close()

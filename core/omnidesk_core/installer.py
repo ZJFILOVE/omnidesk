@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Iterator, Mapping
@@ -656,6 +657,69 @@ class PluginInstaller:
         if moved_old and old_tmp.exists():
             shutil.rmtree(old_tmp, ignore_errors=True)
 
+    def _install_python_dependencies(self, manifest: PluginManifest) -> dict[str, Any]:
+        """Provision an isolated venv for a plugin's declared ``python_dependencies``."""
+        packages = [p.strip() for p in manifest.python_dependencies if isinstance(p, str) and p.strip()]
+        env_dir = self.paths.plugin_data_dir(manifest.id) / "python-env"
+        info: dict[str, Any] = {
+            "enabled": False,
+            "packages": packages,
+            "env": str(env_dir),
+            "site_packages": "",
+        }
+        if not packages:
+            return info
+        ensure_safe_dir(env_dir)
+        python_bin = env_dir / "bin" / "python"
+        uv = shutil.which("uv")
+        try:
+            if uv:
+                subprocess.run(
+                    [uv, "venv", "--allow-existing", str(env_dir)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                subprocess.run(
+                    [uv, "pip", "install", "--python", str(python_bin), *packages],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                )
+            else:
+                subprocess.run(
+                    [sys.executable, "-m", "venv", str(env_dir)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                subprocess.run(
+                    [str(python_bin), "-m", "pip", "install", *packages],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                )
+            site = subprocess.run(
+                [str(python_bin), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = getattr(exc, "stderr", None) or str(exc)
+            raise OmniDeskError(
+                f"Failed to install python_dependencies for {manifest.id}: {redact_secrets(str(detail))[-800:]}",
+                code=ErrorCode.NOT_CONFIGURED,
+            ) from exc
+        info.update({"enabled": True, "site_packages": site})
+        atomic_write_json(env_dir / "env.json", info)
+        return info
+
     def install(
         self,
         source: str | Path,
@@ -664,6 +728,7 @@ class PluginInstaller:
         ref: str | None = None,
         run_tests: bool = True,
         require_tests: bool = False,
+        install_python_deps: bool = True,
         lock_timeout: float | None = None,
     ) -> InstallResult:
         expected_id = validate_plugin_id(plugin_id) if plugin_id is not None else None
@@ -690,6 +755,12 @@ class PluginInstaller:
                 manifest, verify_res = self._verify_staged(
                     pkg_dir, manifest=manifest, expected_id=expected_id, run_tests=run_tests, require_tests=require_tests
                 )
+                stage = "dependencies"
+                env_info = (
+                    self._install_python_dependencies(manifest)
+                    if install_python_deps
+                    else {"enabled": False, "packages": list(manifest.python_dependencies)}
+                )
                 stage = "activate"
                 content_hash = compute_tree_hash(pkg_dir)
                 same_fs = self.plugins_dir / f".staging-{manifest.id}-{uuid.uuid4().hex[:8]}"
@@ -704,6 +775,8 @@ class PluginInstaller:
                         "ref": resolved_ref,
                         "commit": commit,
                         "content_hash": content_hash,
+                        "python_dependencies": list(manifest.python_dependencies),
+                        "python_env": env_info.get("env", ""),
                         "locked_at": _utc_iso(),
                     }
                     self._swap_dir_and_lock(
@@ -731,6 +804,7 @@ class PluginInstaller:
         ref: str | None = None,
         run_tests: bool = True,
         require_tests: bool = False,
+        install_python_deps: bool = True,
         lock_timeout: float | None = None,
     ) -> InstallResult:
         pid = validate_plugin_id(plugin_id)
@@ -772,6 +846,12 @@ class PluginInstaller:
                 manifest, verify_res = self._verify_staged(
                     pkg_dir, expected_id=pid, run_tests=run_tests, require_tests=require_tests
                 )
+                stage = "dependencies"
+                env_info = (
+                    self._install_python_dependencies(manifest)
+                    if install_python_deps
+                    else {"enabled": False, "packages": list(manifest.python_dependencies)}
+                )
                 stage = "snapshot"
                 content_hash = compute_tree_hash(pkg_dir)
                 existing_snaps = self._read_snapshots_index(pid)
@@ -791,6 +871,8 @@ class PluginInstaller:
                         "ref": resolved_ref,
                         "commit": commit,
                         "content_hash": content_hash,
+                        "python_dependencies": list(manifest.python_dependencies),
+                        "python_env": env_info.get("env", ""),
                         "locked_at": _utc_iso(),
                     }
                     self._swap_dir_and_lock(

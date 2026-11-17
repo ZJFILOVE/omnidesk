@@ -16,6 +16,7 @@ from typing import Any, TextIO
 
 from .config import ConfigError, ConfigStore, DEFAULT_SECRET_KEYS, strip_secrets
 from .control import ControlClient, ControlRpcError
+from .agent_policy import side_effect_action, write_audit
 from .errors import (
     ErrorCode,
     InvalidArgumentError,
@@ -52,6 +53,9 @@ _MCP_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "capability_id": {"type": "string", "description": "Versioned capability ID (e.g. demo.echo.v1)"},
                 "payload": {"type": "object", "description": "JSON object request payload"},
+                "provider_plugin_id": {"type": "string", "description": "Optional provider plugin when a capability has multiple providers"},
+                "confirm": {"type": "boolean", "description": "Required true for side-effect actions such as download or write-back"},
+                "reason": {"type": "string", "description": "Why the side effect is requested (written to the audit log)"},
                 "timeout": {"type": "number", "description": "Optional invocation timeout in seconds"},
             },
             "required": ["capability_id"],
@@ -79,6 +83,83 @@ _MCP_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "domain": {"type": "string", "enum": ["core", "media", "text", "book"]},
                 "plugin_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "omnidesk_collect_context",
+        "description": "Collect bounded web, ebook, subtitle, text, or media context for AI reasoning.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "Context references: capability + payload pairs.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "capability": {
+                                "type": "string",
+                                "enum": [
+                                    "web.extract.v1",
+                                    "web.fetch.v1",
+                                    "book.source.v1",
+                                    "book.bilingual_pdf.v1",
+                                    "subtitle.fetch.v1",
+                                    "subtitle.sync.v1",
+                                    "speech.asr.v1",
+                                    "text.source.v1",
+                                    "media.source.v1",
+                                ],
+                            },
+                            "payload": {"type": "object"},
+                            "label": {"type": "string"},
+                            "provider_plugin_id": {"type": "string"},
+                        },
+                        "required": ["capability"],
+                        "additionalProperties": False,
+                    },
+                },
+                "max_chars": {"type": "integer", "minimum": 1000, "maximum": 120000},
+                "per_item_timeout_sec": {"type": "number", "minimum": 0.5, "maximum": 120},
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "omnidesk_recommend",
+        "description": "Run an interactive OmniDesk curation recommendation and return the written feed bundle.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Natural-language recommendation request"},
+                "curation_mode": {"type": "string", "enum": ["interactive_ephemeral", "daily_immutable"]},
+                "sync_apple_music": {"type": "string", "description": "Optional Apple Music write-back mode"},
+                "confirm": {"type": "boolean", "description": "Required true because this writes the recommendation feed"},
+                "reason": {"type": "string"},
+                "timeout": {"type": "number"},
+            },
+            "required": ["prompt"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "omnidesk_download_book",
+        "description": "Download a book through the configured book.search.v1 provider into its configured download_root.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "capability_id": {"type": "string", "enum": ["book.search.v1"], "default": "book.search.v1"},
+                "provider_plugin_id": {"type": "string", "description": "Optional book provider, e.g. plugin-zlib or plugin-annas-archive"},
+                "item_id": {"type": "string"},
+                "download_token": {"type": "string"},
+                "format": {"type": "string"},
+                "destination": {"type": "string"},
+                "confirm": {"type": "boolean", "description": "Required true because this writes a file"},
+                "reason": {"type": "string"},
+                "timeout": {"type": "number"},
             },
             "additionalProperties": False,
         },
@@ -287,17 +368,17 @@ def _cmd_reload(args: argparse.Namespace, paths: OmnideskPaths) -> int:
 def _cmd_rpc(args: argparse.Namespace, paths: OmnideskPaths) -> int:
     payload = _read_json_arg(args.payload, args.file)
     client = ControlClient(socket_path=args.socket, paths=paths, timeout=args.timeout, caller=args.caller)
+    req: dict[str, Any] = {
+        "id": uuid.uuid4().hex,
+        "op": "capability.call",
+        "capability": args.capability,
+        "caller": args.caller,
+        "payload": payload,
+    }
+    if getattr(args, "provider", None):
+        req["provider_plugin_id"] = args.provider
     resp, rc = _normalize_control_resp(
-        client.request_sync(
-            {
-                "id": uuid.uuid4().hex,
-                "op": "capability.call",
-                "capability": args.capability,
-                "caller": args.caller,
-                "payload": payload,
-            },
-            timeout=args.timeout,
-        )
+        client.request_sync(req, timeout=args.timeout)
     )
     _emit_json(resp)
     return rc
@@ -309,6 +390,72 @@ def _cmd_emit(args: argparse.Namespace, paths: OmnideskPaths) -> int:
     resp, rc = _normalize_control_resp(client.publish_sync(args.topic, payload))
     _emit_json(resp)
     return rc
+
+
+def _curator_request(args: argparse.Namespace, paths: OmnideskPaths, payload: dict[str, Any]) -> int:
+    """Call `recommend.feed.v1` through control.sock with a high-level payload."""
+    client = ControlClient(socket_path=args.socket, paths=paths, timeout=args.timeout, caller=args.caller)
+    req: dict[str, Any] = {
+        "id": uuid.uuid4().hex,
+        "op": "capability.call",
+        "capability": "recommend.feed.v1",
+        "caller": args.caller,
+        "payload": payload,
+    }
+    resp, rc = _normalize_control_resp(client.request_sync(req, timeout=args.timeout))
+    if args.json:
+        _emit_json(resp)
+    elif rc == 0:
+        data = resp.get("data") if isinstance(resp.get("data"), Mapping) else {}
+        _emit_json({"ok": True, "action": payload.get("action"), "data": data})
+    else:
+        _emit_json(resp)
+    return rc
+
+
+def _cmd_curate(args: argparse.Namespace, paths: OmnideskPaths) -> int:
+    """Publish a verified daily bundle or an ephemeral interactive recommendation set."""
+    if args.status:
+        return _curator_request(args, paths, {"action": "status"})
+    if args.daily:
+        if not args.bundle:
+            raise ValueError("curate --daily requires --bundle <verified-bundle.json>")
+        body = _read_json_arg(None, args.bundle)
+        payload = {"action": "publish_daily_bundle", "mode": "daily_immutable", **body}
+        if args.domain:
+            payload.setdefault("domain", args.domain)
+        return _curator_request(args, paths, payload)
+    if args.interactive:
+        items = _read_json_arg(None, args.items) if args.items else {}
+        session_id = args.session or f"cli-{int(time.time())}"
+        payload = {
+            "action": "push_interactive_set",
+            "mode": "interactive_ephemeral",
+            "record_permanent_history": False,
+            "session_id": session_id,
+            "repeat_policy": args.repeat_policy,
+            **items,
+        }
+        if args.domain:
+            payload.setdefault("domain", args.domain)
+        return _curator_request(args, paths, payload)
+    raise ValueError("curate needs one of --status / --daily / --interactive")
+
+
+def _cmd_rehydrate(args: argparse.Namespace, paths: OmnideskPaths) -> int:
+    """Clone/sync both curation repositories and rebuild the historical archive index."""
+    payload = {
+        "action": "bootstrap_and_rehydrate",
+        "pull_remote": not args.no_pull,
+        "clone_if_missing": not args.no_clone,
+        "force_full": args.force_full,
+        "sync_vocab": not args.no_vocab,
+    }
+    if args.obsidian_dir:
+        payload["obsidian_vault_dir"] = args.obsidian_dir
+    if args.music_dir:
+        payload["music_daily_dir"] = args.music_dir
+    return _curator_request(args, paths, payload)
 
 
 def _cmd_ping(args: argparse.Namespace, paths: OmnideskPaths) -> int:
@@ -338,6 +485,7 @@ def _cmd_install(args: argparse.Namespace, paths: OmnideskPaths) -> int:
         ref=args.ref,
         run_tests=not args.skip_tests,
         require_tests=args.require_tests,
+        install_python_deps=not getattr(args, "skip_deps", False),
         lock_timeout=args.lock_timeout,
     )
     if args.json:
@@ -354,6 +502,7 @@ def _cmd_update(args: argparse.Namespace, paths: OmnideskPaths) -> int:
         ref=args.ref,
         run_tests=not args.skip_tests,
         require_tests=args.require_tests,
+        install_python_deps=not getattr(args, "skip_deps", False),
         lock_timeout=args.lock_timeout,
     )
     if args.json:
@@ -883,11 +1032,73 @@ async def serve_mcp_stdio(
 
         return await _try_live_or_offline(_live, _off)
 
-    async def _call_capability(cap_id: str, payload: Mapping[str, Any], timeout: float | None) -> dict[str, Any]:
+    async def _call_capability(
+        cap_id: str,
+        payload: Mapping[str, Any],
+        timeout: float | None,
+        provider_plugin_id: str | None = None,
+        *,
+        confirm: bool = False,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        action = side_effect_action(cap_id, payload)
+        if action and confirm and not reason.strip():
+            return {
+                "ok": False,
+                "error": "副作用操作需要提供 reason",
+                "error_code": "reason_required",
+                "data": {"capability": cap_id, "action": action},
+            }
+        if action and not confirm:
+            try:
+                write_audit(
+                    paths,
+                    caller="mcp:omnidesk-pm",
+                    capability_id=cap_id,
+                    action=action,
+                    approved=False,
+                    reason=reason,
+                    result="denied:approval_required",
+                    payload=payload,
+                )
+            except OSError:
+                pass
+            return {
+                "ok": False,
+                "error": "该操作会写入文件、播放列表或外部服务，需要显式确认",
+                "error_code": "approval_required",
+                "data": {
+                    "capability": cap_id,
+                    "action": action,
+                    "hint": "重新调用并传 confirm=true，同时在 reason 中说明原因",
+                },
+            }
+        if action:
+            try:
+                write_audit(
+                    paths,
+                    caller="mcp:omnidesk-pm",
+                    capability_id=cap_id,
+                    action=action,
+                    approved=True,
+                    reason=reason,
+                    result="approved",
+                    payload=payload,
+                )
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "error": f"审计日志不可写，拒绝执行副作用操作: {exc}",
+                    "error_code": "audit_unavailable",
+                    "data": {"capability": cap_id, "action": action},
+                }
+
         async def _live() -> dict[str, Any]:
             req: dict[str, Any] = {"id": uuid.uuid4().hex, "op": "capability.call", "capability": cap_id, "payload": dict(payload), "caller": "mcp:omnidesk-pm"}
             if timeout is not None:
                 req["timeout"] = timeout
+            if provider_plugin_id:
+                req["provider_plugin_id"] = provider_plugin_id
             r = await client.request(req, timeout=timeout)
             return {
                 "ok": bool(r.get("ok")),
@@ -900,7 +1111,13 @@ async def serve_mcp_stdio(
         async def _off() -> dict[str, Any]:
             mgr = await _get_offline()
             try:
-                res = await mgr.capabilities.call(cap_id, dict(payload), timeout=timeout, isolate_errors=True)
+                res = await mgr.capabilities.call(
+                    cap_id,
+                    dict(payload),
+                    timeout=timeout,
+                    isolate_errors=True,
+                    plugin_id=provider_plugin_id,
+                )
             except OmniDeskError as exc:
                 return {"ok": False, "error": exc.message, "error_code": str(exc.code), "transport": "offline_inprocess"}
             return {
@@ -911,7 +1128,22 @@ async def serve_mcp_stdio(
                 "transport": "offline_inprocess",
             }
 
-        return await _try_live_or_offline(_live, _off)
+        result = await _try_live_or_offline(_live, _off)
+        if action:
+            try:
+                write_audit(
+                    paths,
+                    caller="mcp:omnidesk-pm",
+                    capability_id=cap_id,
+                    action=action,
+                    approved=True,
+                    reason=reason,
+                    result="ok" if result.get("ok") else f"error:{result.get('error_code', 'unknown')}",
+                    payload=payload,
+                )
+            except OSError:
+                result["audit_warning"] = "副作用已执行，但审计日志写入失败"
+        return result
 
     async def _emit_event(topic: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         async def _live() -> dict[str, Any]:
@@ -1032,6 +1264,9 @@ async def serve_mcp_stdio(
                 elif tool_name == "omnidesk_call_capability":
                     cap_id = tool_args.get("capability_id") or tool_args.get("capability")
                     payload = tool_args.get("payload", {})
+                    provider = tool_args.get("provider_plugin_id")
+                    confirm = bool(tool_args.get("confirm", False))
+                    reason = str(tool_args.get("reason") or "")
                     timeout = tool_args.get("timeout")
                     valid_timeout = (
                         timeout is None
@@ -1041,10 +1276,19 @@ async def serve_mcp_stdio(
                         tool_out = {"ok": False, "error": "Missing required 'capability_id'", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
                     elif not isinstance(payload, Mapping):
                         tool_out = {"ok": False, "error": "'payload' must be a JSON object", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                    elif provider is not None and not isinstance(provider, str):
+                        tool_out = {"ok": False, "error": "'provider_plugin_id' must be a string", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
                     elif not valid_timeout:
                         tool_out = {"ok": False, "error": "'timeout' must be a positive number", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
                     else:
-                        tool_out = await _call_capability(cap_id.strip(), payload, float(timeout) if timeout is not None else None)
+                        tool_out = await _call_capability(
+                            cap_id.strip(),
+                            payload,
+                            float(timeout) if timeout is not None else None,
+                            provider.strip() if isinstance(provider, str) and provider.strip() else None,
+                            confirm=confirm,
+                            reason=reason,
+                        )
                 elif tool_name == "omnidesk_emit_event":
                     topic = tool_args.get("topic")
                     payload = tool_args.get("payload", {})
@@ -1063,6 +1307,77 @@ async def serve_mcp_stdio(
                         tool_out = {"ok": False, "error": "'plugin_id' must be a string", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
                     else:
                         tool_out = await _domain_snapshot(dom, pid)
+                elif tool_name == "omnidesk_collect_context":
+                    items = tool_args.get("items")
+                    if not isinstance(items, list) or not items:
+                        tool_out = {"ok": False, "error": "'items' must be a non-empty array", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                    else:
+                        payload: dict[str, Any] = {"items": items}
+                        for key in ("max_chars", "per_item_timeout_sec"):
+                            if tool_args.get(key) is not None:
+                                payload[key] = tool_args[key]
+                        timeout = tool_args.get("timeout")
+                        valid_timeout = (
+                            timeout is None
+                            or (isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and math.isfinite(timeout) and timeout > 0)
+                        )
+                        if not valid_timeout:
+                            tool_out = {"ok": False, "error": "'timeout' must be a positive number", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                        else:
+                            tool_out = await _call_capability(
+                                "context.collect.v1",
+                                payload,
+                                float(timeout) if timeout is not None else None,
+                            )
+                elif tool_name == "omnidesk_recommend":
+                    prompt = tool_args.get("prompt")
+                    if not isinstance(prompt, str) or not prompt.strip():
+                        tool_out = {"ok": False, "error": "Missing required 'prompt'", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                    else:
+                        payload = {"action": "curate_interactive", "prompt": prompt.strip()}
+                        if tool_args.get("curation_mode") is not None:
+                            payload["curation_mode"] = tool_args["curation_mode"]
+                        if tool_args.get("sync_apple_music") is not None:
+                            payload["sync_apple_music"] = tool_args["sync_apple_music"]
+                        timeout = tool_args.get("timeout")
+                        valid_timeout = (
+                            timeout is None
+                            or (isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and math.isfinite(timeout) and timeout > 0)
+                        )
+                        if not valid_timeout:
+                            tool_out = {"ok": False, "error": "'timeout' must be a positive number", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                        else:
+                            tool_out = await _call_capability(
+                                "ai.curation.v1",
+                                payload,
+                                float(timeout) if timeout is not None else None,
+                                confirm=bool(tool_args.get("confirm", False)),
+                                reason=str(tool_args.get("reason") or ""),
+                            )
+                elif tool_name == "omnidesk_download_book":
+                    payload = {"action": "download"}
+                    for key in ("item_id", "download_token", "format", "destination"):
+                        if tool_args.get(key) is not None:
+                            payload[key] = tool_args[key]
+                    if not payload.get("item_id") and not payload.get("download_token"):
+                        tool_out = {"ok": False, "error": "Missing 'item_id' or 'download_token'", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                    else:
+                        timeout = tool_args.get("timeout")
+                        valid_timeout = (
+                            timeout is None
+                            or (isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and math.isfinite(timeout) and timeout > 0)
+                        )
+                        if not valid_timeout:
+                            tool_out = {"ok": False, "error": "'timeout' must be a positive number", "error_code": str(ErrorCode.INVALID_ARGUMENT)}
+                        else:
+                            tool_out = await _call_capability(
+                                "book.search.v1",
+                                payload,
+                                float(timeout) if timeout is not None else None,
+                                str(tool_args.get("provider_plugin_id") or "").strip() or None,
+                                confirm=bool(tool_args.get("confirm", False)),
+                                reason=str(tool_args.get("reason") or ""),
+                            )
                 else:
                     _error(req_id, -32602, f"Unknown tool: {tool_name}")
                     continue
@@ -1147,6 +1462,9 @@ def build_parser(*, json_requested: bool = False) -> argparse.ArgumentParser:
     p_install.add_argument("--plugins-dir", help="Target plugins directory (defaults to XDG_DATA_HOME/omnidesk/plugins)")
     p_install.add_argument("--skip-tests", "--no-tests", dest="skip_tests", action="store_true", help="Skip pytest gate")
     p_install.add_argument("--require-tests", action="store_true", help="Fail if plugin has no tests")
+    p_install.add_argument(
+        "--skip-deps", action="store_true", help="Do not provision python_dependencies into an isolated venv"
+    )
     p_install.add_argument("--lock-timeout", type=float, default=30.0, help="File lock acquisition timeout in seconds")
     p_install.add_argument("--json", action="store_true", help="Output JSON")
 
@@ -1156,6 +1474,9 @@ def build_parser(*, json_requested: bool = False) -> argparse.ArgumentParser:
     p_update.add_argument("--plugins-dir", help="Target plugins directory (defaults to XDG_DATA_HOME/omnidesk/plugins)")
     p_update.add_argument("--skip-tests", "--no-tests", dest="skip_tests", action="store_true", help="Skip pytest gate")
     p_update.add_argument("--require-tests", action="store_true", help="Fail if plugin has no tests")
+    p_update.add_argument(
+        "--skip-deps", action="store_true", help="Do not re-provision python_dependencies into an isolated venv"
+    )
     p_update.add_argument("--lock-timeout", type=float, default=30.0, help="File lock acquisition timeout in seconds")
     p_update.add_argument("--json", action="store_true", help="Output JSON")
 
@@ -1206,8 +1527,44 @@ def build_parser(*, json_requested: bool = False) -> argparse.ArgumentParser:
     p_rpc.add_argument("--file", "-f", help="Read JSON object payload from file (or '-')")
     p_rpc.add_argument("--socket", "-s", help="Path to control.sock")
     p_rpc.add_argument("--caller", default="omnidesk-pm", help="Caller identifier")
+    p_rpc.add_argument("--provider", help="Optional provider plugin_id when multiple plugins expose the same capability")
     p_rpc.add_argument("--timeout", type=float, default=15.0, help="Timeout in seconds")
     p_rpc.add_argument("--json", action="store_true", help="Output JSON (always JSON)")
+
+    p_curate = sub.add_parser(
+        "curate", help="Publish daily bundles or interactive recommendation sets via recommend.feed.v1"
+    )
+    p_curate.add_argument("--status", action="store_true", help="Show curator status")
+    p_curate.add_argument("--daily", action="store_true", help="Publish an immutable daily bundle")
+    p_curate.add_argument("--bundle", help="Verified bundle JSON file for --daily (evidence + items)")
+    p_curate.add_argument("--interactive", action="store_true", help="Push an ephemeral interactive set")
+    p_curate.add_argument("--items", help="JSON file with media_items/text_items/book_items for --interactive")
+    p_curate.add_argument("--session", help="Session identifier for --interactive (defaults to cli-<epoch>)")
+    p_curate.add_argument(
+        "--repeat-policy",
+        default="allow_any",
+        choices=["allow_any", "avoid_recent", "never_repeat"],
+        help="Repeat policy for interactive recommendations",
+    )
+    p_curate.add_argument("--domain", choices=["media", "text", "book"], help="Optional domain tag")
+    p_curate.add_argument("--socket", "-s", help="Path to control.sock")
+    p_curate.add_argument("--caller", default="omnidesk-pm", help="Caller identifier")
+    p_curate.add_argument("--timeout", type=float, default=120.0, help="Timeout in seconds")
+    p_curate.add_argument("--json", action="store_true", help="Output raw JSON envelope")
+
+    p_rehydrate = sub.add_parser(
+        "rehydrate", help="Clone/sync curation repos and rebuild the historical archive index"
+    )
+    p_rehydrate.add_argument("--no-pull", action="store_true", help="Skip git fetch/pull on existing repos")
+    p_rehydrate.add_argument("--no-clone", action="store_true", help="Never clone missing repositories")
+    p_rehydrate.add_argument("--force-full", action="store_true", help="Force a full re-index")
+    p_rehydrate.add_argument("--no-vocab", action="store_true", help="Skip vocabulary import during rehydration")
+    p_rehydrate.add_argument("--obsidian-dir", help="Override Obsidian vault local path")
+    p_rehydrate.add_argument("--music-dir", help="Override Music Daily local path")
+    p_rehydrate.add_argument("--socket", "-s", help="Path to control.sock")
+    p_rehydrate.add_argument("--caller", default="omnidesk-pm", help="Caller identifier")
+    p_rehydrate.add_argument("--timeout", type=float, default=600.0, help="Timeout in seconds")
+    p_rehydrate.add_argument("--json", action="store_true", help="Output raw JSON envelope")
 
     p_emit = sub.add_parser("emit", help="Publish an EntityBus event via control.sock")
     p_emit.add_argument("topic", help="EntityBus topic")
@@ -1267,6 +1624,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_reload(args, paths)
         if args.command == "rpc":
             return _cmd_rpc(args, paths)
+        if args.command == "curate":
+            return _cmd_curate(args, paths)
+        if args.command == "rehydrate":
+            return _cmd_rehydrate(args, paths)
         if args.command == "emit":
             return _cmd_emit(args, paths)
         if args.command == "ping":

@@ -14,6 +14,7 @@ from .cli import main as pm_main
 from .control import ControlServer
 from .paths import OmnideskPaths
 from .plugins import PluginManager
+from .search import SearchIndex
 
 
 async def _serve_runtime(
@@ -26,9 +27,14 @@ async def _serve_runtime(
     paths = OmnideskPaths.from_env()
     paths.ensure_dirs()
     resolved_state_path = state_path if state_path is not None else (paths.state_dir / "plugins.json")
+    try:
+        search_index = SearchIndex(paths=paths)
+    except Exception:  # noqa: BLE001 - search must never block the daemon from starting
+        search_index = None
     manager = PluginManager(
         plugin_dirs=plugin_dirs,
         paths=paths,
+        search=search_index,
         isolate_errors=True,
         state_path=resolved_state_path,
     )
@@ -49,6 +55,11 @@ async def _serve_runtime(
             await manager.unload_all()
         finally:
             manager.save_state()
+            if manager.search is not None:
+                try:
+                    manager.search.close()
+                except Exception:  # noqa: BLE001
+                    pass
     return 0
 
 

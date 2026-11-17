@@ -106,7 +106,7 @@ export const StateView: React.FC<StateViewProps> = ({
         aria-busy={isLoading || undefined}
         data-testid={testId}
         data-state-mode={mode}
-        className={`flex flex-wrap items-center justify-between gap-3 rounded-[12px] px-4 py-2.5 text-[13px] ${className}`}
+        className={`flex flex-wrap items-center justify-between gap-3 rounded-[12px] px-4 py-2.5 text-[14.5px] ${className}`}
         style={{ backgroundColor: palette.bg, color: palette.fg }}
       >
         <div className="flex min-w-0 items-center gap-2.5">
@@ -119,12 +119,12 @@ export const StateView: React.FC<StateViewProps> = ({
           <div className="min-w-0 leading-[1.55]">
             <span className="font-semibold">{resolvedTitle}</span>
             {resolvedDescription ? (
-              <span className="ml-2 text-[12.5px] opacity-90">{resolvedDescription}</span>
+              <span className="ml-2 text-[14px] opacity-90">{resolvedDescription}</span>
             ) : null}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {detail ? <span className="font-mono text-[12px] opacity-80">{detail}</span> : null}
+          {detail ? <span className="font-mono text-[13.5px] opacity-80">{detail}</span> : null}
           {action ? (
             <FocusButton
               focusId={action.focusId ?? `state:action:${mode}`}
@@ -133,7 +133,7 @@ export const StateView: React.FC<StateViewProps> = ({
               onActivate={action.onActivate}
               tone={isError ? 'err' : 'neutral'}
               surface="surface"
-              className="px-3 py-1.5 text-[12.5px] font-medium"
+              className="px-3 py-1.5 text-[14px] font-medium"
             >
               {action.label}
             </FocusButton>
@@ -163,10 +163,10 @@ export const StateView: React.FC<StateViewProps> = ({
         {renderIcon()}
       </span>
       <div className="max-w-md space-y-1.5">
-        <div className="text-[15.5px] font-semibold">{resolvedTitle}</div>
+        <div className="text-[17px] font-semibold">{resolvedTitle}</div>
         {resolvedDescription ? (
           <p
-            className="text-[13.5px] leading-[1.72]"
+            className="text-[15px] leading-[1.72]"
             style={{
               color:
                 mode === 'empty' || mode === 'loading' ? 'var(--text-muted)' : 'inherit',
@@ -193,7 +193,7 @@ export const StateView: React.FC<StateViewProps> = ({
           onActivate={action.onActivate}
           tone={isError ? 'err' : 'neutral'}
           surface="soft"
-          className="mt-1 px-4 py-1.5 text-[13px] font-medium"
+          className="mt-1 px-4 py-1.5 text-[14.5px] font-medium"
         >
           {action.label}
         </FocusButton>

@@ -56,7 +56,7 @@ export const SearchInput: React.FC<SearchInputProps> = ({
         {...focusableInputProps(focusId, activeFocusId, onFocus)}
         className={focusClass(
           isFocused,
-          'w-full rounded-[9px] border py-1.5 pr-8 pl-8.5 text-[13px] placeholder:text-[var(--text-subtle)]',
+          'w-full rounded-[9px] border py-1.5 pr-8 pl-8.5 text-[14.5px] placeholder:text-[var(--text-subtle)]',
         )}
         style={{
           backgroundColor: 'var(--bg-surface)',
@@ -127,11 +127,11 @@ export function SegmentedPills<T extends string>({
             selected={selected}
             tone={tone}
             surface={selected ? 'surface' : 'ghost'}
-            className="px-3 py-1 text-[12.5px] font-medium"
+            className="px-3 py-1 text-[14px] font-medium"
           >
             <span>{opt.label}</span>
             {typeof opt.count === 'number' ? (
-              <span className="ml-1.5 font-mono text-[12px] opacity-75">{opt.count}</span>
+              <span className="ml-1.5 font-mono text-[13.5px] opacity-75">{opt.count}</span>
             ) : null}
           </FocusButton>
         );
@@ -149,7 +149,7 @@ export const TagChip: React.FC<{
   const s = TONE_STYLES[tone];
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[12px] font-medium ${
+      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[13.5px] font-medium ${
         mono ? 'font-mono' : ''
       } ${className}`}
       style={{ backgroundColor: s.bg, color: s.fg }}
@@ -167,9 +167,9 @@ export const PanelSectionHeading: React.FC<{
 }> = ({ title, meta, action, className = '' }) => (
   <div className={`flex items-center justify-between gap-2 ${className}`}>
     <div className="flex min-w-0 items-baseline gap-2">
-      <h2 className="truncate text-[14px] font-semibold text-[var(--text-primary)]">{title}</h2>
+      <h2 className="truncate text-[15.5px] font-semibold text-[var(--text-primary)]">{title}</h2>
       {meta ? (
-        <span className="shrink-0 font-mono text-[12px] text-[var(--text-muted)]">{meta}</span>
+        <span className="shrink-0 font-mono text-[13.5px] text-[var(--text-muted)]">{meta}</span>
       ) : null}
     </div>
     {action ? <div className="shrink-0">{action}</div> : null}
@@ -240,15 +240,15 @@ export const SelectableRow: React.FC<SelectableRowProps> = ({
 
       <div className="min-w-0 flex-1">
         {eyebrow ? (
-          <div className="mb-0.5 flex items-center justify-between gap-2 text-[12px]">
+          <div className="mb-0.5 flex items-center justify-between gap-2 text-[13.5px]">
             {eyebrow}
           </div>
         ) : null}
-        <h3 className="line-clamp-2 text-[13.5px] leading-[1.42] font-semibold text-[var(--text-primary)]">
+        <h3 className="line-clamp-2 text-[15px] leading-[1.42] font-semibold text-[var(--text-primary)]">
           {title}
         </h3>
         {meta ? (
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-[var(--text-muted)]">
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[13.5px] text-[var(--text-muted)]">
             {meta}
           </div>
         ) : null}
@@ -268,7 +268,7 @@ export const EditorialCallout: React.FC<{
   const accent = DOMAIN_META[domain].colorVar;
   return (
     <div
-      className={`border-l-[3px] py-1.5 pl-4 text-[14.5px] leading-[1.75] ${className}`}
+      className={`border-l-[3px] py-1.5 pl-4 text-[16px] leading-[1.75] ${className}`}
       style={{
         borderColor: accent,
         backgroundColor: 'color-mix(in srgb, var(--bg-surface) 65%, transparent)',
@@ -276,7 +276,7 @@ export const EditorialCallout: React.FC<{
       }}
     >
       {title ? (
-        <div className="mb-1 text-[13px] font-semibold text-[var(--text-primary)]">{title}</div>
+        <div className="mb-1 text-[14.5px] font-semibold text-[var(--text-primary)]">{title}</div>
       ) : null}
       {children}
     </div>

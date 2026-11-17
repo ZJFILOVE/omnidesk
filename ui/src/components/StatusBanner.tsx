@@ -42,8 +42,8 @@ export const StatusBanner: React.FC<StatusBannerProps> = ({
       className={[
         'shrink-0 flex items-center justify-between gap-3',
         compact
-          ? 'rounded-[10px] px-3.5 py-2 text-[12.5px]'
-          : 'border-b border-[var(--border-subtle)] px-6 py-1.5 text-[12.5px]',
+          ? 'rounded-[10px] px-3.5 py-2 text-[14px]'
+          : 'border-b border-[var(--border-subtle)] px-6 py-1.5 text-[14px]',
       ].join(' ')}
       style={style}
     >
@@ -56,7 +56,7 @@ export const StatusBanner: React.FC<StatusBannerProps> = ({
         <span className="truncate">{text}</span>
       </span>
       {detail ? (
-        <span className="shrink-0 font-mono text-[12px] opacity-80">{detail}</span>
+        <span className="shrink-0 font-mono text-[13.5px] opacity-80">{detail}</span>
       ) : null}
     </div>
   );

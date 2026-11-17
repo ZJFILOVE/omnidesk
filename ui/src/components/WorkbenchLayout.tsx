@@ -284,7 +284,7 @@ export const SectionLabel: React.FC<{ children: React.ReactNode; className?: str
   className = '',
 }) => (
   <div
-    className={`text-[12px] font-semibold tracking-[0.015em] ${className}`}
+    className={`text-[13.5px] font-semibold tracking-[0.015em] ${className}`}
     style={{ color: 'var(--text-muted, #59544D)' }}
   >
     {children}
@@ -348,15 +348,15 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
                 aria-hidden="true"
               />
               <h1
-                className={`truncate text-[20px] leading-snug font-bold tracking-tight ${
-                  editorialHeader ? 'omni-editorial-title text-[22px]' : ''
+                className={`truncate text-[22px] leading-snug font-bold tracking-tight ${
+                  editorialHeader ? 'omni-editorial-title text-[24px]' : ''
                 }`}
               >
                 {title}
               </h1>
               {badge ? (
                 <span
-                  className="hidden sm:inline-flex shrink-0 items-center rounded-full px-2.5 py-0.5 font-mono text-[12px] font-medium"
+                  className="hidden sm:inline-flex shrink-0 items-center rounded-full px-2.5 py-0.5 font-mono text-[13.5px] font-medium"
                   style={{
                     backgroundColor: 'var(--bg-soft, #E6E2DA)',
                     color: 'var(--text-muted, #59544D)',
@@ -368,7 +368,7 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
             </div>
             {subtitle ? (
               <p
-                className="mt-0.5 truncate pl-4.5 text-[13px]"
+                className="mt-0.5 truncate pl-4.5 text-[14.5px]"
                 style={{ color: 'var(--text-muted, #59544D)' }}
               >
                 {subtitle}
@@ -418,7 +418,7 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
 
       {footer ? (
         <footer
-          className="flex flex-wrap items-center justify-between gap-2 border-t px-6 py-1.5 font-mono text-[12px]"
+          className="flex flex-wrap items-center justify-between gap-2 border-t px-6 py-1.5 font-mono text-[13.5px]"
           style={{
             backgroundColor: 'var(--bg-surface, #FCFBF9)',
             borderColor: HAIRLINE_BORDER,

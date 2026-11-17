@@ -125,10 +125,10 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
           <div className="flex items-center gap-3">
             <Keyboard className="h-4 w-4 text-[var(--focus-ring)]" aria-hidden="true" />
             <div>
-              <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
+              <h2 className="text-[17.5px] font-semibold text-[var(--text-primary)]">
                 全键盘操作与快捷键总览
               </h2>
-              <p className="text-[12.5px] text-[var(--text-muted)]">
+              <p className="text-[14px] text-[var(--text-muted)]">
                 {activeMeta
                   ? `当前工作台：${activeMeta.label} (${activeMeta.shortcut})`
                   : 'Paper & Graphite 桌面端 · 全键盘优先'}
@@ -137,7 +137,7 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
           </div>
 
           <div className="flex items-center gap-2.5">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--status-ok-bg)] px-2.5 py-0.5 text-[12px] font-medium text-[var(--status-ok-fg)]">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--status-ok-bg)] px-2.5 py-0.5 text-[13.5px] font-medium text-[var(--status-ok-fg)]">
               <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
               IME 自动避让
             </span>
@@ -165,7 +165,7 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
                   className="h-2 w-2 rounded-full"
                   style={{ backgroundColor: DOMAIN_CSS_VARS[group.domain] }}
                 />
-                <h3 className="text-[13.5px] font-semibold text-[var(--text-primary)]">
+                <h3 className="text-[15px] font-semibold text-[var(--text-primary)]">
                   {group.title}
                 </h3>
               </div>
@@ -174,14 +174,14 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
                 {group.items.map((item) => (
                   <li
                     key={`${group.id}-${item.keys.join('+')}`}
-                    className="flex items-center justify-between gap-3 text-[13px]"
+                    className="flex items-center justify-between gap-3 text-[14.5px]"
                   >
                     <span className="text-[var(--text-muted)]">{item.description}</span>
                     <span className="flex shrink-0 items-center gap-1">
                       {item.keys.map((keyLabel) => (
                         <kbd
                           key={keyLabel}
-                          className="omni-keycap rounded-[5px] px-1.5 py-0.5 text-[12px]"
+                          className="omni-keycap rounded-[5px] px-1.5 py-0.5 text-[13.5px]"
                         >
                           {keyLabel}
                         </kbd>
@@ -194,7 +194,7 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
           ))}
         </div>
 
-        <footer className="flex items-center justify-between border-t border-[var(--border-subtle)] bg-[var(--bg-sunken)]/55 px-6 py-2.5 text-[12px] text-[var(--text-muted)]">
+        <footer className="flex items-center justify-between border-t border-[var(--border-subtle)] bg-[var(--bg-sunken)]/55 px-6 py-2.5 text-[13.5px] text-[var(--text-muted)]">
           <span>所有焦点始终绑定于稳定节点 ID，异步刷新不丢失当前位置。</span>
           <span>按 Esc 或 ? 关闭</span>
         </footer>

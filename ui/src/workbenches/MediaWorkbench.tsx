@@ -15,6 +15,7 @@ import {
   TagChip,
 } from '../components/WorkbenchPrimitives';
 import { MEDIA_ITEMS, type ChapterSegment, type MediaItem } from '../data/mock';
+import { useLiveMedia } from '../hooks/useLiveDomain';
 import { enqueueEphemeralTrack, runMediaInspectorCapability } from './mediaActions';
 import MediaInspector from './panels/MediaInspector';
 import { useMpvPlayback } from './useMpvPlayback';
@@ -55,6 +56,11 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   const [activeFilter, setActiveFilter] = useState<MediaFilterId>('all');
   const [query, setQuery] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string>(MEDIA_ITEMS[0]?.id ?? '');
+  const liveMedia = useLiveMedia();
+  const mediaItems = useMemo(
+    () => (liveMedia.live && liveMedia.items.length > 0 ? liveMedia.items : MEDIA_ITEMS),
+    [liveMedia.items, liveMedia.live],
+  );
   const [previewPlaying, setPreviewPlaying] = useState<boolean>(false);
   const [previewSec, setPreviewSec] = useState<number>(64);
   const [previewVolume, setPreviewVolume] = useState<number>(85);
@@ -105,10 +111,10 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     if (!mpv.enabled) return;
     const activeItemId = mpv.state?.itemId;
     if (!activeItemId || activeItemId === selectedId) return;
-    if (MEDIA_ITEMS.some((item) => item.id === activeItemId)) {
+    if (mediaItems.some((item) => item.id === activeItemId)) {
       setSelectedId(activeItemId);
     }
-  }, [mpv.enabled, mpv.state?.itemId, selectedId]);
+  }, [mediaItems, mpv.enabled, mpv.state?.itemId, selectedId]);
 
   useEffect(() => {
     if (mpv.state?.lastError) {
@@ -133,7 +139,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
 
   const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return MEDIA_ITEMS.filter((item) => {
+    return mediaItems.filter((item) => {
       if (activeFilter === 'video' && item.kind !== 'video') return false;
       if (activeFilter === 'music' && item.kind !== 'music') return false;
       if (activeFilter === 'nas' && item.kind !== 'nas') return false;
@@ -154,14 +160,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
         item.summary.toLowerCase().includes(q)
       );
     });
-  }, [activeFilter, query]);
+  }, [activeFilter, mediaItems, query]);
 
   const selectedItem: MediaItem | undefined = useMemo(
     () =>
-      MEDIA_ITEMS.find((item) => item.id === selectedId) ??
+      mediaItems.find((item) => item.id === selectedId) ??
       filteredItems[0] ??
-      MEDIA_ITEMS[0],
-    [selectedId, filteredItems],
+      mediaItems[0],
+    [mediaItems, selectedId, filteredItems],
   );
 
   const currentSec = mpv.enabled ? mpv.positionSec : previewSec;
@@ -350,7 +356,16 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
             tone="media"
             ariaLabel="媒体源筛选"
           />
-          <span className="text-[12.5px] text-[var(--text-muted)]">{actionStatus}</span>
+          <span className="text-[14px] text-[var(--text-muted)]">
+            {liveMedia.live ? (
+              <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
+                LIVE ·{' '}
+                {liveMedia.sources.find((s) => s.sourceId === liveMedia.sourceId)?.title ??
+                  liveMedia.sourceId}
+              </span>
+            ) : null}
+            {actionStatus}
+          </span>
         </div>
       }
       mainPane={
@@ -438,7 +453,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                             boxShadow: 'var(--shadow-page)',
                           }}
                         >
-                          <span className="rounded bg-black/65 px-1.5 py-[1px] font-mono text-[11px] leading-tight">
+                          <span className="rounded bg-black/65 px-1.5 py-[1px] font-mono text-[12.5px] leading-tight">
                             {item.durationLabel}
                           </span>
                         </div>
@@ -462,7 +477,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
             )}
 
             <p
-              className="mt-2 border-t pt-3 text-[12px] leading-[1.68] text-[var(--text-subtle)]"
+              className="mt-2 border-t pt-3 text-[13.5px] leading-[1.68] text-[var(--text-subtle)]"
               style={{ borderColor: HAIRLINE_BORDER }}
             >
               歌单隔离：<span className="font-mono">p.YJXV7dEIeb3GzZX</span> 仅接受每日不重复精选；即时点播与重温仅写入「OmniDesk AI 灵感电台」。

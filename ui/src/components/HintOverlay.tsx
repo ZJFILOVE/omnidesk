@@ -196,18 +196,18 @@ export function HintOverlay({ open, targets, onPick, onClose }: HintOverlayProps
     >
       <div
         style={{ boxShadow: 'var(--shadow-elevated)' }}
-        className="pointer-events-none fixed top-3 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-4 py-1.5 text-[12.5px] text-[var(--text-primary)]"
+        className="pointer-events-none fixed top-3 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-4 py-1.5 text-[14px] text-[var(--text-primary)]"
       >
         <Crosshair className="h-3.5 w-3.5 text-[var(--focus-ring)]" aria-hidden="true" />
         <span className="font-medium">字母闪跳</span>
         {typed ? (
-          <kbd className="rounded border border-[var(--focus-ring)] bg-[var(--focus-fill)] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-[var(--focus-ring)]">
+          <kbd className="rounded border border-[var(--focus-ring)] bg-[var(--focus-fill)] px-1.5 py-0.5 font-mono text-[12.5px] font-semibold text-[var(--focus-ring)]">
             {typed}
           </kbd>
         ) : (
           <span className="text-[var(--text-muted)]">输入按键直达目标</span>
         )}
-        <span className="text-[11px] text-[var(--text-subtle)]">
+        <span className="text-[12.5px] text-[var(--text-subtle)]">
           {matchingCount}/{assigned.length}
         </span>
           <button
@@ -249,14 +249,14 @@ export function HintOverlay({ open, targets, onPick, onClose }: HintOverlayProps
                 : 'pointer-events-none border-[var(--border-line)] bg-[var(--bg-soft)] text-[var(--text-subtle)] opacity-25',
             ].join(' ')}
           >
-            <kbd className="omni-keycap rounded-[4px] px-1.5 py-0.5 text-[11px] font-bold">
+            <kbd className="omni-keycap rounded-[4px] px-1.5 py-0.5 text-[12.5px] font-bold">
               {matchedPrefix && (
                 <span className="text-[var(--focus-ring)]">{matchedPrefix}</span>
               )}
               <span>{remainingCode}</span>
             </kbd>
             {showLabel && (
-              <span className="max-w-[148px] truncate text-[11.5px] font-medium text-[var(--text-primary)]">
+              <span className="max-w-[148px] truncate text-[13px] font-medium text-[var(--text-primary)]">
                 {target.label}
               </span>
             )}

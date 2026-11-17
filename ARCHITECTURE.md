@@ -54,8 +54,8 @@ flowchart TB
 | 目录 | 技术栈 | 当前实现状态与规模 | 核心职责边界 |
 | :--- | :--- | :--- | :--- |
 | **`shell-tauri/`** | Rust + Tauri v2 | IPC/事件桥、真实 mpv 播放控制、libmpv 软件渲染画布、MPRIS2 D-Bus 服务均已实现 | 原生窗口壳、`control.sock` 代理与安全脱敏、`EntityBus` 事件转发、嵌入式播放与系统媒体键 |
-| **`ui/`** | React 19 + TypeScript + Tailwind v4 | 源码约 15.4k 行；`PluginStore`/`AiWorkbench`/`CompanionDock` 已接 Tauri IPC，`Text`/`Book` 以离线预览为主（**进行中**） | Paper/Graphite 主题、2D 空间焦点导航、五大工作台与 `F8` 伴读栏；浏览器独立运行回退示例模式 |
-| **`core/`** | Python 3.14 (`omnidesk_core`) | 源码约 7.7k 行；已实现并通过集成架构对齐 | 插件发现/热重载、`CapabilityRegistry`、`EntityBus`、`DomainRegistry`、`JobCenter`、`0600` 配置与密钥库、SQLite FTS5、`control.sock` 与 `omnidesk-pm` CLI（14 个子命令已实现；插件独立 `python_dependencies` 自动隔离仍为 **TODO**） |
+| **`ui/`** | React 19 + TypeScript + Tailwind v4 | 源码约 15.4k 行；`PluginStore`/`AiWorkbench`/`CompanionDock`/`Text`/`Book`/`Media` 均接 Tauri IPC | Paper/Graphite 主题、2D 空间焦点导航、五大工作台与 `F8` 伴读栏；在线源不可用时回退示例模式，并在工具栏显示 `LIVE` 徽标 |
+| **`core/`** | Python 3.14 (`omnidesk_core`) | 源码约 7.7k 行；已实现并通过集成架构对齐 | 插件发现/热重载、`CapabilityRegistry`、`EntityBus`、`DomainRegistry`、`JobCenter`、`0600` 配置与密钥库、SQLite FTS5、`control.sock`（`domain.*` / `job.*` / `search.*`）与 `omnidesk-pm` CLI（16 个子命令，含 `curate` / `rehydrate` 与隔离依赖安装） |
 | **`omnidesk_sdk/`** | Python 3.14 + Pydantic v2 | 基础契约、`SafeHttpClient`、`CookieSessionResolver` 均已实现 | `BasePlugin`、`PluginContext`、`MediaSource`/`TextSource`/`BookSource`、Pydantic 领域模型、`LocalConfigStore`/`LocalSecretVault`、`exec_subprocess`、安全 HTTP / Cookie 解析 |
 | **`plugins/`** | Python 3.14（零编译插件） | 当前共 **25** 个插件目录，全部完成 v2 迁移/新建 | 内置纯 Python 插件（`plugin.json` + `plugin.py` + `tests/`）；含社区、博客、配方、期刊、媒体与书本全链路 |
 | **`docs/`** | Markdown + JSON Schema | 3 份协议规范 + 3 份 JSON Schema | 插件接口协议、Web 会话桥接协议、AI 双模策展协议及 `docs/schemas/*.schema.json` |
@@ -107,9 +107,10 @@ flowchart TB
 
 1. **Stage 1：v2 核心骨架与全键盘空间工作台闭环（已完成）**
    - 已落地 `core/`（`omnidesk_core` + `control.sock` + `omnidesk-pm` 基础命令）、`omnidesk_sdk/`、`tests/`、`ui/`（Paper & Graphite 主题 + 2D 空间键盘焦点引擎 + 五大工作台 + `F8` 伴读栏）与 `shell-tauri/`（Tauri v2 + `control.sock` IPC 代理 + `EntityBus` 事件桥）。
-   - `libmpv` 软件渲染嵌入、MPRIS2、`SafeHttpClient`、`CookieSessionResolver` 均已实现；仅剩 `omnidesk-pm` 的插件独立 `python_dependencies` 自动隔离为 **TODO**。
+   - `libmpv` 软件渲染嵌入、MPRIS2、`SafeHttpClient`、`CookieSessionResolver`、插件隔离依赖安装与 Text/Book/Media 在线源接入均已实现；真实出帧测试由 `OMNIDESK_MPV_E2E=1` 在 CI 中强制执行。
 2. **Stage 2：核心底座与双模 AI 策展率先就位（已迁入 `plugins/`）**
    - 已实现 `plugin-magpie-agent`、`plugin-ai-curator`（双仓历史回灌 + 每日/交互双模隔离）、`plugin-music`（直接复用 `qwen-translator` 的 `music_adam` / `music_lyrics` 等模块 + Apple Music 写回门禁）及 `plugin-demo`。
+   - `plugin-magpie-agent` 已注册 `context.collect.v1`：按白名单并发收集网页、电子书、字幕、语音转写、文本/媒体源上下文，支持 `provider_plugin_id` 指定来源，剥离 secret/token/cookie，并支持 `ai.agent.v1` 的 `context_refs` 自动注入；MCP 提供 `omnidesk_collect_context` / `omnidesk_recommend` / `omnidesk_download_book`。副作用动作要求 `confirm` + `reason` 并写入 0600 审计日志。
 3. **Stage 3：书本伴读、浏览器桥接与文字社区全部就位（已完成）**
    - 已迁入 `plugin-chrome-web`、`plugin-ebook`、`plugin-pdf-babeldoc`、`plugin-zlib`、`plugin-annas-archive`。
    - `zhihu`、`v2ex`、`linuxdo`、`shuiyuan`、`reddit`、`x`、`blog`、`feed-recipe` 均已迁入并通过离线测试与 `omnidesk-pm verify`；`journals` 按 v2 规范完成 arXiv / Nature / bioRxiv / PubMed / Crossref 链路。

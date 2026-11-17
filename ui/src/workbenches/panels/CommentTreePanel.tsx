@@ -75,7 +75,7 @@ export const CommentTreePanel: React.FC<CommentTreePanelProps> = ({
       {notes.map((note, idx) => (
         <div
           key={`${articleId}-note-${idx}`}
-          className="rounded-[12px] p-3.5 text-[13.5px] leading-[1.7]"
+          className="rounded-[12px] p-3.5 text-[15px] leading-[1.7]"
           style={{ backgroundColor: 'var(--bg-canvas)' }}
         >
           {note}
@@ -98,7 +98,7 @@ export const CommentTreePanel: React.FC<CommentTreePanelProps> = ({
         {...focusableInputProps('text:note:input', activeFocusId, onFocus)}
         className={focusClass(
           activeFocusId === 'text:note:input',
-          'w-full rounded-[10px] border p-2.5 text-[13.5px] leading-[1.65]',
+          'w-full rounded-[10px] border p-2.5 text-[15px] leading-[1.65]',
         )}
         style={{
           backgroundColor: 'var(--bg-canvas)',
@@ -112,7 +112,7 @@ export const CommentTreePanel: React.FC<CommentTreePanelProps> = ({
         onActivate={onAddNote}
         selected
         tone="text"
-        className="px-3 py-2 text-[12.5px] font-medium"
+        className="px-3 py-2 text-[14px] font-medium"
       >
         保存至 ## Notes
       </FocusButton>

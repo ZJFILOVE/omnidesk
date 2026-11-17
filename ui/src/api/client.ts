@@ -16,6 +16,7 @@ import type {
   RpcErrorInfo,
   RpcResult,
   RuntimeStatus,
+  SourceDomain,
   TauriGlobal,
   TauriUnlistenFn,
 } from './types';
@@ -369,6 +370,171 @@ export async function call<T = Record<string, unknown>>(
       params: args.params ?? {},
       timeoutMs: args.timeoutMs,
       timeout_ms: args.timeout_ms,
+    }),
+  });
+}
+
+export interface DomainSourceDescriptor {
+  domain: SourceDomain;
+  sourceId: string;
+  pluginId: string;
+  title: string;
+  category: string;
+  priority: number;
+}
+
+export interface DomainInvokeArgs {
+  domain: SourceDomain;
+  method: string;
+  sourceId?: string;
+  payload?: Record<string, unknown>;
+  timeoutMs?: number;
+}
+
+function normalizeDomainSources(raw: unknown, domain: SourceDomain): DomainSourceDescriptor[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+    .map((entry) => ({
+      domain,
+      sourceId: String(entry.source_id ?? entry.sourceId ?? ''),
+      pluginId: String(entry.plugin_id ?? entry.pluginId ?? ''),
+      title: String(entry.title ?? ''),
+      category: String(entry.category ?? ''),
+      priority: Number(entry.priority ?? 0),
+    }))
+    .filter((entry) => entry.sourceId.length > 0);
+}
+
+/** List every live workbench source registered for a domain, highest priority first. */
+export async function domainSources(
+  domain: SourceDomain,
+): Promise<RpcResult<DomainSourceDescriptor[]>> {
+  const result = await call<Record<string, unknown>>({
+    op: 'domain.snapshot',
+    params: { domain },
+  });
+  if (result.available && result.ok && result.data) {
+    const data = result.data as Record<string, unknown>;
+    const key = `${domain}_sources`;
+    return {
+      ...result,
+      data: normalizeDomainSources(data[key] ?? data.sources, domain),
+    } as RpcResult<DomainSourceDescriptor[]>;
+  }
+  if (result.available && !result.ok) {
+    return result as RpcResult<DomainSourceDescriptor[]>;
+  }
+  return { available: false, ok: false, error: { code: 'service_offline', message: 'Tauri IPC unavailable' } };
+}
+
+/** Invoke a whitelisted method on a live workbench source (text/book/media). */
+export async function invokeDomain<T = unknown>(
+  args: DomainInvokeArgs,
+): Promise<RpcResult<T>> {
+  const result = await call<{ result?: T }>({
+    op: 'domain.invoke',
+    params: cleanDefined({
+      domain: args.domain,
+      method: args.method,
+      source_id: args.sourceId,
+      payload: args.payload ?? {},
+      timeout: args.timeoutMs ? args.timeoutMs / 1000 : undefined,
+    }),
+    timeoutMs: args.timeoutMs,
+  });
+  if (result.available && result.ok && result.data) {
+    return { ...result, data: (result.data as { result?: T }).result as T } as RpcResult<T>;
+  }
+  return result as RpcResult<T>;
+}
+
+export interface JobRecord {
+  id: string;
+  kind: string;
+  state: string;
+  pluginId?: string;
+  progress?: number;
+  message?: string;
+  result?: unknown;
+  error?: string;
+}
+
+function normalizeJob(raw: Record<string, unknown>): JobRecord {
+  return {
+    id: String(raw.id ?? raw.job_id ?? ''),
+    kind: String(raw.kind ?? raw.type ?? ''),
+    state: String(raw.state ?? raw.status ?? ''),
+    pluginId: raw.plugin_id ? String(raw.plugin_id) : undefined,
+    progress: typeof raw.progress === 'number' ? raw.progress : undefined,
+    message: raw.message ? String(raw.message) : undefined,
+    result: raw.result,
+    error: raw.error ? String(raw.error) : undefined,
+  };
+}
+
+export async function submitJob(
+  args: { kind: string; payload?: Record<string, unknown>; pluginId?: string },
+): Promise<RpcResult<{ job: JobRecord }>> {
+  const result = await call<{ job?: Record<string, unknown> }>({
+    op: 'job.submit',
+    params: cleanDefined({
+      kind: args.kind,
+      plugin_id: args.pluginId,
+      payload: args.payload ?? {},
+    }),
+  });
+  if (result.available && result.ok && result.data?.job) {
+    return { ...result, data: { job: normalizeJob(result.data.job) } } as RpcResult<{ job: JobRecord }>;
+  }
+  return result as RpcResult<{ job: JobRecord }>;
+}
+
+export async function listJobs(): Promise<RpcResult<{ jobs: JobRecord[] }>> {
+  const result = await call<{ jobs?: Record<string, unknown>[] }>({ op: 'job.list', params: {} });
+  if (result.available && result.ok) {
+    const jobs = (result.data?.jobs ?? []).map(normalizeJob);
+    return { ...result, data: { jobs } } as RpcResult<{ jobs: JobRecord[] }>;
+  }
+  return result as RpcResult<{ jobs: JobRecord[] }>;
+}
+
+export async function getJob(id: string): Promise<RpcResult<{ job: JobRecord }>> {
+  const result = await call<{ job?: Record<string, unknown> }>({ op: 'job.get', params: { id } });
+  if (result.available && result.ok && result.data?.job) {
+    return { ...result, data: { job: normalizeJob(result.data.job) } } as RpcResult<{ job: JobRecord }>;
+  }
+  return result as RpcResult<{ job: JobRecord }>;
+}
+
+export async function cancelJob(id: string): Promise<RpcResult<{ job: JobRecord }>> {
+  const result = await call<{ job?: Record<string, unknown> }>({ op: 'job.cancel', params: { id } });
+  if (result.available && result.ok && result.data?.job) {
+    return { ...result, data: { job: normalizeJob(result.data.job) } } as RpcResult<{ job: JobRecord }>;
+  }
+  return result as RpcResult<{ job: JobRecord }>;
+}
+
+export interface SearchHit {
+  id: string;
+  domain: string;
+  title: string;
+  snippet: string;
+  score: number;
+  payload: Record<string, unknown>;
+}
+
+export async function searchIndex(args: {
+  query: string;
+  domain?: string;
+  limit?: number;
+}): Promise<RpcResult<{ hits: SearchHit[]; total: number }>> {
+  return call<{ hits: SearchHit[]; total: number }>({
+    op: 'search.query',
+    params: cleanDefined({
+      query: args.query,
+      domain: args.domain,
+      limit: args.limit,
     }),
   });
 }

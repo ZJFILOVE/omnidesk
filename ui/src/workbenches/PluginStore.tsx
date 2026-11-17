@@ -96,7 +96,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
             onFocus={emitFocus}
             onActivate={() => void ctrl.loadPluginList()}
             surface="soft"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[14px] font-medium"
           >
             <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
             <span>刷新列表</span>
@@ -145,7 +145,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
             <span
               data-testid="store-status-message"
               role={ctrl.formMessage.tone === 'err' ? 'alert' : 'status'}
-              className="text-[12.5px] font-medium"
+              className="text-[14px] font-medium"
               style={{
                 color:
                   ctrl.formMessage.tone === 'err'
@@ -212,7 +212,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
                     title={plugin.name}
                     trailing={<TagChip tone={statusTone}>{statusLabel}</TagChip>}
                     meta={
-                      <span className="font-mono text-[12px]">
+                      <span className="font-mono text-[13.5px]">
                         {plugin.domain} · {plugin.kind} · v{plugin.version}
                       </span>
                     }

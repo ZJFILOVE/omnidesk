@@ -18,6 +18,7 @@ import {
   type BookItem,
   type VocabCard,
 } from '../data/mock';
+import { useLiveBooks, useLiveSpread, usePersistentVocab } from '../hooks/useLiveDomain';
 import BookShelfSidebar from './panels/BookShelfSidebar';
 import BookSpreadReader from './panels/BookSpreadReader';
 import VocabSm2Panel, { type Sm2Grade } from './panels/VocabSm2Panel';
@@ -92,6 +93,8 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     focusedItemId,
   );
   const [books, setBooks] = useState<BookItem[]>(BOOK_ITEMS);
+  const liveBooks = useLiveBooks();
+  const vocabPersist = usePersistentVocab(INITIAL_VOCAB_CARDS);
   const [leftTab, setLeftTab] = useState<'shelf' | 'search'>('shelf');
   // Compact spine strip by default so the dual-page book spread maximizes above the fold at 1280x800
   const [shelfOpen, setShelfOpen] = useState<boolean>(false);
@@ -105,17 +108,39 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const [vocabRevealed, setVocabRevealed] = useState<boolean>(true);
   const [statusMessage, setStatusMessage] = useState<string>('BabelDOC 双栏对照 + SM-2 生词台已同步');
 
+  useEffect(() => {
+    if (liveBooks.live && liveBooks.items.length > 0) {
+      setBooks(liveBooks.items);
+    }
+  }, [liveBooks.items, liveBooks.live]);
+
+  useEffect(() => {
+    if (vocabPersist.live && vocabPersist.cards.length > 0) {
+      setVocabCards(vocabPersist.cards);
+    }
+  }, [vocabPersist.cards, vocabPersist.live]);
+
   const selectedBook = useMemo(
     () => books.find((b) => b.id === selectedBookId) ?? books[0],
     [books, selectedBookId],
   );
+  const liveSpread = useLiveSpread(
+    selectedBook?.id ?? '',
+    selectedBook?.currentPage ?? 1,
+    selectedBook?.sourcePlugin,
+  );
+  const bookSpreads = useMemo(
+    () =>
+      liveSpread.spreads.length > 0 ? liveSpread.spreads : selectedBook?.spreads ?? [],
+    [liveSpread.spreads, selectedBook],
+  );
   const spreadIndex = selectedBook
     ? Math.min(
         Math.max(0, spreadIndexByBook[selectedBook.id] ?? 0),
-        Math.max(0, selectedBook.spreads.length - 1),
+        Math.max(0, bookSpreads.length - 1),
       )
     : 0;
-  const activeSpread = selectedBook?.spreads[spreadIndex];
+  const activeSpread = bookSpreads[spreadIndex];
   const activeVocab = useMemo(
     () => vocabCards.find((v) => v.id === activeVocabId) ?? vocabCards[0],
     [vocabCards, activeVocabId],
@@ -171,10 +196,10 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
 
   const handleTurnPage = (delta: number) => {
     if (!selectedBook) return;
-    const maxIdx = Math.max(0, selectedBook.spreads.length - 1);
+    const maxIdx = Math.max(0, bookSpreads.length - 1);
     const nextIdx = Math.max(0, Math.min(maxIdx, spreadIndex + delta));
     setSpreadIndexByBook((prev) => ({ ...prev, [selectedBook.id]: nextIdx }));
-    setStatusMessage(`已翻页至第 ${selectedBook.spreads[nextIdx]?.page ?? selectedBook.currentPage} 页`);
+    setStatusMessage(`已翻页至第 ${bookSpreads[nextIdx]?.page ?? selectedBook.currentPage} 页`);
   };
 
   const handleLookupTerm = (term: string) => {
@@ -202,6 +227,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     } else {
       const nextCard = createVocabCard(cleanWord, contextSentence, bookTitle, activeSpread?.page);
       setVocabCards((prev) => [nextCard, ...prev]);
+      void vocabPersist.add({ ...nextCard, word: cleanWord });
       setActiveVocabId(nextCard.id);
       setVocabRevealed(true);
       setVocabOpen(true);
@@ -245,6 +271,8 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const handleSm2Review = (grade: Sm2Grade) => {
     if (!activeVocab) return;
     const updated = applySm2(activeVocab, grade);
+    const qualityMap: Record<Sm2Grade, number> = { again: 1, hard: 3, good: 4, easy: 5 };
+    void vocabPersist.review(activeVocab.word, qualityMap[grade]);
     const nextList = vocabCards.map((c) => (c.id === updated.id ? updated : c));
     setVocabCards(nextList);
     const nextCard = nextList[(nextList.findIndex((c) => c.id === updated.id) + 1) % nextList.length];
@@ -322,7 +350,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
             selected={shelfOpen}
             tone="book"
             surface="soft"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[14px] font-medium"
           >
             {shelfOpen ? (
               <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
@@ -339,7 +367,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
             selected={vocabOpen}
             tone="book"
             surface="soft"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[14px] font-medium"
           >
             <BookMarked className="h-3.5 w-3.5" aria-hidden="true" />
             <span>生词台 ({vocabCards.length})</span>
@@ -352,14 +380,14 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
             selected={glossaryLocked}
             tone="ok"
             surface="soft"
-            className="px-3 py-1.5 text-[12.5px] font-medium"
+            className="px-3 py-1.5 text-[14px] font-medium"
           >
             {glossaryLocked ? '术语表锁定 ✓' : '术语表未锁定'}
           </FocusButton>
         </div>
       }
       toolbar={
-        <div className="flex w-full items-center justify-between gap-2 text-[12.5px] text-[var(--text-muted)]">
+        <div className="flex w-full items-center justify-between gap-2 text-[14px] text-[var(--text-muted)]">
           <span>双栏原版对照 · 划词支持词源拆解与生词入库</span>
           <span data-testid="book-status-message" className="truncate font-medium">
             {statusMessage}
@@ -433,10 +461,10 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
                         {isSelected ? <BookOpen className="mb-1 h-2.5 w-2.5 opacity-90" /> : null}
                       </span>
                       <span className="min-w-0 max-w-[148px]">
-                        <span className="block truncate text-[12.5px] font-semibold text-[var(--text-primary)]">
+                        <span className="block truncate text-[14px] font-semibold text-[var(--text-primary)]">
                           {book.title}
                         </span>
-                        <span className="block font-mono text-[11.5px] text-[var(--text-muted)]">
+                        <span className="block font-mono text-[13px] text-[var(--text-muted)]">
                           {book.format.toUpperCase()} · {book.progressPct}%
                         </span>
                       </span>
@@ -455,7 +483,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
                     setShelfOpen(true);
                   }}
                   surface="soft"
-                  className="px-2.5 py-1.5 text-[12px] font-medium"
+                  className="px-2.5 py-1.5 text-[13.5px] font-medium"
                 >
                   封面墙
                 </FocusButton>
@@ -468,7 +496,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
                     setShelfOpen(true);
                   }}
                   surface="soft"
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-medium"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[13.5px] font-medium"
                 >
                   <Search className="h-3 w-3" aria-hidden="true" />
                   <span>Z-Lib 搜书</span>

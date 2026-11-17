@@ -49,7 +49,7 @@ export const VocabSm2Panel: React.FC<VocabSm2PanelProps> = ({
             selected={activeVocab.id === card.id}
             tone="book"
             surface="canvas"
-            className="px-2.5 py-1 font-mono text-[12px]"
+            className="px-2.5 py-1 font-mono text-[13.5px]"
           >
             {card.word}
           </FocusButton>
@@ -63,17 +63,17 @@ export const VocabSm2Panel: React.FC<VocabSm2PanelProps> = ({
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-[20px] font-bold tracking-tight text-[var(--text-primary)]">
+          <div className="text-[22px] font-bold tracking-tight text-[var(--text-primary)]">
             {activeVocab.word}
           </div>
-          <div className="mt-0.5 font-mono text-[12px] text-[var(--text-muted)]">
+          <div className="mt-0.5 font-mono text-[13.5px] text-[var(--text-muted)]">
             {activeVocab.phonetic} · {activeVocab.pos}
           </div>
         </div>
         <TagChip tone="ok">{activeVocab.dueLabel}</TagChip>
       </div>
 
-      <p className="text-[13.5px] leading-[1.7] italic text-[var(--text-secondary)]">
+      <p className="text-[15px] leading-[1.7] italic text-[var(--text-secondary)]">
         “{activeVocab.contextSentence}”
       </p>
 
@@ -83,19 +83,19 @@ export const VocabSm2Panel: React.FC<VocabSm2PanelProps> = ({
         onFocus={onFocus}
         onActivate={onToggleReveal}
         surface="soft"
-        className="px-3 py-1.5 text-[12.5px] font-medium"
+        className="px-3 py-1.5 text-[14px] font-medium"
       >
         {vocabRevealed ? '隐藏释义与词源' : '显示释义与词源'}
       </FocusButton>
 
       {vocabRevealed ? (
         <div
-          className="flex flex-col gap-2 border-t pt-3 text-[13.5px] leading-[1.7]"
+          className="flex flex-col gap-2 border-t pt-3 text-[15px] leading-[1.7]"
           style={{ borderColor: HAIRLINE_BORDER }}
         >
           <div className="font-semibold text-[var(--text-primary)]">{activeVocab.meaningZh}</div>
           <div className="text-[var(--text-secondary)]">词源：{activeVocab.etymology}</div>
-          <div className="font-mono text-[12px] text-[var(--text-subtle)]">
+          <div className="font-mono text-[13.5px] text-[var(--text-subtle)]">
             来源：{activeVocab.bookTitle} · EF {activeVocab.easeFactor} · 间隔 {activeVocab.intervalDays}d
           </div>
         </div>
@@ -110,7 +110,7 @@ export const VocabSm2Panel: React.FC<VocabSm2PanelProps> = ({
             onFocus={onFocus}
             onActivate={() => onRateSm2(btn.grade)}
             surface="surface"
-            className="py-2 text-center text-[12.5px] font-medium"
+            className="py-2 text-center text-[14px] font-medium"
           >
             {btn.label}
           </FocusButton>
@@ -120,17 +120,17 @@ export const VocabSm2Panel: React.FC<VocabSm2PanelProps> = ({
 
     {activeVocab.nasClip ? (
       <div
-        className="flex flex-col gap-2.5 rounded-[14px] p-4 text-[13.5px] leading-[1.7]"
+        className="flex flex-col gap-2.5 rounded-[14px] p-4 text-[15px] leading-[1.7]"
         style={{ backgroundColor: 'var(--bg-sunken)' }}
       >
         <div className="flex items-center justify-between font-semibold text-[var(--text-primary)]">
           <span>飞牛 NAS 原声切片</span>
-          <span className="font-mono text-[12px] text-[var(--text-muted)]">
+          <span className="font-mono text-[13.5px] text-[var(--text-muted)]">
             {activeVocab.nasClip.showTitle} · {activeVocab.nasClip.episode}
           </span>
         </div>
         <div className="text-[var(--text-primary)]">“{activeVocab.nasClip.lineEn}”</div>
-        <div className="text-[12.5px] text-[var(--text-muted)]">{activeVocab.nasClip.lineZh}</div>
+        <div className="text-[14px] text-[var(--text-muted)]">{activeVocab.nasClip.lineZh}</div>
         <FocusButton
           focusId="book:vocab:clip-jump"
           activeFocusId={activeFocusId}
@@ -138,7 +138,7 @@ export const VocabSm2Panel: React.FC<VocabSm2PanelProps> = ({
           onActivate={() => onClipJump(activeVocab)}
           selected
           tone="book"
-          className="px-3 py-2 font-mono text-[12px] font-medium"
+          className="px-3 py-2 font-mono text-[13.5px] font-medium"
         >
           跳播原片 @ {activeVocab.nasClip.timestampLabel}
         </FocusButton>

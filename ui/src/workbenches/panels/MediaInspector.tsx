@@ -106,13 +106,13 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 backdropFilter: 'blur(12px)',
               }}
             >
-              <div className="flex items-center justify-between font-mono text-[12px] opacity-85">
+              <div className="flex items-center justify-between font-mono text-[13.5px] opacity-85">
                 <span>ALAC</span>
                 <Disc3 className="h-4 w-4" aria-hidden="true" />
               </div>
               <div>
-                <div className="text-[12px] opacity-85">{item.thumbTag}</div>
-                <div className="mt-1 line-clamp-2 text-[15px] leading-snug font-semibold">
+                <div className="text-[13.5px] opacity-85">{item.thumbTag}</div>
+                <div className="mt-1 line-clamp-2 text-[16.5px] leading-snug font-semibold">
                   {item.creator}
                 </div>
               </div>
@@ -120,27 +120,27 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
 
             <div className="flex min-w-0 flex-1 flex-col justify-between gap-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="rounded-full bg-black/40 px-3 py-0.5 font-mono text-[12px] backdrop-blur-xs">
+                <span className="rounded-full bg-black/40 px-3 py-0.5 font-mono text-[13.5px] backdrop-blur-xs">
                   {item.verificationLabel ?? item.sourceId}
                 </span>
                 <div className="flex items-center gap-1.5">
                   {playbackBackend !== 'preview' ? (
-                    <span className="rounded-full bg-black/40 px-3 py-0.5 font-mono text-[12px] backdrop-blur-xs">
+                    <span className="rounded-full bg-black/40 px-3 py-0.5 font-mono text-[13.5px] backdrop-blur-xs">
                       {playbackBackend === 'libmpv' ? 'LIBMPV' : 'MPV'}
                     </span>
                   ) : null}
-                  <span className="rounded-full bg-white/92 px-3 py-0.5 font-mono text-[12px] font-semibold text-black">
+                  <span className="rounded-full bg-white/92 px-3 py-0.5 font-mono text-[13.5px] font-semibold text-black">
                     {playing ? 'PLAYING' : 'PAUSED'}
                   </span>
                 </div>
               </div>
 
               <div>
-                <h2 className="text-[24px] leading-tight font-bold tracking-tight">{item.title}</h2>
-                <p className="mt-1.5 text-[14.5px] text-white/85">{item.subtitle}</p>
+                <h2 className="text-[26px] leading-tight font-bold tracking-tight">{item.title}</h2>
+                <p className="mt-1.5 text-[16px] text-white/85">{item.subtitle}</p>
               </div>
 
-              <div className="flex items-center justify-between font-mono text-[12.5px] text-white/85">
+              <div className="flex items-center justify-between font-mono text-[14px] text-white/85">
                 <span>{formatMediaTime(currentSec)}</span>
                 <span>{durationLabel}</span>
               </div>
@@ -173,28 +173,28 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
           <div className="relative flex h-full flex-col justify-between p-5 sm:p-6">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-black/45 px-3 py-1 font-mono text-[12px] backdrop-blur-xs">
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-black/45 px-3 py-1 font-mono text-[13.5px] backdrop-blur-xs">
                   <Film className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>{item.thumbTag}</span>
                 </span>
                 {item.nasMeta ? (
-                  <span className="rounded-full bg-black/45 px-3 py-1 font-mono text-[12px] backdrop-blur-xs">
+                  <span className="rounded-full bg-black/45 px-3 py-1 font-mono text-[13.5px] backdrop-blur-xs">
                     {item.nasMeta.resolution}
                   </span>
                 ) : null}
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="rounded-full bg-black/45 px-3 py-1 font-mono text-[12px]">
+                <span className="rounded-full bg-black/45 px-3 py-1 font-mono text-[13.5px]">
                   {formatMediaTime(currentSec)} / {durationLabel}
                 </span>
                 <div className="flex items-center gap-1.5">
                   {playbackBackend !== 'preview' ? (
-                    <span className="rounded-full bg-black/45 px-3 py-1 font-mono text-[12px] backdrop-blur-xs">
+                    <span className="rounded-full bg-black/45 px-3 py-1 font-mono text-[13.5px] backdrop-blur-xs">
                       {playbackBackend === 'libmpv' ? 'LIBMPV' : 'MPV'}
                     </span>
                   ) : null}
-                  <span className="rounded-full bg-white/92 px-3 py-0.5 font-mono text-[12px] font-semibold text-black">
+                  <span className="rounded-full bg-white/92 px-3 py-0.5 font-mono text-[13.5px] font-semibold text-black">
                     {playing ? 'PLAYING' : 'PAUSED'}
                   </span>
                 </div>
@@ -202,13 +202,13 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
             </div>
 
             <div className="max-w-2xl">
-              <div className="text-[13px] font-medium text-white/85">
+              <div className="text-[14.5px] font-medium text-white/85">
                 {item.creator} · {item.verificationLabel ?? item.sourceId}
               </div>
               <h2 className="mt-1 line-clamp-2 text-[23px] leading-snug font-bold tracking-tight">
                 {item.title}
               </h2>
-              <p className="mt-1 line-clamp-1 text-[14px] text-white/85">{item.subtitle}</p>
+              <p className="mt-1 line-clamp-1 text-[15.5px] text-white/85">{item.subtitle}</p>
             </div>
           </div>
 
@@ -224,7 +224,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         style={{ backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-page)' }}
       >
         <div className="flex items-center gap-3">
-          <span className="w-12 font-mono text-[12px] text-[var(--text-muted)]">
+          <span className="w-12 font-mono text-[13.5px] text-[var(--text-muted)]">
             {formatMediaTime(currentSec)}
           </span>
           <input
@@ -241,7 +241,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
               'flex-1 cursor-pointer accent-[var(--domain-media)]',
             )}
           />
-          <span className="w-12 text-right font-mono text-[12px] text-[var(--text-muted)]">
+          <span className="w-12 text-right font-mono text-[13.5px] text-[var(--text-muted)]">
             {durationLabel}
           </span>
         </div>
@@ -252,7 +252,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
               className="h-4 w-4 shrink-0 text-[var(--text-muted)]"
               aria-hidden="true"
             />
-            <span className="w-8 font-mono text-[12px] text-[var(--text-muted)]">音量</span>
+            <span className="w-8 font-mono text-[13.5px] text-[var(--text-muted)]">音量</span>
             <input
               type="range"
               min={0}
@@ -267,7 +267,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 'flex-1 cursor-pointer accent-[var(--domain-media)]',
               )}
             />
-            <span className="w-10 text-right font-mono text-[12px] text-[var(--text-muted)]">
+            <span className="w-10 text-right font-mono text-[13.5px] text-[var(--text-muted)]">
               {volume}%
             </span>
           </div>
@@ -282,7 +282,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
               onActivate={onTogglePlay}
               selected
               tone="media"
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] font-semibold"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[14.5px] font-semibold"
             >
               {playing ? (
                 <Pause className="h-3.5 w-3.5" aria-hidden="true" />
@@ -297,7 +297,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
               onFocus={onFocus}
               onActivate={() => onSeek(Math.max(0, currentSec - 15))}
               surface="soft"
-              className="inline-flex items-center gap-1 px-3 py-2 font-mono text-[12.5px]"
+              className="inline-flex items-center gap-1 px-3 py-2 font-mono text-[14px]"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
               <span>-15s</span>
@@ -308,7 +308,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
               onFocus={onFocus}
               onActivate={() => onSeek(Math.min(totalSec, currentSec + 15))}
               surface="soft"
-              className="inline-flex items-center gap-1 px-3 py-2 font-mono text-[12.5px]"
+              className="inline-flex items-center gap-1 px-3 py-2 font-mono text-[14px]"
             >
               <RotateCw className="h-3.5 w-3.5" aria-hidden="true" />
               <span>+15s</span>
@@ -321,7 +321,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 onActivate={() => onSkipSponsor(nextSponsorSegment)}
                 selected
                 tone="warn"
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-medium"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-[14px] font-medium"
               >
                 <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>空降跳过赞助</span>
@@ -339,7 +339,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 selected={inEphemeralQueue}
                 tone="core"
                 surface="soft"
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-medium"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-[14px] font-medium"
               >
                 <Radio className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>
@@ -359,7 +359,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   onStatusChange('FunASR SenseVoiceSmall 离线双语字幕检查点已验证')
                 }
                 surface="soft"
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-medium"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-[14px] font-medium"
               >
                 <Subtitles className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>触发 FunASR 离线字幕校验 (speech.asr.v1)</span>
@@ -370,7 +370,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
       </div>
 
       {/* Editorial Synopsis */}
-      <p className="max-w-[68ch] px-1 text-[15px] leading-[1.75] text-[var(--text-secondary)]">
+      <p className="max-w-[68ch] px-1 text-[16.5px] leading-[1.75] text-[var(--text-secondary)]">
         {item.summary}
       </p>
 
@@ -402,14 +402,14 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                       surface={isCurrent ? 'surface' : 'ghost'}
                       className="omni-focus-row px-4 py-3 text-left"
                     >
-                      <div className="mb-1 flex items-center justify-between font-mono text-[12px] opacity-80">
+                      <div className="mb-1 flex items-center justify-between font-mono text-[13.5px] opacity-80">
                         <span>{formatMediaTime(line.timeSec)}</span>
                         {line.note ? <span>{line.note}</span> : null}
                       </div>
-                      <div className="text-[14.5px] leading-[1.6] font-medium text-[var(--text-primary)]">
+                      <div className="text-[16px] leading-[1.6] font-medium text-[var(--text-primary)]">
                         {line.original}
                       </div>
-                      <div className="mt-0.5 text-[13.5px] leading-[1.7] text-[var(--text-muted)]">
+                      <div className="mt-0.5 text-[15px] leading-[1.7] text-[var(--text-muted)]">
                         {line.translation}
                       </div>
                     </FocusButton>
@@ -439,7 +439,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   selected={active || isSponsor}
                   tone={isSponsor ? 'warn' : 'media'}
                   surface="surface"
-                  className="flex items-center justify-between gap-2 px-3.5 py-2.5 text-left text-[13px]"
+                  className="flex items-center justify-between gap-2 px-3.5 py-2.5 text-left text-[14.5px]"
                 >
                   <span className="truncate font-medium">{ch.label}</span>
                   <TagChip tone={isSponsor ? 'warn' : 'neutral'} mono>
@@ -470,27 +470,27 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   onStatusChange(`SubHunter + ffsubsync 已对齐并保护人工字幕：${item.title}`)
                 }
                 surface="soft"
-                className="px-3 py-1.5 text-[12.5px] font-medium"
+                className="px-3 py-1.5 text-[14px] font-medium"
               >
                 运行 SubHunter 字幕检索与时间轴对齐
               </FocusButton>
             }
           />
-          <dl className="grid grid-cols-1 gap-x-6 gap-y-2.5 text-[13px] sm:grid-cols-2">
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-2.5 text-[14.5px] sm:grid-cols-2">
             <div>
-              <dt className="text-[12px] text-[var(--text-subtle)]">视频编码</dt>
+              <dt className="text-[13.5px] text-[var(--text-subtle)]">视频编码</dt>
               <dd className="mt-0.5 font-mono text-[var(--text-primary)]">{item.nasMeta.codec}</dd>
             </div>
             <div>
-              <dt className="text-[12px] text-[var(--text-subtle)]">分辨率与码率</dt>
+              <dt className="text-[13.5px] text-[var(--text-subtle)]">分辨率与码率</dt>
               <dd className="mt-0.5 font-mono text-[var(--text-primary)]">{item.nasMeta.resolution}</dd>
             </div>
             <div className="sm:col-span-2">
-              <dt className="text-[12px] text-[var(--text-subtle)]">挂载路径</dt>
+              <dt className="text-[13.5px] text-[var(--text-subtle)]">挂载路径</dt>
               <dd className="mt-0.5 truncate font-mono text-[var(--text-secondary)]">{item.nasMeta.path}</dd>
             </div>
             <div className="sm:col-span-2">
-              <dt className="text-[12px] text-[var(--text-subtle)]">字幕状态</dt>
+              <dt className="text-[13.5px] text-[var(--text-subtle)]">字幕状态</dt>
               <dd className="mt-0.5 text-[var(--text-primary)]">{item.nasMeta.subtitleStatus}</dd>
             </div>
           </dl>
