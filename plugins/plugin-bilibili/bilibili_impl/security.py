@@ -14,13 +14,28 @@ from omnidesk_sdk.stores import redact_secrets
 DEFAULT_API_BASE = "https://api.bilibili.com"
 DEFAULT_PASSPORT_BASE = "https://passport.bilibili.com"
 DEFAULT_LIVE_BASE = "https://api.live.bilibili.com"
+DEFAULT_GRPC_ENDPOINT = (
+    "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite"
+)
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+DEFAULT_ANDROID_USER_AGENT = (
+    "Dalvik/2.1.0 (Linux; U; Android 12) 9.13.0 os/android "
+    "model/redroid mobi_app/android build/9130500 channel/master "
+    "network/2 grpc-java-cronet/1.36.1"
+)
 
-_ALLOWED_PRIMARY_DOMAINS = ("bilibili.com", "b23.tv")
-_ALLOWED_CDN_DOMAINS = ("bilibili.com", "b23.tv", "hdslb.com", "bilivideo.com", "bilivideo.cn")
+_ALLOWED_PRIMARY_DOMAINS = ("bilibili.com", "b23.tv", "biliapi.net")
+_ALLOWED_CDN_DOMAINS = (
+    "bilibili.com",
+    "b23.tv",
+    "biliapi.net",
+    "hdslb.com",
+    "bilivideo.com",
+    "bilivideo.cn",
+)
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 _BILI_SECRET_RE = re.compile(
@@ -141,6 +156,22 @@ def validate_ytdlp_bin(raw_bin: str) -> str:
     if ".." in Path(cleaned).parts:
         raise SecurityValidationError("Path traversal forbidden in ytdlp_bin", error_code="path_safety")
     return cleaned
+
+
+def validate_curl_bin(raw_bin: str) -> str:
+    """Validate the curl executable path used for HTTP/2 gRPC transport."""
+    cleaned = (raw_bin or "curl").strip()
+    return validate_ytdlp_bin(cleaned) or "curl"
+
+
+def validate_grpc_endpoint(raw_endpoint: str, *, allowed_loopback_origins: Iterable[str] = ()) -> str:
+    """Validate the PlayViewUnite HTTPS endpoint or an explicit loopback mock."""
+    cleaned = (raw_endpoint or DEFAULT_GRPC_ENDPOINT).strip()
+    return validate_url(
+        cleaned,
+        allow_cdn=False,
+        allowed_loopback_origins=allowed_loopback_origins,
+    )
 
 
 def redact_bilibili_secrets(text: str, extra_secrets: Iterable[str] = ()) -> str:

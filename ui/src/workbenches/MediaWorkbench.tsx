@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { isTauriAvailable, mpvEmbedSetActive } from '../api';
+import { callCapability, isTauriAvailable, mpvEmbedSetActive } from '../api';
 import MpvCanvas from '../components/MpvCanvas';
 import StateView from '../components/StateView';
 import WorkbenchLayout, {
@@ -17,9 +17,10 @@ import {
 import { MEDIA_ITEMS, type ChapterSegment, type MediaItem } from '../data/mock';
 import { useLiveMedia } from '../hooks/useLiveDomain';
 import { enqueueEphemeralTrack, runMediaInspectorCapability } from './mediaActions';
+import { MediaSourceToolbar } from './MediaSourceToolbar';
 import MediaInspector from './panels/MediaInspector';
 import { useMediaLyrics } from './useMediaLyrics';
-import { useMpvPlayback } from './useMpvPlayback';
+import { useMpvPlayback, type MpvPlaybackController } from './useMpvPlayback';
 
 type MediaFilterId =
   | 'all'
@@ -45,9 +46,11 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   searchTrigger,
   mediaToggleTrigger,
   runtimeStatus,
+  mpvController,
   isActive = true,
   onContextChange,
-}) => {
+  onOpenPluginSettings,
+}: WorkbenchViewProps & { mpvController?: MpvPlaybackController }) => {
   const [activeFocusId, emitFocus] = useWorkbenchFocus(
     'media:card:media-yt-attention',
     focusId,
@@ -55,9 +58,18 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     focusedItemId,
   );
   const [activeFilter, setActiveFilter] = useState<MediaFilterId>('all');
+  const [activeSourceId, setActiveSourceId] = useState<string>('');
+  const [activeCategory, setActiveCategory] = useState<string>('');
   const [query, setQuery] = useState<string>('');
+  const [backendQuery, setBackendQuery] = useState<string>('');
+  const [quality, setQuality] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string>(MEDIA_ITEMS[0]?.id ?? '');
-  const liveMedia = useLiveMedia();
+  const liveMedia = useLiveMedia(activeCategory, backendQuery, activeSourceId);
+  const categoryOptions = liveMedia.categories;
+  const effectiveCategory =
+    activeCategory && categoryOptions.includes(activeCategory)
+      ? activeCategory
+      : (categoryOptions[0] ?? activeCategory);
   const mediaItems = useMemo(
     () => (liveMedia.live && liveMedia.items.length > 0 ? liveMedia.items : MEDIA_ITEMS),
     [liveMedia.items, liveMedia.live],
@@ -72,7 +84,10 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       ? (runtimeStatus?.mpv?.detail ?? 'libmpv 硬解管线就绪')
       : '离线预览：示例媒体与模拟时间轴',
   );
-  const mpv = useMpvPlayback();
+  const localMpv = useMpvPlayback({
+    enabled: !mpvController && isTauriAvailable(),
+  });
+  const mpv = mpvController ?? localMpv;
   const searchRef = useRef<HTMLInputElement | null>(null);
   const lastToggleRef = useRef<number>(mediaToggleTrigger ?? 0);
   const mountedRef = useRef(true);
@@ -100,6 +115,34 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       searchRef.current?.focus();
     }
   }, [searchTrigger]);
+
+  useEffect(() => {
+    if (liveMedia.sources.length === 0) return;
+    const chosenSourceId = activeSourceId || liveMedia.sourceId;
+    if (!activeSourceId && chosenSourceId) {
+      setActiveSourceId(chosenSourceId);
+      return;
+    }
+    const source = liveMedia.sources.find((entry) => entry.sourceId === chosenSourceId);
+    const nextCategories = source?.categories ?? [];
+    if (nextCategories.length === 0) {
+      if (activeCategory) setActiveCategory('');
+      return;
+    }
+    if (!activeCategory || !nextCategories.includes(activeCategory)) {
+      setActiveCategory(nextCategories[0]);
+    }
+  }, [activeCategory, activeSourceId, liveMedia.sourceId, liveMedia.sources]);
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (effectiveCategory !== 'search') {
+      setBackendQuery('');
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setBackendQuery(trimmed), 350);
+    return () => window.clearTimeout(timer);
+  }, [effectiveCategory, query]);
 
   useEffect(() => {
     if (mediaToggleTrigger !== undefined && mediaToggleTrigger !== lastToggleRef.current) {
@@ -163,6 +206,10 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     });
   }, [activeFilter, mediaItems, query]);
 
+  useEffect(() => {
+    mpv.setQueue(filteredItems);
+  }, [filteredItems, mpv.setQueue]);
+
   const selectedItem: MediaItem | undefined = useMemo(
     () =>
       mediaItems.find((item) => item.id === selectedId) ??
@@ -170,6 +217,37 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       mediaItems[0],
     [mediaItems, selectedId, filteredItems],
   );
+  const qualityOptions = selectedItem?.streamResolver?.qualityOptions ?? [];
+  const qualityKey = qualityOptions.join('|');
+  useEffect(() => {
+    if (qualityOptions.length === 0) {
+      if (quality) setQuality('');
+      return;
+    }
+    setQuality((previous) => {
+      if (qualityOptions.includes(previous)) return previous;
+      const reported = selectedItem?.qualityLabel?.toLowerCase() ?? '';
+      return qualityOptions.includes(reported) ? reported : '';
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qualityKey, selectedItem?.id, selectedItem?.qualityLabel]);
+
+  const activeSource = useMemo(
+    () =>
+      liveMedia.sources.find(
+        (entry) => entry.sourceId === (activeSourceId || liveMedia.sourceId),
+      ),
+    [activeSourceId, liveMedia.sourceId, liveMedia.sources],
+  );
+  const settingsPluginId =
+    activeSource?.pluginId ||
+    (selectedItem?.sourceId.startsWith('plugin-') ? selectedItem.sourceId : '');
+  const settingsLabel =
+    settingsPluginId === 'plugin-bilibili'
+      ? 'B站登录/插件设置'
+      : settingsPluginId === 'plugin-youtube'
+        ? 'YouTube 登录/设置'
+        : '';
   const mediaLyrics = useMediaLyrics(selectedItem);
   const displayItem = useMemo(
     () =>
@@ -241,6 +319,46 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     );
   }, [selectedItem, currentSec]);
 
+  const handleSourceChange = (sourceId: string) => {
+    setActiveSourceId(sourceId);
+    setActiveCategory('');
+    setActiveFilter('all');
+    setSelectedId('');
+    setQuality('');
+  };
+
+  const handleCategoryChange = (category: string) => {
+    setActiveCategory(category);
+    setSelectedId('');
+  };
+
+  const handleQualityChange = async (nextQuality: string) => {
+    setQuality(nextQuality);
+    if (!selectedItem) return;
+    const resolver = selectedItem.streamResolver;
+    if (nextQuality && resolver?.settingsAction && isTauriAvailable()) {
+      void callCapability({
+        capability: resolver.capability,
+        providerPluginId: selectedItem.sourceId,
+        payload: { action: resolver.settingsAction, quality: nextQuality },
+        timeoutMs: 15_000,
+      });
+    }
+    if (!mpv.enabled) {
+      setActionStatus(`已选择画质：${nextQuality || '插件默认'}`);
+      return;
+    }
+    setActionStatus(`正在以 ${nextQuality || '插件默认'} 画质重新取流…`);
+    const result = await mpv.open(selectedItem, {
+      quality: nextQuality,
+      paused: !playing,
+      startSeconds: currentSec > 0 ? currentSec : undefined,
+    });
+    if (mountedRef.current) {
+      setActionStatus(result.message);
+    }
+  };
+
   const handleSelectMedia = async (item: MediaItem) => {
     setSelectedId(item.id);
     if (!mpv.enabled) {
@@ -249,7 +367,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
       setActionStatus(`离线预览播放：${item.title}（示例模拟时间轴）`);
       return;
     }
-    const result = await mpv.open(item, { paused: false });
+    const requestedQuality =
+      quality && item.streamResolver?.qualityOptions.includes(quality)
+        ? quality
+        : undefined;
+    const result = await mpv.open(item, {
+      paused: false,
+      quality: requestedQuality ?? '',
+    });
     if (mountedRef.current) {
       setActionStatus(result.message);
     }
@@ -365,27 +490,50 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
         </div>
       }
       toolbar={
-        <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
-          <SegmentedPills
-            options={FILTER_OPTIONS}
-            value={activeFilter}
-            onChange={setActiveFilter}
-            focusPrefix="media:filter:"
+        <div className="flex w-full flex-col gap-2.5">
+          <MediaSourceToolbar
+            sources={liveMedia.sources}
+            sourceId={activeSourceId || liveMedia.sourceId}
+            onSourceChange={handleSourceChange}
+            categories={categoryOptions}
+            category={effectiveCategory}
+            onCategoryChange={handleCategoryChange}
+            qualityOptions={qualityOptions}
+            quality={quality}
+            onQualityChange={(next) => {
+              void handleQualityChange(next);
+            }}
+            settingsLabel={settingsLabel || undefined}
+            onOpenSettings={
+              settingsLabel && onOpenPluginSettings
+                ? () => onOpenPluginSettings(settingsPluginId)
+                : undefined
+            }
             activeFocusId={activeFocusId}
             onFocus={emitFocus}
-            tone="media"
-            ariaLabel="媒体源筛选"
           />
-          <span className="text-[14px] text-[var(--text-muted)]">
-            {liveMedia.live ? (
-              <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
-                LIVE ·{' '}
-                {liveMedia.sources.find((s) => s.sourceId === liveMedia.sourceId)?.title ??
-                  liveMedia.sourceId}
-              </span>
-            ) : null}
-            {actionStatus}
-          </span>
+          <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
+            <SegmentedPills
+              options={FILTER_OPTIONS}
+              value={activeFilter}
+              onChange={setActiveFilter}
+              focusPrefix="media:filter:"
+              activeFocusId={activeFocusId}
+              onFocus={emitFocus}
+              tone="media"
+              ariaLabel="媒体源筛选"
+            />
+            <span className="text-[14px] text-[var(--text-muted)]">
+              {liveMedia.live ? (
+                <span className="mr-2 font-mono text-[13.5px] text-[var(--accent-ok)]">
+                  LIVE ·{' '}
+                  {liveMedia.sources.find((s) => s.sourceId === liveMedia.sourceId)?.title ??
+                    liveMedia.sourceId}
+                </span>
+              ) : null}
+              {actionStatus}
+            </span>
+          </div>
         </div>
       }
       mainPane={

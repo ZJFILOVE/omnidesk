@@ -1080,6 +1080,8 @@ class ControlServer:
             return self._execute_domain_snapshot(req_id, params, is_jsonrpc)
         if op == "domain.invoke":
             return await self._execute_domain_invoke(req_id, params, is_jsonrpc)
+        if op == "ui.action":
+            return await self._execute_ui_action(req_id, params, is_jsonrpc)
         if op.startswith("job."):
             return await self._execute_job_op(op, req_id, params, is_jsonrpc)
         if op.startswith("search."):
@@ -1115,6 +1117,119 @@ class ControlServer:
                 "dock_widgets": [],
             }
         return self._ok_envelope(req_id, snapshot, jsonrpc=is_jsonrpc)
+
+    async def _execute_ui_action(
+        self,
+        req_id: Any,
+        params: Mapping[str, Any],
+        is_jsonrpc: bool,
+    ) -> dict[str, Any]:
+        """Dispatch a declarative workspace-tab or dock-widget action."""
+        kind = params.get("kind")
+        spec_id = params.get("spec_id")
+        action_id = params.get("action_id")
+        plugin_id = params.get("plugin_id")
+        if not isinstance(kind, str) or kind not in {"workspace_tab", "dock_widget"}:
+            return self._error_envelope(
+                req_id,
+                "'kind' must be 'workspace_tab' or 'dock_widget'",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        if not isinstance(spec_id, str) or not spec_id.strip():
+            return self._error_envelope(
+                req_id,
+                "Missing non-empty 'spec_id' for ui.action",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        if not isinstance(action_id, str) or not action_id.strip():
+            return self._error_envelope(
+                req_id,
+                "Missing non-empty 'action_id' for ui.action",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        if plugin_id is not None and not isinstance(plugin_id, str):
+            return self._error_envelope(
+                req_id,
+                "'plugin_id' must be a string",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        state = params.get("state")
+        if state is None:
+            state = {}
+        if not isinstance(state, Mapping):
+            return self._error_envelope(
+                req_id,
+                "'state' must be a JSON object",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        raw_timeout = params.get("timeout")
+        raw_timeout_ms = params.get("timeout_ms")
+        try:
+            timeout = (
+                float(raw_timeout)
+                if raw_timeout is not None
+                else float(raw_timeout_ms) / 1000.0
+                if raw_timeout_ms is not None
+                else 30.0
+            )
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                req_id,
+                "'timeout' must be a number of seconds",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        if not math.isfinite(timeout) or timeout <= 0:
+            return self._error_envelope(
+                req_id,
+                "'timeout' must be a positive finite number",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+                jsonrpc=is_jsonrpc,
+            )
+        if self._plugins is None:
+            return self._error_envelope(
+                req_id,
+                "Plugin manager is unavailable",
+                error_code=ErrorCode.NOT_FOUND,
+                jsonrpc=is_jsonrpc,
+            )
+        try:
+            res = await self._plugins.invoke_ui_action(
+                kind=kind,
+                spec_id=spec_id.strip(),
+                action_id=action_id.strip(),
+                plugin_id=plugin_id.strip() if isinstance(plugin_id, str) else None,
+                state=state,
+                timeout=min(timeout, MAX_STREAM_TIMEOUT_SEC),
+            )
+        except OmniDeskError as exc:
+            return self._error_envelope(
+                req_id,
+                exc.message,
+                error_code=exc.code,
+                jsonrpc=is_jsonrpc,
+                details=exc.details,
+            )
+        if not res.ok:
+            return self._error_envelope(
+                req_id,
+                res.error or "UI action failed",
+                error_code=str(res.data.get("error_code") or ErrorCode.PLUGIN_FAULT),
+                provider_plugin_id=res.provider_plugin_id,
+                jsonrpc=is_jsonrpc,
+                details=res.data,
+            )
+        return self._ok_envelope(
+            req_id,
+            _sanitize_json_value(res.data, self._extra_secrets()),
+            provider_plugin_id=res.provider_plugin_id,
+            jsonrpc=is_jsonrpc,
+        )
 
     def _resolve_domain_entry(
         self,
@@ -2147,6 +2262,30 @@ class ControlClient:
         req: dict[str, Any] = {"id": uuid.uuid4().hex, "op": "domain.snapshot", "caller": self._caller}
         if domain is not None:
             req["domain"] = domain
+        if plugin_id is not None:
+            req["plugin_id"] = plugin_id
+        return await self.request(req)
+
+    async def ui_action(
+        self,
+        *,
+        kind: str,
+        spec_id: str,
+        action_id: str,
+        plugin_id: str | None = None,
+        state: Mapping[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        req: dict[str, Any] = {
+            "id": uuid.uuid4().hex,
+            "op": "ui.action",
+            "caller": self._caller,
+            "kind": kind,
+            "spec_id": spec_id,
+            "action_id": action_id,
+            "state": dict(state) if state is not None else {},
+            "timeout": timeout,
+        }
         if plugin_id is not None:
             req["plugin_id"] = plugin_id
         return await self.request(req)

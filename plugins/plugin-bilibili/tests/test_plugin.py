@@ -101,7 +101,17 @@ async def test_media_source_categories_fetch_items_and_empty_results(
         await invoke_lifecycle_hook(plugin.on_load, ctx)
 
         src = ctx.domains.media_sources()[0]
-        assert src.categories() == ["recommend", "dynamic", "bangumi", "live", "search"]
+        assert src.categories() == [
+            "recommend",
+            "popular",
+            "dynamic",
+            "bangumi",
+            "live",
+            "history",
+            "watch_later",
+            "favorites",
+            "search",
+        ]
 
         rec_items = await src.fetch_items("recommend", page=1)
         assert len(rec_items) == 1

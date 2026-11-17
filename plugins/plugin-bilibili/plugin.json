@@ -21,6 +21,7 @@
   "permissions": [
     "network:wan",
     "process:yt-dlp",
+    "process:curl",
     "config:read",
     "config:write",
     "secret:vault"
@@ -50,6 +51,42 @@
         "360p"
       ],
       "description": "Preferred stream quality; returns quality_unavailable when requested tier (e.g. 4K/VIP) is unavailable."
+    },
+    {
+      "key": "unlock_hd",
+      "label": "Android/TV 高清取流兜底",
+      "type": "bool",
+      "default": true,
+      "description": "When Web playurl lacks the requested quality, call PlayViewUnite with the authorized Android/TV token."
+    },
+    {
+      "key": "preferred_codec",
+      "label": "优先视频编码",
+      "type": "select",
+      "default": "hevc",
+      "options": ["hevc", "avc", "av1"],
+      "description": "Preferred codec for PlayViewUnite and DASH stream selection."
+    },
+    {
+      "key": "wiliwili_dir",
+      "label": "Wiliwili 配置目录",
+      "type": "string",
+      "default": "~/.config/wiliwili",
+      "description": "Directory containing wiliwili_config.json and android-session.json for explicit import."
+    },
+    {
+      "key": "grpc_endpoint",
+      "label": "PlayViewUnite gRPC 地址",
+      "type": "string",
+      "default": "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite",
+      "description": "Official Bilibili PlayViewUnite endpoint; loopback overrides are allowed only for tests."
+    },
+    {
+      "key": "curl_bin",
+      "label": "curl 可执行文件路径",
+      "type": "string",
+      "default": "curl",
+      "description": "curl binary used for HTTP/2 gRPC transport (no shell)."
     },
     {
       "key": "api_base",

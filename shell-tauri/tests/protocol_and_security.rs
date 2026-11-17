@@ -235,6 +235,9 @@ fn parameter_validation_and_tauri_event_name_mapping() {
     assert_eq!(validate_source_id("plugin:").unwrap_err().code, "invalid_argument");
 
     assert_eq!(validate_op("capability.call").unwrap(), "capability.call");
+    assert_eq!(validate_op("domain.snapshot").unwrap(), "domain.snapshot");
+    assert_eq!(validate_op("domain.invoke").unwrap(), "domain.invoke");
+    assert_eq!(validate_op("ui.action").unwrap(), "ui.action");
     assert_eq!(validate_op("ping").unwrap(), "ping");
     assert_eq!(validate_op("bad op").unwrap_err().code, "invalid_argument");
     assert_eq!(validate_op("bus.subscribe").unwrap_err().code, "invalid_argument");

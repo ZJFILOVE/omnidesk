@@ -6,6 +6,7 @@ import http.server
 import importlib.util
 import json
 import socket
+import stat
 import sys
 import threading
 import time
@@ -154,7 +155,13 @@ async def test_chat_sync_streaming_structured_and_error_mappings(tmp_path: Path)
         module = _load_plugin_module()
         plugin = module.create_plugin()
         manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
-        ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path, config_schema=manifest["config_schema"])
+        ctx = PluginContext(
+            manifest["id"],
+            plugin_dir=PLUGIN_DIR,
+            data_dir=tmp_path / "data",
+            config_dir=tmp_path,
+            config_schema=manifest["config_schema"],
+        )
         ctx.set_config("gateway_url", base_url)
         ctx.set_secret("gateway_key", state.secret)
         await invoke_lifecycle_hook(plugin.on_load, ctx)
@@ -274,7 +281,13 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
         module = _load_plugin_module()
         plugin = module.create_plugin()
         manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
-        ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path, config_schema=manifest["config_schema"])
+        ctx = PluginContext(
+            manifest["id"],
+            plugin_dir=PLUGIN_DIR,
+            data_dir=tmp_path / "data",
+            config_dir=tmp_path,
+            config_schema=manifest["config_schema"],
+        )
         ctx.set_config("gateway_url", base_url)
         ctx.set_secret("gateway_key", state.secret)
         await invoke_lifecycle_hook(plugin.on_load, ctx)
@@ -364,6 +377,136 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
         ag_cap = await ctx.capabilities.call("ai.agent.v1", {"action": "qa", "prompt": "check"})
         assert ag_cap.ok is True and ag_cap.data["reply"] == "via-cap"
         assert len(called_via_cap) == 1
+
+        await invoke_lifecycle_hook(plugin.on_unload)
+        await ctx.acleanup()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_agent_sessions_persist_continue_list_export_and_delete(tmp_path: Path) -> None:
+    state = _MockGatewayState()
+    server, base_url, thread = _start_mock_gateway(state)
+    try:
+        module = _load_plugin_module()
+        plugin = module.create_plugin()
+        manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        data_dir = tmp_path / "data"
+        ctx = PluginContext(
+            manifest["id"],
+            plugin_dir=PLUGIN_DIR,
+            data_dir=data_dir,
+            config_dir=tmp_path,
+            config_schema=manifest["config_schema"],
+        )
+        ctx.set_config("gateway_url", base_url)
+        ctx.set_secret("gateway_key", state.secret)
+        await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+        first = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {
+                "action": "chat",
+                "domain": "book",
+                "context_title": "DDIA · Chapter 2",
+                "prompt": "解释一致性边界",
+            },
+        )
+        assert first.ok is True
+        assert first.data["persisted"] is True
+        session_id = first.data["session_id"]
+        assert session_id.startswith("agent-")
+        assert first.data["session"]["message_count"] == 2
+        assert first.data["session"]["title"] == "解释一致性边界"
+        assert first.data["session"]["served_model"] == "antigravity/gemini-4-carbon:high"
+        assert first.data["session"]["route_group"] == "group/omnidesk-active"
+
+        session_file = data_dir / "agent-sessions" / f"{session_id}.json"
+        assert session_file.is_file()
+        assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
+
+        second = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {
+                "action": "chat",
+                "domain": "book",
+                "context_title": "DDIA · Chapter 2",
+                "session_id": session_id,
+                "prompt": "继续解释线性一致性与可串行化",
+            },
+        )
+        assert second.ok is True
+        assert second.data["session_id"] == session_id
+        assert second.data["session"]["message_count"] == 4
+        prior_messages = state.requests[-1]["messages"]
+        assert any(msg["content"] == "解释一致性边界" for msg in prior_messages)
+        assert any(msg["content"].startswith("REPLY:") for msg in prior_messages)
+
+        listed = await ctx.capabilities.call("ai.agent.v1", {"session_action": "list"})
+        assert listed.ok is True
+        assert listed.data["count"] == 1
+        assert listed.data["sessions"][0]["id"] == session_id
+        assert listed.data["sessions"][0]["message_count"] == 4
+
+        loaded = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "get", "session_id": session_id},
+        )
+        assert loaded.ok is True
+        assert loaded.data["session"]["message_count"] == 4
+        assert loaded.data["session"]["last_role"] == "assistant"
+        assert len(loaded.data["session"]["messages"]) == 4
+        assert loaded.data["session"]["messages"][0]["role"] == "user"
+        assert loaded.data["session"]["messages"][1]["role"] == "assistant"
+
+        renamed = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "rename", "session_id": session_id, "session_title": "DDIA 一致性"},
+        )
+        assert renamed.ok is True
+        assert renamed.data["session"]["title"] == "DDIA 一致性"
+
+        markdown = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "export", "session_id": session_id, "session_format": "markdown"},
+        )
+        assert markdown.ok is True
+        assert markdown.data["filename"] == f"{session_id}.md"
+        assert "# DDIA 一致性" in markdown.data["content"]
+        assert "继续解释线性一致性与可串行化" in markdown.data["content"]
+        assert state.secret not in markdown.data["content"]
+
+        exported_json = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "export", "session_id": session_id, "session_format": "json"},
+        )
+        assert exported_json.ok is True
+        parsed = json.loads(exported_json.data["content"])
+        assert parsed["id"] == session_id
+        assert parsed["messages"][-1]["role"] == "assistant"
+
+        deleted = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "delete", "session_id": session_id},
+        )
+        assert deleted.ok is True
+        assert deleted.data["deleted"] is True
+        missing = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "get", "session_id": session_id},
+        )
+        assert missing.ok is False
+        assert missing.data["error_code"] == "session_not_found"
+
+        traversal = await ctx.capabilities.call(
+            "ai.agent.v1",
+            {"session_action": "get", "session_id": "../vault"},
+        )
+        assert traversal.ok is False
+        assert traversal.data["error_code"] == "invalid_session_id"
 
         await invoke_lifecycle_hook(plugin.on_unload)
         await ctx.acleanup()

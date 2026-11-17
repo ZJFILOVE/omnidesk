@@ -1,5 +1,5 @@
 import React from 'react';
-import { RefreshCw } from 'lucide-react';
+import { CalendarDays, RefreshCw } from 'lucide-react';
 import { FocusButton, HAIRLINE_BORDER } from '../../components/WorkbenchLayout';
 import { PanelSectionHeading } from '../../components/WorkbenchPrimitives';
 import { AI_ARCHIVE_SNAPSHOT, type MagpieRouteState } from '../../data/mock';
@@ -16,6 +16,7 @@ export interface AiRouteSidebarProps {
   onSelectEffort: (effort: MagpieRouteState['effort']) => void;
   onSelectStrategy: (strategy: MagpieRouteState['strategy']) => void;
   onRehydrate: () => void;
+  onOpenCuration?: () => void;
 }
 
 export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
@@ -27,6 +28,7 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
   onSelectEffort,
   onSelectStrategy,
   onRehydrate,
+  onOpenCuration,
 }) => (
   <div className="flex flex-col gap-5 p-4.5">
     <div className="flex flex-col gap-2.5">
@@ -159,6 +161,19 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
         <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
         <span>增量快进同步双仓 (ff-only)</span>
       </FocusButton>
+      {onOpenCuration ? (
+        <FocusButton
+          focusId="ai:action:curation-calendar"
+          activeFocusId={activeFocusId}
+          onFocus={onFocus}
+          onActivate={onOpenCuration}
+          surface="canvas"
+          className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[14px] font-medium"
+        >
+          <CalendarDays className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>打开推荐日历 / 定时工作流</span>
+        </FocusButton>
+      ) : null}
     </div>
   </div>
 );

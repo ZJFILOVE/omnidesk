@@ -462,6 +462,171 @@ def create_plugin():
 
 
 @pytest.mark.asyncio
+async def test_ui_action_dispatches_workspace_tabs_and_dock_widgets(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    plugins_dir = tmp_path / "plugins"
+    pdir = plugins_dir / "plugin-ui-action"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "plugin-ui-action",
+                "name": "UI Action Plugin",
+                "version": "0.1.0",
+                "kind": "hybrid",
+                "domain": "media",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pdir / "plugin.py").write_text(
+        """
+from omnidesk_sdk import BasePlugin, DockWidgetSpec, PluginContext, WorkspaceTabSpec
+
+class UiActionPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        async def tab_action(action, state):
+            return {
+                "ok": True,
+                "action": action,
+                "state": state,
+                "ui_schema": {"type": "Markdown", "content": f"已执行 {action}"},
+            }
+
+        def dock_action(payload):
+            return {
+                "ok": True,
+                "received": payload,
+                "ui_schema": {"type": "Markdown", "content": "组件已刷新"},
+            }
+
+        ctx.register_workspace_tab(
+            WorkspaceTabSpec(
+                tab_id="ui-tab",
+                title="UI Tab",
+                domain="media",
+                ui_schema={"type": "ActionRow", "actions": [{"id": "search", "label": "搜索"}]},
+                on_action=tab_action,
+            )
+        )
+        ctx.register_workspace_tab(
+            WorkspaceTabSpec(
+                tab_id="ui-no-action",
+                title="No Action",
+                domain="media",
+                ui_schema={"type": "Markdown", "content": "read only"},
+            )
+        )
+        ctx.register_dock_widget(
+            DockWidgetSpec(
+                widget_id="ui-dock",
+                title="UI Dock",
+                supported_domains=["media"],
+                ui_schema={"type": "ActionRow", "actions": [{"id": "refresh", "label": "刷新"}]},
+                on_action=dock_action,
+            )
+        )
+
+def create_plugin():
+    return UiActionPlugin()
+""",
+        encoding="utf-8",
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_dir, paths=paths)
+    await mgr.load_plugin("plugin-ui-action")
+    sock_path = paths.control_socket_path
+
+    async with ControlServer(socket_path=sock_path, paths=paths, plugins=mgr) as srv:
+        assert srv.is_running is True
+        client = ControlClient(socket_path=sock_path, caller="ui-plugin-tab")
+
+        tab_res = await client.ui_action(
+            kind="workspace_tab",
+            spec_id="ui-tab",
+            action_id="search",
+            plugin_id="plugin-ui-action",
+            state={"query": "rust"},
+        )
+        assert tab_res["ok"] is True
+        assert tab_res["provider_plugin_id"] == "plugin-ui-action"
+        assert tab_res["data"]["action"] == "search"
+        assert tab_res["data"]["state"] == {"query": "rust"}
+        assert tab_res["data"]["ui_schema"] == {
+            "type": "Markdown",
+            "content": "已执行 search",
+        }
+        json.dumps(tab_res)
+
+        # One-argument handlers receive the action merged into state.
+        dock_res = await client.ui_action(
+            kind="dock_widget",
+            spec_id="ui-dock",
+            action_id="refresh",
+            plugin_id="plugin-ui-action",
+            state={"tab": "media"},
+        )
+        assert dock_res["ok"] is True
+        assert dock_res["data"]["received"] == {"tab": "media", "action": "refresh"}
+        assert dock_res["data"]["ui_schema"]["content"] == "组件已刷新"
+
+        # Invalid kinds/IDs/states fail closed at the RPC boundary.
+        for params, expected in [
+            (
+                {"kind": "dialog", "spec_id": "ui-tab", "action_id": "search"},
+                ErrorCode.INVALID_ARGUMENT,
+            ),
+            (
+                {"kind": "workspace_tab", "spec_id": " ", "action_id": "search"},
+                ErrorCode.INVALID_ARGUMENT,
+            ),
+            (
+                {"kind": "workspace_tab", "spec_id": "ui-tab", "action_id": ""},
+                ErrorCode.INVALID_ARGUMENT,
+            ),
+            (
+                {"kind": "workspace_tab", "spec_id": "ui-tab", "action_id": "search", "state": []},
+                ErrorCode.INVALID_ARGUMENT,
+            ),
+            (
+                {
+                    "kind": "workspace_tab",
+                    "spec_id": "missing-tab",
+                    "action_id": "search",
+                },
+                ErrorCode.NOT_FOUND,
+            ),
+            (
+                {
+                    "kind": "workspace_tab",
+                    "spec_id": "ui-tab",
+                    "action_id": "search",
+                    "plugin_id": "plugin-other",
+                },
+                ErrorCode.NOT_FOUND,
+            ),
+            (
+                {
+                    "kind": "workspace_tab",
+                    "spec_id": "ui-no-action",
+                    "action_id": "search",
+                },
+                ErrorCode.CAPABILITY_NOT_FOUND,
+            ),
+        ]:
+            resp = await client.request({"op": "ui.action", "params": params})
+            assert resp["ok"] is False
+            assert resp["error_code"] == expected
+
+
+@pytest.mark.asyncio
 async def test_domain_invoke_routes_by_source_id_and_validates_arguments(tmp_path: Path) -> None:
     paths = OmnideskPaths.from_env(
         {

@@ -10,6 +10,7 @@ from omnidesk_sdk import ChapterSegment, LyricLine, MediaItem, MediaSource, Plug
 if __package__:
     from .yt_api import YouTubeApiClient, parse_description_chapters
     from .yt_dlp import fetch_video_info, run_ytdlp_json
+    from .yt_library import load_items
     from .yt_mappers import (
         map_api_item_to_media_item,
         map_ytdlp_entry_to_media_item,
@@ -21,6 +22,7 @@ if __package__:
 else:
     from yt_api import YouTubeApiClient, parse_description_chapters
     from yt_dlp import fetch_video_info, run_ytdlp_json
+    from yt_library import load_items
     from yt_mappers import (
         map_api_item_to_media_item,
         map_ytdlp_entry_to_media_item,
@@ -37,7 +39,17 @@ _CATEGORY_ALIASES = {
     "频道": "channels", "channel": "channels", "channels": "channels",
     "稍后观看": "watch_later", "watch_later": "watch_later", "wl": "watch_later",
     "playlist": "playlists", "playlists": "playlists",
+    "热门": "trending", "trending": "trending", "hot": "trending",
+    "播客": "podcast", "podcast": "podcast", "podcasts": "podcast",
+    "历史": "history", "history": "history",
 }
+
+_PODCAST_QUERIES = (
+    "technology engineering podcast full episode",
+    "science AI interview podcast",
+    "computer science systems podcast",
+    "software architecture founder interview podcast",
+)
 
 
 def split_csv(value: Any) -> list[str]:
@@ -79,7 +91,10 @@ class YouTubeMediaSource(MediaSource):
 
     def categories(self) -> list[str]:
         """Return actual supported YouTube media categories."""
-        cats = ["subscriptions", "search", "channels", "watch_later"]
+        cats = [
+            "subscriptions", "trending", "podcast", "search",
+            "channels", "watch_later", "history",
+        ]
         if self._plugin.configured_playlist_ids():
             cats.append("playlists")
         return cats
@@ -205,12 +220,66 @@ class YouTubeMediaSource(MediaSource):
         elif cat == "channels":
             for cid in ([query.strip()] if query.strip() else self._plugin.configured_channel_ids()):
                 items.extend(await self.fetch_from_target("channel", cid, category=cat, per_page=per_page))
-        elif cat in {"watch_later", "playlists"}:
+        elif cat == "history":
+            local_items = load_items(self._plugin, "history")
+            if query.strip():
+                needle = query.strip().lower()
+                local_items = [
+                    item for item in local_items
+                    if needle in item.title.lower() or needle in item.creator.lower()
+                ]
+            items.extend(local_items if page == 1 else [])
+        elif cat == "watch_later":
+            local_items = load_items(self._plugin, "watch_later")
+            if query.strip():
+                needle = query.strip().lower()
+                local_items = [
+                    item for item in local_items
+                    if needle in item.title.lower() or needle in item.creator.lower()
+                ]
+            items.extend(local_items if page == 1 else [])
             targets = [query.strip()] if query.strip() else self._plugin.configured_playlist_ids()
-            if not targets and cat == "watch_later" and self._plugin.oauth_token():
+            if not targets and page == 1 and self._plugin.oauth_token():
                 targets = ["WL"]
             for pid in targets:
-                items.extend(await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page))
+                items.extend(
+                    await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page)
+                )
+        elif cat == "playlists":
+            targets = [query.strip()] if query.strip() else self._plugin.configured_playlist_ids()
+            for pid in targets:
+                items.extend(
+                    await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page)
+                )
+        elif cat in {"trending", "podcast"}:
+            if cat == "trending" and (self._plugin.api_key() or self._plugin.oauth_token()):
+                token = "" if force_refresh else self._page_tokens.get((cat, "", page), "")
+                raw_items, next_tok, err = await self._plugin.api_client.fetch_trending(
+                    api_key=self._plugin.api_key(),
+                    oauth_token=self._plugin.oauth_token(),
+                    region=self._plugin.region(),
+                    max_results=per_page,
+                    page_token=token,
+                    timeout_sec=self._plugin.timeout_sec(),
+                )
+                if err is not None:
+                    self.last_error = err
+                    return []
+                if next_tok:
+                    self._page_tokens[(cat, "", page + 1)] = next_tok
+                items = self._map_api_items(raw_items, category=cat)
+            else:
+                fallback = (
+                    _PODCAST_QUERIES[(page - 1) % len(_PODCAST_QUERIES)]
+                    if cat == "podcast"
+                    else f"science technology documentary {self._plugin.region()}"
+                )
+                items = await self._fetch_via_ytdlp_list(
+                    f"ytsearch{page * per_page}:{fallback}",
+                    category=cat,
+                    start=(page - 1) * per_page + 1,
+                    end=page * per_page,
+                )
 
         if items:
             self.remember_items(items)

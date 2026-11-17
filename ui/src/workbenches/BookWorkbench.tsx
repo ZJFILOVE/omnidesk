@@ -2,6 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { BookMarked, BookOpen, ChevronDown, ChevronUp, Search } from 'lucide-react';
 import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
+import {
+  bookSearchAction,
+  formatRpcError,
+  isTauriAvailable,
+  searchBooks,
+  type BookSearchProvider,
+  type BookSearchResult,
+} from '../api';
 import WorkbenchLayout, {
   FocusButton,
   HAIRLINE_BORDER,
@@ -71,6 +79,35 @@ function createVocabCard(
   };
 }
 
+const CATALOG_GRADIENTS = [
+  'linear-gradient(155deg, #2B2435 0%, #4E3B63 58%, #7E599A 100%)',
+  'linear-gradient(155deg, #17343A 0%, #245B5E 58%, #3E8C86 100%)',
+  'linear-gradient(155deg, #3A241C 0%, #6B3F2B 58%, #A86B45 100%)',
+  'linear-gradient(155deg, #202B46 0%, #344C7C 58%, #5B7DBB 100%)',
+];
+
+function toCatalogItem(result: BookSearchResult): BookCatalogItem {
+  let hash = 0;
+  for (const char of result.itemId) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  const format = result.format.includes('pdf') ? 'pdf' : 'epub';
+  return {
+    id: `${result.providerPluginId}:${result.itemId}`,
+    title: result.title,
+    author: result.author,
+    format,
+    language: result.language || '未标注',
+    sourceName: result.source || result.providerPluginId,
+    sizeLabel: result.size || format.toUpperCase(),
+    coverGradient: CATALOG_GRADIENTS[hash % CATALOG_GRADIENTS.length],
+    summary: [result.year, result.detailUrl].filter(Boolean).join(' · ') || '来自 book.search.v1 的实时结果',
+    itemId: result.itemId,
+    providerPluginId: result.providerPluginId,
+    detailUrl: result.detailUrl,
+    downloadToken: result.downloadToken,
+    downloadable: Boolean(result.downloadToken || result.itemId),
+  };
+}
+
 export interface BookWorkbenchProps extends WorkbenchViewProps {
   onSelectionAction?: (event: SelectionActionEvent) => void;
 }
@@ -100,6 +137,11 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const [shelfOpen, setShelfOpen] = useState<boolean>(false);
   const [vocabOpen, setVocabOpen] = useState<boolean>(true);
   const [catalogQuery, setCatalogQuery] = useState<string>('');
+  const [searchProvider, setSearchProvider] = useState<BookSearchProvider>('auto');
+  const [searchCatalog, setSearchCatalog] = useState<BookCatalogItem[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [downloadedIds, setDownloadedIds] = useState<Set<string>>(() => new Set());
   const [selectedBookId, setSelectedBookId] = useState<string>(BOOK_ITEMS[0]?.id ?? '');
   const [spreadIndexByBook, setSpreadIndexByBook] = useState<Record<string, number>>({});
   const [glossaryLocked, setGlossaryLocked] = useState<boolean>(true);
@@ -147,14 +189,44 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   );
   const filteredCatalog = useMemo(() => {
     const q = catalogQuery.trim().toLowerCase();
-    if (!q) return BOOK_SEARCH_CATALOG;
-    return BOOK_SEARCH_CATALOG.filter(
+    const source = isTauriAvailable() ? searchCatalog : BOOK_SEARCH_CATALOG;
+    if (!q) return source;
+    return source.filter(
       (item) =>
         item.title.toLowerCase().includes(q) ||
         item.author.toLowerCase().includes(q) ||
         item.summary.toLowerCase().includes(q),
     );
-  }, [catalogQuery]);
+  }, [catalogQuery, searchCatalog]);
+
+  useEffect(() => {
+    if (leftTab !== 'search' || !isTauriAvailable()) return undefined;
+    const query = catalogQuery.trim();
+    if (query.length < 2) {
+      setSearchCatalog([]);
+      setSearchError(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError(null);
+      void searchBooks({ query, provider: searchProvider, limit: 24 }).then((result) => {
+        if (cancelled) return;
+        setSearchLoading(false);
+        if (!result.ok) {
+          setSearchError(formatRpcError(result.error));
+          setSearchCatalog([]);
+          return;
+        }
+        setSearchCatalog(result.data.results.map(toCatalogItem));
+      });
+    }, 320);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [catalogQuery, leftTab, searchProvider]);
 
   useEffect(() => {
     if (!sharedVocab?.length) return;
@@ -283,7 +355,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     setStatusMessage(`SM-2 已更新「${updated.word}」：间隔 ${updated.intervalDays} 天（EF ${updated.easeFactor}）`);
   };
 
-  const handleImportCatalogBook = (entry: BookCatalogItem) => {
+  const addCatalogToShelf = (entry: BookCatalogItem) => {
     const existing = books.find((b) => b.id === `imported-${entry.id}`);
     if (existing) {
       setSelectedBookId(existing.id);
@@ -302,7 +374,9 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       currentPage: 1,
       coverGradient: entry.coverGradient,
       badge: entry.format === 'pdf' ? 'BabelDOC 队列' : 'EPUB 已导入',
-      sourcePlugin: entry.format === 'pdf' ? 'plugin-pdf-babeldoc' : 'plugin-ebook',
+      sourcePlugin:
+        entry.providerPluginId ??
+        (entry.format === 'pdf' ? 'plugin-pdf-babeldoc' : 'plugin-ebook'),
       bilingualReady: true,
       spreads: [
         {
@@ -330,6 +404,70 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     setSelectedBookId(newBook.id);
     setLeftTab('shelf');
     setStatusMessage(`已从 ${entry.sourceName} 导入「${entry.title}」至书架`);
+  };
+
+  const handleCatalogAction = async (
+    entry: BookCatalogItem,
+    action: 'download' | 'open_in_babeldoc' | 'open_in_ebook' | 'send_to_nas',
+  ) => {
+    if (!entry.providerPluginId || !entry.itemId) {
+      addCatalogToShelf(entry);
+      return;
+    }
+    if (!isTauriAvailable()) {
+      if (action === 'download') addCatalogToShelf(entry);
+      else setStatusMessage('离线预览：真实图书交付动作需要连接 Core');
+      return;
+    }
+    const item = {
+      itemId: entry.itemId,
+      title: entry.title,
+      format: entry.format,
+      detailUrl: entry.detailUrl ?? '',
+      downloadToken: entry.downloadToken ?? '',
+      providerPluginId: entry.providerPluginId,
+    };
+    setStatusMessage(
+      action === 'download'
+        ? `正在通过 ${entry.providerPluginId} 下载「${entry.title}」…`
+        : `正在准备「${entry.title}」并执行 ${action}…`,
+    );
+    if (action !== 'download' && !downloadedIds.has(entry.id)) {
+      const download = await bookSearchAction('download', { item });
+      if (!download.ok) {
+        setStatusMessage(`下载失败：${formatRpcError(download.error)}`);
+        return;
+      }
+      setDownloadedIds((prev) => new Set(prev).add(entry.id));
+    }
+    if (action === 'download') {
+      const result = await bookSearchAction('download', { item });
+      if (!result.ok) {
+        setStatusMessage(`下载失败：${formatRpcError(result.error)}`);
+        return;
+      }
+      setDownloadedIds((prev) => new Set(prev).add(entry.id));
+      const path = String(result.data.file_path ?? result.data.local_path ?? '');
+      setStatusMessage(
+        `已下载「${entry.title}」${path ? ` → ${path}` : ''}，正在导入书架`,
+      );
+      addCatalogToShelf(entry);
+      return;
+    }
+    const result = await bookSearchAction(action, { item });
+    setStatusMessage(
+      result.ok
+        ? `${entry.title}：${action.replaceAll('_', ' ')} 已提交`
+        : `${action} 失败：${formatRpcError(result.error)}`,
+    );
+  };
+
+  const handleImportCatalogBook = (entry: BookCatalogItem) => {
+    if (!entry.providerPluginId) {
+      addCatalogToShelf(entry);
+      return;
+    }
+    void handleCatalogAction(entry, 'download');
   };
 
   return (
@@ -410,11 +548,18 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
                 setShelfOpen(true);
               }}
               onCatalogQueryChange={setCatalogQuery}
+              searchLoading={searchLoading}
+              searchError={searchError}
+              searchProvider={searchProvider}
+              onSearchProviderChange={setSearchProvider}
               onSelectBook={(book) => {
                 setSelectedBookId(book.id);
                 setStatusMessage(`已打开《${book.title}》`);
               }}
               onImportBook={handleImportCatalogBook}
+              onCatalogAction={(entry, action) => {
+                void handleCatalogAction(entry, action);
+              }}
             />
           ) : (
             /* Compact Book Spine Strip: keeps 2:3 mini covers & Z-Lib tab reachable while maximizing the reading spread */

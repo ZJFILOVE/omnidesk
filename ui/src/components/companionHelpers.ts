@@ -32,6 +32,26 @@ export function nowTimeLabel(): string {
   return `${hh}:${mm}`;
 }
 
+export function sessionTimeLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    return iso;
+  }
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const now = new Date();
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return `${hh}:${mm}`;
+  }
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${month}-${day} ${hh}:${mm}`;
+}
+
 export function buildCompanionDemoReply(
   prompt: string,
   action: CompanionMessage['action'],

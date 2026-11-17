@@ -8,7 +8,7 @@ import {
   resolveDockLayout,
 } from './theme';
 import type { DockLayout, FocusZone, ThemeMode, WorkbenchId } from './types';
-import { DEFAULT_FOCUS_IDS } from './utils/contextEntity';
+import { DEFAULT_FOCUS_IDS, defaultFocusIdFor } from './utils/contextEntity';
 import { blurActiveEditable } from './utils/shortcuts';
 
 const NAV_MAIN_ZONES: readonly FocusZone[] = ['nav', 'main'];
@@ -69,7 +69,7 @@ export function App() {
       : dockOpen
         ? NAV_MAIN_DOCK_ZONES
         : NAV_MAIN_ZONES;
-  const preferredId = lastFocusedRef.current[activeWorkbench] ?? DEFAULT_FOCUS_IDS[activeWorkbench] ?? null;
+  const preferredId = lastFocusedRef.current[activeWorkbench] ?? defaultFocusIdFor(activeWorkbench);
 
   return (
     <SpatialFocusProvider allowedZones={allowedZones} scopeKey={activeWorkbench} preferredId={preferredId}>

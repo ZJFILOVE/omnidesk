@@ -133,12 +133,33 @@
     },
     "AiAgentRequest": {
       "type": "object",
-      "required": ["prompt"],
+      "required": [],
       "properties": {
         "action": {
           "type": "string",
-          "enum": ["chat", "summarize", "translate", "etymology", "clause_parse"],
+          "enum": ["chat", "qa", "summarize", "translate", "etymology", "parse_sentence", "clause_parse", "custom"],
           "default": "chat"
+        },
+        "session_action": {
+          "type": "string",
+          "enum": ["list", "get", "delete", "rename", "export"],
+          "description": "Conversation management action. Omit for a normal chat turn."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Persisted agent session ID. Include it to continue an existing conversation."
+        },
+        "session_title": { "type": "string" },
+        "session_format": {
+          "type": "string",
+          "enum": ["markdown", "json"],
+          "default": "markdown"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
         },
         "domain": {
           "type": "string",
@@ -146,8 +167,10 @@
           "default": "core"
         },
         "context": { "type": "string" },
+        "context_title": { "type": "string" },
         "system_prompt": { "type": "string" },
         "prompt": { "type": "string" },
+        "selection": { "type": "string" },
         "messages": {
           "type": "array",
           "items": {
@@ -173,12 +196,30 @@
     },
     "AiAgentResponseData": {
       "type": "object",
-      "required": ["reply"],
+      "required": [],
       "properties": {
         "reply": { "type": "string" },
+        "action": { "type": "string" },
+        "domain": { "type": "string" },
         "structured": { "type": ["object", "array", "null"] },
         "served_model": { "type": "string" },
+        "model": { "type": "string" },
         "route_group": { "type": "string" },
+        "session_id": { "type": "string" },
+        "persisted": { "type": "boolean" },
+        "user_message_id": { "type": "string" },
+        "assistant_message_id": { "type": "string" },
+        "session": { "type": "object" },
+        "sessions": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "count": { "type": "integer" },
+        "deleted": { "type": "boolean" },
+        "format": { "type": "string", "enum": ["markdown", "json"] },
+        "mime_type": { "type": "string" },
+        "filename": { "type": "string" },
+        "content": { "type": "string" },
         "usage": {
           "type": "object",
           "properties": {

@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import type { BusEventEnvelope, RuntimeStatus } from '../api';
 import type { PluginHealthEntry } from '../hooks/useCoreEvents';
+import type { MpvPlaybackController } from '../workbenches/useMpvPlayback';
 
 export type WorkbenchDomain = 'media' | 'text' | 'book' | 'core';
 export type ToneKind = 'neutral' | 'media' | 'text' | 'book' | 'core' | 'ok' | 'warn' | 'err';
@@ -36,9 +37,12 @@ export interface WorkbenchViewProps {
   runtimeStatus?: RuntimeStatus | null;
   pluginHealthMap?: Record<string, PluginHealthEntry>;
   lastBusEvent?: BusEventEnvelope | null;
+  mpvController?: MpvPlaybackController;
+  onOpenCuration?: () => void;
   navigationPayload?: Record<string, unknown> | null;
   onContextChange?: (ctx: WorkbenchEntityContext | null) => void;
   onOpenDock?: (prompt?: string) => void;
+  onOpenPluginSettings?: (pluginId: string) => void;
   onAddVocab?: (payload: VocabAddPayload) => void;
   sharedVocab?: readonly VocabAddPayload[];
   onNavigateWorkbench?: (

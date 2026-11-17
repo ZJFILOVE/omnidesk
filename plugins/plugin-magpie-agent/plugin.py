@@ -35,6 +35,7 @@ _chat_mod = _import_sibling("magpie_chat")
 _agent_mod = _import_sibling("magpie_agent_actions")
 _curation_mod = _import_sibling("magpie_curation")
 _context_mod = _import_sibling("magpie_context")
+_sessions_mod = _import_sibling("magpie_sessions")
 
 DEFAULT_GATEWAY_URL = _common.DEFAULT_GATEWAY_URL
 DEFAULT_GROUP_ID = _common.DEFAULT_GROUP_ID
@@ -70,6 +71,7 @@ class MagpieAgentPlugin(BasePlugin):
     def __init__(self) -> None:
         self._gateway = _gateway_mod.MagpieGatewayClient()
         self._session_seen: dict[str, set[str]] = {}
+        self._sessions: Any = None
         self._unloaded = False
 
     async def on_load(self, ctx: PluginContext) -> None:
@@ -78,6 +80,7 @@ class MagpieAgentPlugin(BasePlugin):
         self._unloaded = False
         self._gateway.reset()
         self._session_seen.clear()
+        self._sessions = _sessions_mod.AgentSessionStore(ctx.data_dir)
         ctx.register_capability("llm.router.v1", self.handle_router)
         ctx.register_streaming_capability("llm.chat.v1", self.handle_chat_stream)
         ctx.register_capability("llm.translate.v1", self.handle_translate)
@@ -90,6 +93,7 @@ class MagpieAgentPlugin(BasePlugin):
         self._unloaded = True
         self._gateway.close_all()
         self._session_seen.clear()
+        self._sessions = None
 
     async def on_health_check(self) -> dict[str, Any]:
         """Return lightweight offline readiness diagnostics without network I/O."""
@@ -261,6 +265,7 @@ class MagpieAgentPlugin(BasePlugin):
             secret=secret,
             stream_sink=stream,
             collect_context=self.handle_context_collect,
+            session_store=self._sessions,
         )
 
     async def handle_context_collect(self, req: Mapping[str, Any]) -> CapabilityResult:

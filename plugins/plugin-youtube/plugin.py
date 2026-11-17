@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omnidesk_sdk import BasePlugin, CapabilityResult, LyricLine, PluginContext, WorkspaceTabSpec
+from omnidesk_sdk import BasePlugin, CapabilityResult, LyricLine, MediaItem, PluginContext, WorkspaceTabSpec
 
 _PLUGIN_ROOT = str(Path(__file__).resolve().parent)
 if not __package__ and _PLUGIN_ROOT not in sys.path:
@@ -18,36 +18,39 @@ if __package__:
     from .yt_api import YOUTUBE_API_BASE_URL, YouTubeApiClient
     from .yt_dlp import fetch_video_info, select_stream_formats
     from .yt_http import atomic_write_json
+    from .yt_library import clear_items, load_items, store_item
+    from .yt_actions import library_item, open_media as open_media_impl, set_settings as set_settings_impl
+    from .yt_actions import watch_later as watch_later_impl
     from .yt_security import (
         YouTubePathSafetyError, default_cache_root, extract_video_id, redact_sensitive,
         resolve_executable, resolve_safe_cache_dir, safe_cache_file, url_origin, validate_channel_id, validate_playlist_id,
     )
     from .yt_subtitles import cues_to_lyric_lines, extract_subtitle_tracks
     from .yt_translate import fetch_subtitles_flow
+    from .yt_workspace_ui import (
+        SUPPORTED_ACTIONS,
+        build_ui_schema,
+        handle_tab_action as handle_tab_action_impl,
+    )
 else:
     from sources import YouTubeMediaSource, split_csv
     from yt_api import YOUTUBE_API_BASE_URL, YouTubeApiClient
     from yt_dlp import fetch_video_info, select_stream_formats
     from yt_http import atomic_write_json
+    from yt_library import clear_items, load_items, store_item
+    from yt_actions import library_item, open_media as open_media_impl, set_settings as set_settings_impl
+    from yt_actions import watch_later as watch_later_impl
     from yt_security import (
         YouTubePathSafetyError, default_cache_root, extract_video_id, redact_sensitive,
         resolve_executable, resolve_safe_cache_dir, safe_cache_file, url_origin, validate_channel_id, validate_playlist_id,
     )
     from yt_subtitles import cues_to_lyric_lines, extract_subtitle_tracks
     from yt_translate import fetch_subtitles_flow
-
-_SUPPORTED_ACTIONS = (
-    "status",
-    "categories",
-    "fetch_items",
-    "search",
-    "resolve_stream",
-    "list_subtitles",
-    "fetch_subtitles",
-    "list_subscriptions",
-    "sync_subscriptions",
-    "fetch_chapters",
-)
+    from yt_workspace_ui import (
+        SUPPORTED_ACTIONS,
+        build_ui_schema,
+        handle_tab_action as handle_tab_action_impl,
+    )
 
 
 class YouTubePlugin(BasePlugin):
@@ -63,6 +66,7 @@ class YouTubePlugin(BasePlugin):
         self.api_client = YouTubeApiClient(api_base_url=api_base_url, allow_loopback_http=allow_loopback_http)
         self.media_source = YouTubeMediaSource(self)
         self._last_action_status = "ready"
+        self._tab_status = ""
 
     async def on_load(self, ctx: PluginContext) -> None:
         """Register MediaSource, capability handler, and declarative workspace tab (< 50ms)."""
@@ -75,6 +79,7 @@ class YouTubePlugin(BasePlugin):
         """Clear transient in-memory caches on unload."""
         self.media_source.clear_caches()
         self._last_action_status = "unloaded"
+        self._tab_status = ""
 
     async def on_health_check(self) -> dict[str, Any]:
         """Return non-blocking readiness diagnostics without leaking secrets."""
@@ -135,6 +140,10 @@ class YouTubePlugin(BasePlugin):
     def configured_playlist_ids(self) -> list[str]:
         return [] if self.ctx is None else split_csv(self.ctx.get_config("playlist_ids", ""))
 
+    def library_items(self, kind: str) -> list[MediaItem]:
+        """Read local history/watch-later items for the declarative tab."""
+        return load_items(self, kind)
+
     def allowed_loopback_origins(self) -> set[str]:
         return {url_origin(self.api_client.api_base_url)} if self.api_client.api_base_url.startswith("http://") else set()
 
@@ -169,6 +178,18 @@ class YouTubePlugin(BasePlugin):
             return CapabilityResult.ok(await self.on_health_check())
         if action == "categories":
             return CapabilityResult.ok({"categories": self.media_source.categories()})
+        if action == "ui_schema":
+            return CapabilityResult.ok({"ui_schema": build_ui_schema(self)})
+        if action == "set_settings":
+            return self.set_settings(payload)
+        if action == "history_clear":
+            count = clear_items(self, "history")
+            self._tab_status = f"已清空 {count} 条本地历史"
+            return CapabilityResult.ok(
+                {"status": self._tab_status, "removed": count, "ui_schema": build_ui_schema(self)}
+            )
+        if action == "watch_later":
+            return self.watch_later(payload)
         if action in {"fetch_items", "search"}:
             try:
                 page = int(payload.get("page") or 1)
@@ -187,6 +208,7 @@ class YouTubePlugin(BasePlugin):
             return CapabilityResult.ok({"items": [m.model_dump() for m in items], "count": len(items)})
         dispatch = {
             "resolve_stream": self.resolve_stream,
+            "open_media": self.open_media,
             "list_subtitles": self.list_subtitles,
             "fetch_subtitles": self.fetch_subtitles,
             "list_subscriptions": self.list_subscriptions,
@@ -196,7 +218,7 @@ class YouTubePlugin(BasePlugin):
         handler = dispatch.get(action)
         if handler is not None:
             return await handler(payload)
-        return self._fail(f"不支持的动作: {action!r}", error_code="invalid_argument", data={"supported_actions": list(_SUPPORTED_ACTIONS)})
+        return self._fail(f"不支持的动作: {action!r}", error_code="invalid_argument", data={"supported_actions": list(SUPPORTED_ACTIONS)})
 
     async def resolve_stream(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Resolve playable video/audio stream URLs and sanitized headers via yt-dlp -J."""
@@ -220,7 +242,23 @@ class YouTubePlugin(BasePlugin):
         if sel_err is not None or selected is None:
             return self._fail_from_dict(sel_err, "未找到可用的媒体流", fallback_code="not_found")
         self._last_action_status = f"resolved:{vid}:{selected['quality']}"
+        if bool(req.get("record_history", True)):
+            item = library_item(self, vid, selected, title=str(req.get("title") or ""))
+            if item is not None:
+                store_item(self, "history", item)
         return CapabilityResult.ok(selected)
+
+    async def open_media(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """Resolve a stream, record history, and publish `entity.media.open`."""
+        return await open_media_impl(self, req)
+
+    def watch_later(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """List, add, or remove local watch-later entries."""
+        return watch_later_impl(self, req)
+
+    def set_settings(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """Persist playback defaults, optional API credentials, and yt-dlp path."""
+        return set_settings_impl(self, req)
 
     async def _load_video_info_for_subs(self, req: Mapping[str, Any], vid: str) -> tuple[dict[str, Any] | None, CapabilityResult | None]:
         raw_info = req.get("info")
@@ -342,43 +380,7 @@ class YouTubePlugin(BasePlugin):
         return CapabilityResult.ok({"video_id": vid, "chapters": [c.model_dump() for c in chapters], "count": len(chapters)})
 
     def _build_ui_schema(self) -> dict[str, Any]:
-        return {
-            "type": "Section",
-            "id": "youtube-workspace-root",
-            "title": "YouTube 媒体与双语字幕",
-            "description": "订阅同步、关键词搜索、yt-dlp 流解析与双语字幕缓存（media.source.v1）",
-            "children": [
-                {
-                    "type": "KeyValue",
-                    "id": "youtube-status",
-                    "items": [
-                        {"key": "region", "label": "地区", "value": self.region()},
-                        {"key": "quality", "label": "首选画质", "value": self.quality()},
-                        {"key": "api_key", "label": "Data API Key", "value": "configured" if self.api_key() else "unset"},
-                        {"key": "oauth", "label": "OAuth Token", "value": "configured" if self.oauth_token() else "unset"},
-                        {"key": "last_status", "label": "最近状态", "value": self._last_action_status},
-                    ],
-                },
-                {
-                    "type": "Form",
-                    "id": "youtube-action-form",
-                    "fields": [
-                        {"name": "query", "label": "搜索关键词 / 频道 / 播放列表", "type": "string", "default": ""},
-                        {"name": "video_id", "label": "视频 ID 或 HTTPS 链接", "type": "string", "default": ""},
-                    ],
-                },
-                {
-                    "type": "ActionRow",
-                    "id": "youtube-actions",
-                    "actions": [
-                        {"id": "search", "label": "搜索视频", "variant": "primary"},
-                        {"id": "resolve_stream", "label": "解析流地址", "variant": "secondary"},
-                        {"id": "fetch_subtitles", "label": "拉取双语字幕", "variant": "secondary"},
-                        {"id": "sync_subscriptions", "label": "同步订阅", "variant": "secondary"},
-                    ],
-                },
-            ],
-        }
+        return build_ui_schema(self)
 
     def _build_workspace_tab_spec(self) -> WorkspaceTabSpec:
         return WorkspaceTabSpec(
@@ -388,9 +390,7 @@ class YouTubePlugin(BasePlugin):
 
     async def handle_tab_action(self, action_id: str, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Route declarative workspace tab actions to `handle_action`."""
-        payload = {**(dict(state) if state is not None else {}), "action": action_id}
-        res = await self.handle_action(payload)
-        return {"ok": res.ok, "result": res.data, "error": res.error, "ui_schema": self._build_ui_schema()}
+        return await handle_tab_action_impl(self, action_id, state)
 
 
 def create_plugin() -> BasePlugin:

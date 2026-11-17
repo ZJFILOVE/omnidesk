@@ -3,6 +3,9 @@ import {
   callCapability,
   formatRpcError,
   isTauriAvailable,
+  type AgentSessionExport,
+  type AgentSessionRecord,
+  type AgentSessionSummary,
   type AiAgentRequestPayload,
   type AiAgentResponseData,
   type RpcErrorInfo,
@@ -12,14 +15,95 @@ import type { ActiveEntityContext, ContentDomain } from '../types';
 import {
   buildCompanionDemoReply,
   nowTimeLabel,
+  sessionTimeLabel,
   type CompanionMessage,
 } from './companionHelpers';
+
+const LAST_SESSION_KEY = 'omnidesk.companion.lastSessionId';
 
 export interface UseCompanionChatOptions {
   open: boolean;
   effectiveDomain: ContentDomain;
   contextTitle: string;
   contextEntity?: ActiveEntityContext | null;
+  restoreLastSessionOnOpen?: boolean;
+}
+
+function welcomeMessage(tauriAvailable: boolean): CompanionMessage {
+  return {
+    id: 'dock-welcome',
+    role: 'assistant',
+    timestamp: INITIAL_AI_MESSAGES[1]?.timestamp ?? '22:40',
+    servedModel: tauriAvailable
+      ? 'group/omnidesk-active · ai.agent.v1'
+      : '离线预览示例（未连接 Tauri）',
+    isDemo: !tauriAvailable,
+    content:
+      'F8 无遮罩伴读栏已就绪。支持总结要点、双语精译、词源拆解与长难句解析；输入法选词期间自动屏蔽 Enter 提交。',
+  };
+}
+
+function recordToMessages(session: AgentSessionRecord, tauriAvailable: boolean): CompanionMessage[] {
+  const restored = (session.messages ?? [])
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map<CompanionMessage>((message) => ({
+      id: message.id,
+      role: message.role === 'user' ? 'user' : 'assistant',
+      content: message.content,
+      timestamp: sessionTimeLabel(message.created_at),
+      action: message.action as CompanionMessage['action'],
+      servedModel: message.is_error
+        ? `错误 · ${message.error_code || 'agent_error'}`
+        : message.served_model || message.route_group || undefined,
+      isError: message.is_error,
+    }));
+  return restored.length > 0 ? restored : [welcomeMessage(tauriAvailable)];
+}
+
+function readLastSessionId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSessionId(sessionId: string | null): void {
+  try {
+    if (sessionId) {
+      window.localStorage.setItem(LAST_SESSION_KEY, sessionId);
+    } else {
+      window.localStorage.removeItem(LAST_SESSION_KEY);
+    }
+  } catch {
+    return;
+  }
+}
+
+function downloadExport(exported: AgentSessionExport): boolean {
+  if (typeof document === 'undefined') {
+    return false;
+  }
+  const blob = new Blob([exported.content], { type: exported.mime_type });
+  const objectUrl =
+    typeof URL.createObjectURL === 'function' ? URL.createObjectURL(blob) : '';
+  const dataUrl = `data:${exported.mime_type},${encodeURIComponent(exported.content)}`;
+  const link = document.createElement('a');
+  link.href = objectUrl || dataUrl;
+  link.download = exported.filename;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  try {
+    link.click();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    link.remove();
+    if (objectUrl && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
 }
 
 export function useCompanionChat({
@@ -27,6 +111,7 @@ export function useCompanionChat({
   effectiveDomain,
   contextTitle,
   contextEntity,
+  restoreLastSessionOnOpen = true,
 }: UseCompanionChatOptions) {
   const tauriAvailable = isTauriAvailable();
   const [draft, setDraft] = useState('');
@@ -34,24 +119,22 @@ export function useCompanionChat({
   const [dockError, setDockError] = useState<RpcErrorInfo | null>(null);
   const [liveRouteLabel, setLiveRouteLabel] = useState<string | null>(null);
   const [routeOnline, setRouteOnline] = useState<boolean>(false);
-  const [messages, setMessages] = useState<CompanionMessage[]>(() => [
-    {
-      id: 'dock-welcome',
-      role: 'assistant',
-      timestamp: INITIAL_AI_MESSAGES[1]?.timestamp ?? '22:40',
-      servedModel: tauriAvailable
-        ? 'group/omnidesk-active · ai.agent.v1'
-        : '离线预览示例（未连接 Tauri）',
-      isDemo: !tauriAvailable,
-      content:
-        'F8 无遮罩伴读栏已就绪。支持总结要点、双语精译、词源拆解与长难句解析；输入法选词期间自动屏蔽 Enter 提交。',
-    },
-  ]);
+  const [messages, setMessages] = useState<CompanionMessage[]>(() => [welcomeMessage(tauriAvailable)]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [activeSession, setActiveSession] = useState<AgentSessionSummary | null>(null);
+  const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionError, setSessionError] = useState<RpcErrorInfo | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [sessionBusyId, setSessionBusyId] = useState<string | null>(null);
 
   const msgCounterRef = useRef(1);
   const mountedRef = useRef(true);
+  const restoreAttemptedRef = useRef(false);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const sessionIdRef = useRef<string | null>(sessionId);
+  sessionIdRef.current = sessionId;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -90,6 +173,161 @@ export function useCompanionChat({
       cancelled = true;
     };
   }, [open]);
+
+  const refreshSessions = useCallback(async () => {
+    if (!isTauriAvailable()) {
+      setSessions([]);
+      return;
+    }
+    setSessionsLoading(true);
+    const res = await callCapability<AiAgentResponseData>({
+      capability: 'ai.agent.v1',
+      payload: { session_action: 'list', limit: 50 },
+    });
+    if (!mountedRef.current) return;
+    setSessionsLoading(false);
+    if (res.available && res.ok && Array.isArray(res.data.sessions)) {
+      setSessions(res.data.sessions);
+      setSessionError(null);
+      return;
+    }
+    if (res.available && !res.ok) {
+      setSessionError(res.error);
+    }
+  }, []);
+
+  const openSession = useCallback(async (id: string) => {
+    if (!isTauriAvailable()) {
+      return false;
+    }
+    setSessionBusyId(id);
+    setSessionError(null);
+    setSessionNotice(null);
+    const res = await callCapability<AiAgentResponseData>({
+      capability: 'ai.agent.v1',
+      payload: { session_action: 'get', session_id: id },
+    });
+    if (!mountedRef.current) return false;
+    setSessionBusyId(null);
+    if (!res.available || !res.ok) {
+      if (res.available) {
+        setSessionError(res.error);
+      }
+      return false;
+    }
+    const record = res.data.session as AgentSessionRecord | undefined;
+    if (!record || !Array.isArray(record.messages)) {
+      setSessionError({
+        code: 'invalid_session_record',
+        message: '后端未返回可恢复的会话消息',
+      });
+      return false;
+    }
+    setMessages(recordToMessages(record, true));
+    setSessionId(record.id);
+    setActiveSession(record);
+    writeLastSessionId(record.id);
+    setDockError(null);
+    return true;
+  }, []);
+
+  const startNewSession = useCallback(() => {
+    setMessages([welcomeMessage(isTauriAvailable())]);
+    setSessionId(null);
+    setActiveSession(null);
+    setSessionNotice('已开始新会话');
+    setSessionError(null);
+    setDockError(null);
+    writeLastSessionId(null);
+  }, []);
+
+  const deleteSession = useCallback(
+    async (id: string) => {
+      if (!isTauriAvailable()) {
+        return false;
+      }
+      setSessionBusyId(id);
+      setSessionError(null);
+      const res = await callCapability<AiAgentResponseData>({
+        capability: 'ai.agent.v1',
+        payload: { session_action: 'delete', session_id: id },
+      });
+      if (!mountedRef.current) return false;
+      setSessionBusyId(null);
+      if (!res.available || !res.ok) {
+        if (res.available) {
+          setSessionError(res.error);
+        }
+        return false;
+      }
+      if (sessionIdRef.current === id) {
+        setMessages([welcomeMessage(true)]);
+        setSessionId(null);
+        setActiveSession(null);
+        writeLastSessionId(null);
+      }
+      setSessionNotice('会话已删除');
+      await refreshSessions();
+      return true;
+    },
+    [refreshSessions],
+  );
+
+  const exportSession = useCallback(async (id: string, format: 'markdown' | 'json') => {
+    if (!isTauriAvailable()) {
+      return false;
+    }
+    setSessionBusyId(id);
+    setSessionError(null);
+    const res = await callCapability<AiAgentResponseData>({
+      capability: 'ai.agent.v1',
+      payload: { session_action: 'export', session_id: id, session_format: format },
+    });
+    if (!mountedRef.current) return false;
+    setSessionBusyId(null);
+    if (!res.available || !res.ok) {
+      if (res.available) {
+        setSessionError(res.error);
+      }
+      return false;
+    }
+    const exported =
+      res.data.filename && res.data.content && res.data.mime_type && res.data.format
+        ? (res.data as AgentSessionExport)
+        : null;
+    if (!exported || !downloadExport(exported)) {
+      setSessionError({
+        code: 'export_failed',
+        message: '会话已导出但浏览器未能启动下载',
+      });
+      return false;
+    }
+    setSessionNotice(`已导出 ${exported.filename}`);
+    return true;
+  }, []);
+
+  useEffect(() => {
+    if (
+      !open ||
+      !tauriAvailable ||
+      !restoreLastSessionOnOpen ||
+      restoreAttemptedRef.current
+    ) {
+      return;
+    }
+    restoreAttemptedRef.current = true;
+    const savedId = readLastSessionId();
+    if (!savedId) {
+      void refreshSessions();
+      return;
+    }
+    void openSession(savedId).then((restored) => {
+      if (!restored) {
+        writeLastSessionId(null);
+      }
+      void refreshSessions();
+    });
+  }, [open, openSession, refreshSessions, restoreLastSessionOnOpen, tauriAvailable]);
 
   const submitPrompt = useCallback(
     async (rawText: string, action: CompanionMessage['action'] = 'chat') => {
@@ -171,7 +409,9 @@ export function useCompanionChat({
         action: action ?? 'chat',
         domain: effectiveDomain,
         context: contextLabel,
+        context_title: contextLabel,
         context_refs: contextRefs,
+        session_id: sessionIdRef.current ?? undefined,
         prompt: trimmed,
         messages: priorHistory,
         timeout_ms: 60000,
@@ -202,6 +442,17 @@ export function useCompanionChat({
         return;
       }
 
+      const responseData = res.data ?? {};
+      const responseSessionId =
+        typeof responseData.session_id === 'string' ? responseData.session_id : '';
+      if (responseSessionId) {
+        setSessionId(responseSessionId);
+        writeLastSessionId(responseSessionId);
+        if (responseData.session) {
+          setActiveSession(responseData.session as AgentSessionSummary);
+        }
+      }
+
       if (!res.ok) {
         setDockError(res.error);
         setMessages((prev) => [
@@ -216,6 +467,9 @@ export function useCompanionChat({
             servedModel: `错误 · ${res.error.code}`,
           },
         ]);
+        if (responseData.persisted) {
+          void refreshSessions();
+        }
         return;
       }
 
@@ -238,9 +492,18 @@ export function useCompanionChat({
           servedModel: served,
         },
       ]);
+      if (responseData.persisted) {
+        void refreshSessions();
+      }
     },
-    [contextEntity, contextTitle, effectiveDomain, liveRouteLabel],
+    [contextEntity, contextTitle, effectiveDomain, liveRouteLabel, refreshSessions],
   );
+
+  const resetConversation = useCallback(() => {
+    setDraft('');
+    setIsSending(false);
+    startNewSession();
+  }, [startNewSession]);
 
   return {
     tauriAvailable,
@@ -251,6 +514,19 @@ export function useCompanionChat({
     liveRouteLabel,
     routeOnline,
     messages,
+    sessionId,
+    activeSession,
+    sessions,
+    sessionsLoading,
+    sessionError,
+    sessionNotice,
+    sessionBusyId,
+    refreshSessions,
+    openSession,
+    startNewSession,
+    deleteSession,
+    exportSession,
     submitPrompt,
+    resetConversation,
   };
 }

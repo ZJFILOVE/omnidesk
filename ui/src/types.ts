@@ -1,6 +1,8 @@
 export type ThemeMode = 'paper' | 'graphite';
 
-export type WorkbenchId = 'media' | 'text' | 'book' | 'ai' | 'store';
+export type BuiltinWorkbenchId = 'media' | 'text' | 'book' | 'ai' | 'store';
+export type PluginWorkbenchId = `plugin:${string}`;
+export type WorkbenchId = BuiltinWorkbenchId | PluginWorkbenchId;
 
 export type ContentDomain = 'media' | 'text' | 'book' | 'core';
 
@@ -12,12 +14,14 @@ export type Direction = 'left' | 'down' | 'up' | 'right';
 
 export interface WorkbenchMeta {
   id: WorkbenchId;
-  index: 1 | 2 | 3 | 4 | 5;
+  index?: number;
   label: string;
   shortLabel: string;
   domain: ContentDomain;
   shortcut: string;
   description: string;
+  badge?: string;
+  pluginId?: string;
 }
 
 export interface ActiveEntityContext {
@@ -98,8 +102,10 @@ export interface CompanionDockProps {
   activeWorkbench: WorkbenchId;
   domain: ContentDomain;
   contextEntity?: ActiveEntityContext | null;
+  dockWidgets?: readonly import('./api/types').DockWidgetSnapshot[];
   pendingPrompt?: string | null;
   onConsumePrompt?: () => void;
+  onRefreshExtensions?: () => void;
   onClose: () => void;
   onOpenAiWorkbench: () => void;
   onOpenPluginStore: () => void;

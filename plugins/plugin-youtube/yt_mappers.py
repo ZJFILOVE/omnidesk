@@ -60,6 +60,17 @@ def _build_media_item(
     if not cleaned_title or cleaned_title.lower() in _DELETED_TITLES:
         return None
     merged_extra = {"video_id": video_id, "description": description, **(extra or {})}
+    merged_extra.setdefault(
+        "stream_resolver",
+        {
+            "capability": "media.youtube.v1",
+            "payload": {"action": "resolve_stream", "video_id": video_id},
+            "quality_options": [
+                "best", "2160p", "1440p", "1080p", "720p", "480p", "360p", "audio"
+            ],
+            "settings_action": "set_settings",
+        },
+    )
     return MediaItem(
         id=video_id,
         source_id=source_id,

@@ -336,6 +336,84 @@ fn validate_raw_op_params(op: &str, body: &mut Map<String, Value>) -> Result<Opt
         body.insert("payload".to_string(), Value::Object(norm));
         validate_timeout_seconds(op, body.get("timeout"))?;
         return Ok(Some(cap));
+    } else if op == "ui.action" {
+        let kind = body
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_argument("ui.action requires string 'kind'"))?;
+        if !matches!(kind, "workspace_tab" | "dock_widget") {
+            return Err(RpcError::invalid_argument(
+                "ui.action 'kind' must be 'workspace_tab' or 'dock_widget'",
+            ));
+        }
+        for key in ["spec_id", "action_id"] {
+            let value = body
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcError::invalid_argument(format!("ui.action requires string '{key}'")))?;
+            if value.trim().is_empty() {
+                return Err(RpcError::invalid_argument(format!(
+                    "ui.action '{key}' must not be empty"
+                )));
+            }
+        }
+        if let Some(pid) = body.get("plugin_id") {
+            let pid = pid.as_str().ok_or_else(|| {
+                RpcError::invalid_argument("ui.action 'plugin_id' must be a string")
+            })?;
+            validate_plugin_id(pid)?;
+        }
+        if let Some(state) = body.get("state") {
+            if !state.is_object() {
+                return Err(RpcError::invalid_argument(
+                    "ui.action 'state' must be an object",
+                ));
+            }
+        }
+        validate_timeout_seconds(op, body.get("timeout"))?;
+    } else if op == "domain.snapshot" {
+        if let Some(pid) = body.get("plugin_id") {
+            validate_plugin_id(pid.as_str().ok_or_else(|| {
+                RpcError::invalid_argument("domain.snapshot 'plugin_id' must be a string")
+            })?)?;
+        }
+        if let Some(domain) = body.get("domain") {
+            let domain = domain.as_str().ok_or_else(|| {
+                RpcError::invalid_argument("domain.snapshot 'domain' must be a string")
+            })?;
+            if domain.trim().is_empty() {
+                return Err(RpcError::invalid_argument(
+                    "domain.snapshot 'domain' must not be empty",
+                ));
+            }
+        }
+    } else if op == "domain.invoke" {
+        let domain = body
+            .get("domain")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_argument("domain.invoke requires string 'domain'"))?;
+        if !matches!(domain.trim().to_ascii_lowercase().as_str(), "media" | "text" | "book") {
+            return Err(RpcError::invalid_argument(
+                "domain.invoke 'domain' must be media, text, or book",
+            ));
+        }
+        body.get("method")
+            .and_then(Value::as_str)
+            .filter(|method| !method.trim().is_empty())
+            .ok_or_else(|| RpcError::invalid_argument("domain.invoke requires string 'method'"))?;
+        if let Some(source_id) = body.get("source_id") {
+            validate_source_id(source_id.as_str().ok_or_else(|| {
+                RpcError::invalid_argument("domain.invoke 'source_id' must be a string")
+            })?)?;
+        }
+        if let Some(payload) = body.get("payload") {
+            if !payload.is_object() {
+                return Err(RpcError::invalid_argument(
+                    "domain.invoke 'payload' must be an object",
+                ));
+            }
+        }
+        validate_timeout_seconds(op, body.get("timeout"))?;
     } else if op == "bus.publish" || op == "bus.emit" {
         let topic = body.get("topic").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_argument(format!("{op} requires string 'topic'")))?;
         validate_topic(topic)?;

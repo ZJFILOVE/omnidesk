@@ -1,8 +1,8 @@
 import { BOOK_ITEMS, INITIAL_PLUGINS, MEDIA_ITEMS, TEXT_ARTICLES } from '../data/mock';
-import { WORKBENCH_MAP } from '../theme';
-import type { ActiveEntityContext, WorkbenchId } from '../types';
+import { resolveWorkbenchMeta } from '../theme';
+import type { ActiveEntityContext, WorkbenchId, WorkbenchMeta } from '../types';
 
-export const DEFAULT_FOCUS_IDS: Record<WorkbenchId, string> = {
+export const DEFAULT_FOCUS_IDS: Partial<Record<WorkbenchId, string>> = {
   media: `media:card:${MEDIA_ITEMS[0]?.id ?? ''}`,
   text: `text:article:${TEXT_ARTICLES[0]?.id ?? ''}`,
   book: `book:shelf:${BOOK_ITEMS[0]?.id ?? ''}`,
@@ -10,7 +10,7 @@ export const DEFAULT_FOCUS_IDS: Record<WorkbenchId, string> = {
   store: `store:plugin:${INITIAL_PLUGINS[0]?.id ?? ''}`,
 };
 
-export const SEARCH_FOCUS_IDS: Record<WorkbenchId, string> = {
+export const SEARCH_FOCUS_IDS: Partial<Record<WorkbenchId, string>> = {
   media: 'media:search',
   text: 'text:search',
   book: 'book:catalog:search',
@@ -18,8 +18,20 @@ export const SEARCH_FOCUS_IDS: Record<WorkbenchId, string> = {
   store: 'store:search',
 };
 
-export function resolveContextEntity(workbench: WorkbenchId, focusedId: string | null): ActiveEntityContext {
-  const meta = WORKBENCH_MAP[workbench];
+export function defaultFocusIdFor(workbench: WorkbenchId): string {
+  return DEFAULT_FOCUS_IDS[workbench] ?? `plugin-workspace:${workbench}:root`;
+}
+
+export function searchFocusIdFor(workbench: WorkbenchId): string {
+  return SEARCH_FOCUS_IDS[workbench] ?? `plugin-workspace:${workbench}:search`;
+}
+
+export function resolveContextEntity(
+  workbench: WorkbenchId,
+  focusedId: string | null,
+  activeMeta?: WorkbenchMeta,
+): ActiveEntityContext {
+  const meta = activeMeta ?? resolveWorkbenchMeta(workbench);
   if (focusedId?.startsWith('media:card:')) {
     const item = MEDIA_ITEMS.find((m) => `media:card:${m.id}` === focusedId);
     if (item) return { domain: 'media', workbench, itemId: item.id, title: item.title, subtitle: item.subtitle, sourceId: item.sourceId, kind: item.kind };

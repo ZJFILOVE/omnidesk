@@ -337,7 +337,28 @@ class _DomainAdapter:
             priority = int(getattr(source, "priority", 0) or 0)
         except (TypeError, ValueError):
             priority = 0
-        self._core.register(kind, sid, source, plugin_id=plugin_id, priority=priority, replace=True)
+        title = str(getattr(source, "display_name", "") or sid)
+        category = str(getattr(source, "category", "") or "")
+        metadata: dict[str, Any] = {}
+        categories_fn = getattr(source, "categories", None)
+        if callable(categories_fn):
+            try:
+                categories = categories_fn()
+                if isinstance(categories, (list, tuple)):
+                    metadata["categories"] = [str(item) for item in categories if str(item)]
+            except Exception:  # noqa: BLE001 - source discovery must not break registration
+                metadata["categories"] = []
+        self._core.register(
+            kind,
+            sid,
+            source,
+            plugin_id=plugin_id,
+            title=title,
+            category=category,
+            priority=priority,
+            metadata=metadata,
+            replace=True,
+        )
         return source
 
     def register_media_source(self, plugin_id: str, source: Any) -> Any:
@@ -649,6 +670,140 @@ class PluginManager:
 
     def dock_widgets(self, domain: str | None = None) -> list[DockWidgetSpec]:
         return self._domain_adapter.dock_widgets(domain=domain)
+
+    async def invoke_ui_action(
+        self,
+        *,
+        kind: str,
+        spec_id: str,
+        action_id: str,
+        plugin_id: str | None = None,
+        state: Mapping[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> CoreCapabilityResult:
+        """Invoke a declarative workspace-tab or dock-widget action.
+
+        The snapshot intentionally strips callbacks because they are not JSON
+        serializable.  This method is the small, explicit bridge back into the
+        owning plugin so declarative UI controls remain interactive.
+        """
+        if kind not in {"workspace_tab", "dock_widget"}:
+            return CoreCapabilityResult.fail(
+                f"Unsupported UI action kind {kind!r}",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+            )
+        sid = spec_id.strip() if isinstance(spec_id, str) else ""
+        aid = action_id.strip() if isinstance(action_id, str) else ""
+        if not sid or not aid:
+            return CoreCapabilityResult.fail(
+                "UI action requires non-empty spec_id and action_id",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+            )
+        pid = validate_plugin_id(plugin_id) if plugin_id is not None else None
+        state_map = dict(state) if state is not None else {}
+
+        specs: list[WorkspaceTabSpec | DockWidgetSpec]
+        id_attr: str
+        if kind == "workspace_tab":
+            specs = self.workspace_tabs()
+            id_attr = "tab_id"
+        else:
+            specs = self.dock_widgets()
+            id_attr = "widget_id"
+
+        target = next(
+            (
+                spec
+                for spec in specs
+                if getattr(spec, id_attr) == sid and (pid is None or spec.plugin_id == pid)
+            ),
+            None,
+        )
+        if target is None:
+            return CoreCapabilityResult.fail(
+                f"No {kind} {sid!r} is registered"
+                + (f" for plugin {pid!r}" if pid is not None else ""),
+                error_code=ErrorCode.NOT_FOUND,
+                spec_id=sid,
+                kind=kind,
+            )
+
+        handler = target.on_action
+        if not callable(handler):
+            return CoreCapabilityResult.fail(
+                f"{kind} {sid!r} does not register an on_action handler",
+                error_code=ErrorCode.CAPABILITY_NOT_FOUND,
+                provider_plugin_id=target.plugin_id,
+            )
+
+        async def _invoke() -> Any:
+            try:
+                positional = [
+                    param
+                    for param in inspect.signature(handler).parameters.values()
+                    if param.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                ]
+            except (TypeError, ValueError):
+                positional = [None, None]
+            if len(positional) >= 2:
+                args: tuple[Any, ...] = (aid, state_map)
+            elif len(positional) == 1:
+                args = ({**state_map, "action": aid},)
+            else:
+                args = ()
+            if inspect.iscoroutinefunction(handler):
+                outcome = handler(*args)
+            else:
+                outcome = await asyncio.to_thread(handler, *args)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            return outcome
+
+        try:
+            outcome = await asyncio.wait_for(_invoke(), timeout=max(0.1, float(timeout)))
+        except asyncio.TimeoutError:
+            return CoreCapabilityResult.fail(
+                f"{kind} action {aid!r} timed out after {timeout:g}s",
+                error_code=ErrorCode.TIMEOUT,
+                provider_plugin_id=target.plugin_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - plugin faults are isolated
+            return CoreCapabilityResult.fail(
+                f"{kind} action {aid!r} failed: {type(exc).__name__}: {exc}",
+                error_code=ErrorCode.PLUGIN_FAULT,
+                provider_plugin_id=target.plugin_id,
+            )
+
+        if isinstance(outcome, (CoreCapabilityResult, SdkCapabilityResult)):
+            data = dict(outcome.data)
+            return CoreCapabilityResult(
+                ok=outcome.ok,
+                data=data,
+                error=outcome.error,
+                provider_plugin_id=outcome.provider_plugin_id or target.plugin_id,
+            )
+        if outcome is None:
+            payload: dict[str, Any] = {}
+            ok = True
+            error = ""
+        elif isinstance(outcome, Mapping):
+            payload = dict(outcome)
+            ok = bool(payload.pop("ok", True))
+            error = str(payload.pop("error", "") or "")
+        else:
+            payload = {"result": outcome}
+            ok = True
+            error = ""
+        return CoreCapabilityResult(
+            ok=ok,
+            data=payload,
+            error=error,
+            provider_plugin_id=target.plugin_id,
+        )
 
     def domain_snapshot(
         self,

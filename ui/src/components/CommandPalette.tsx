@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Command, CornerDownLeft, Search, X } from 'lucide-react';
+import { isTauriAvailable, searchIndex, type SearchHit } from '../api';
 import { useImeGuard } from '../hooks/useImeGuard';
 import { DOMAIN_CSS_VARS, WORKBENCHES } from '../theme';
-import type { ContentDomain, ThemeMode, WorkbenchId } from '../types';
+import type { ContentDomain, ThemeMode, WorkbenchId, WorkbenchMeta } from '../types';
 
 export type CommandPaletteCategory =
   | 'workbench'
@@ -32,6 +33,7 @@ export interface CommandPaletteProps {
   theme?: ThemeMode;
   dockOpen?: boolean;
   commands?: CommandPaletteItem[];
+  workbenches?: readonly WorkbenchMeta[];
   initialQuery?: string;
 }
 
@@ -40,7 +42,7 @@ const CATEGORY_LABELS: Record<CommandPaletteCategory, string> = {
   theme: '外观主题',
   dock: '伴读栏',
   navigation: '键盘导航',
-  search: '检索过滤',
+  search: '跨域检索',
   plugin: '插件与策展',
 };
 
@@ -53,13 +55,19 @@ const CORE_COMMANDS: readonly CommandPaletteItem[] = [
   { id: 'theme:toggle', title: '切换 Paper / Graphite 主题', subtitle: 'Paper #F6F5F3 纸感亮色 ↔ Graphite #181718 石墨深色', category: 'theme', shortcut: 't', domain: 'core', keywords: ['theme', 'paper', 'graphite', 'dark', 'light', '主题'] },
   { id: 'theme:paper', title: '切换至 Paper 纸感亮色 (#F6F5F3)', subtitle: '暖纸底色与柔和层级的日光阅读画布', category: 'theme', domain: 'core', keywords: ['paper', 'light', '亮色'] },
   { id: 'theme:graphite', title: '切换至 Graphite 石墨深色 (#181718)', subtitle: '低眩光石墨深色护眼模式', category: 'theme', domain: 'core', keywords: ['graphite', 'dark', '深色'] },
-  { id: 'curate:sync-archive', title: '同步 obsidian-vault & music-daily 历史归档', subtitle: '本地快进拉取双仓并回灌历史推荐记录', category: 'plugin', domain: 'core', keywords: ['obsidian', 'music-daily', 'rehydrate', '同步', '归档'] },
-  { id: 'curate:run-daily', title: '执行今日不重复策展管线 (daily_immutable)', subtitle: '生成每日早报、科学期刊、每日 5 首与英语精读', category: 'plugin', domain: 'core', keywords: ['daily', 'curation', '策展', '精选'] },
-  { id: 'plugin:verify-all', title: '巡检零 ABI Python 插件健康状态', subtitle: '检查已启用插件能力契约与热重载状态', category: 'plugin', domain: 'core', keywords: ['plugin', 'health', 'verify', '插件', '巡检'] },
+  { id: 'curate:sync-archive', title: '同步 obsidian-vault & music-daily 历史归档', subtitle: '提交真实后台 Job 并快进拉取双仓、回灌历史推荐记录', category: 'plugin', domain: 'core', keywords: ['obsidian', 'music-daily', 'rehydrate', '同步', '归档', 'job'] },
+  { id: 'curate:calendar', title: '打开推荐日历与定时工作流', subtitle: '按日期/领域浏览归档、检查缺口并校验发布证据', category: 'plugin', domain: 'core', keywords: ['calendar', 'daily', 'scheduler', '日历', '调度', '补跑'] },
+  { id: 'curate:run-daily', title: '补跑每日不重复策展管线 (daily_immutable)', subtitle: '打开证据校验面板；不会用按钮切换页面冒充执行', category: 'plugin', domain: 'core', keywords: ['daily', 'curation', '策展', '精选', '补跑'] },
+  { id: 'plugin:verify-all', title: '巡检零 ABI Python 插件健康状态', subtitle: '逐个调用 plugin.verify，并显示真实失败码', category: 'plugin', domain: 'core', keywords: ['plugin', 'health', 'verify', '插件', '巡检'] },
+  { id: 'auth:center', title: '打开统一认证中心', subtitle: '聚合真实登录态、匿名 Cookie 警告与 Chrome 抓取', category: 'plugin', domain: 'core', keywords: ['auth', 'login', 'cookie', '认证', '登录', 'chrome'] },
+  { id: 'jobs:open', title: '打开后台任务中心', subtitle: '查看 JobCenter 进度、阶段、取消与结果', category: 'navigation', domain: 'core', keywords: ['job', 'task', 'progress', '任务', '进度', '取消'] },
+  { id: 'settings:open', title: '打开宿主设置中心', subtitle: '运行时、XDG 路径、认证、AI 路由与插件目录', category: 'navigation', domain: 'core', keywords: ['settings', 'paths', 'xdg', '设置', '路径'] },
 ];
 
-export function buildDefaultPaletteCommands(): CommandPaletteItem[] {
-  const workbenchCommands: CommandPaletteItem[] = WORKBENCHES.map((wb) => ({
+export function buildPaletteCommands(
+  workbenches: readonly WorkbenchMeta[] = WORKBENCHES,
+): CommandPaletteItem[] {
+  const workbenchCommands: CommandPaletteItem[] = workbenches.map((wb) => ({
     id: `workbench:${wb.id}`,
     title: `切换到 ${wb.label} (${wb.shortLabel})`,
     subtitle: wb.description,
@@ -71,7 +79,12 @@ export function buildDefaultPaletteCommands(): CommandPaletteItem[] {
   return [...workbenchCommands, ...CORE_COMMANDS];
 }
 
-export const DEFAULT_PALETTE_COMMANDS: readonly CommandPaletteItem[] = buildDefaultPaletteCommands();
+export function buildDefaultPaletteCommands(): CommandPaletteItem[] {
+  return buildPaletteCommands(WORKBENCHES);
+}
+
+export const DEFAULT_PALETTE_COMMANDS: readonly CommandPaletteItem[] =
+  buildDefaultPaletteCommands();
 
 function matchesQuery(cmd: CommandPaletteItem, normalizedQuery: string): boolean {
   if (!normalizedQuery) {
@@ -103,22 +116,76 @@ export function CommandPalette({
   theme,
   dockOpen,
   commands,
+  workbenches,
   initialQuery = '',
 }: CommandPaletteProps) {
   const [query, setQuery] = useState(initialQuery);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [remoteHits, setRemoteHits] = useState<SearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const ime = useImeGuard();
 
   const resolvedCommands = useMemo<readonly CommandPaletteItem[]>(
-    () => (commands && commands.length > 0 ? commands : DEFAULT_PALETTE_COMMANDS),
-    [commands],
+    () =>
+      commands && commands.length > 0
+        ? commands
+        : buildPaletteCommands(workbenches ?? WORKBENCHES),
+    [commands, workbenches],
   );
 
   const filteredCommands = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return resolvedCommands.filter((cmd) => matchesQuery(cmd, normalized));
   }, [resolvedCommands, query]);
+
+  useEffect(() => {
+    const normalized = query.trim();
+    if (!open || normalized.length === 0 || !isTauriAvailable()) {
+      setRemoteHits([]);
+      setSearching(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSearching(true);
+      void searchIndex({ query: normalized, limit: 14 })
+        .then((result) => {
+          if (cancelled) return;
+          setSearching(false);
+          setRemoteHits(result.available && result.ok ? result.data.hits : []);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSearching(false);
+            setRemoteHits([]);
+          }
+        });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, query]);
+
+  const remoteItems = useMemo<CommandPaletteItem[]>(
+    () =>
+      remoteHits.map((hit) => ({
+        id: `fts:${hit.domain}:${hit.id}`,
+        title: hit.title || hit.id,
+        subtitle: hit.snippet || `${hit.domain}${hit.sourceId ? ` · ${hit.sourceId}` : ''}`,
+        category: 'search',
+        domain: ['media', 'text', 'book', 'core'].includes(hit.domain)
+          ? (hit.domain as ContentDomain)
+          : 'core',
+        keywords: [hit.id, hit.domain, hit.sourceId ?? '', hit.pluginId ?? ''],
+      })),
+    [remoteHits],
+  );
+  const displayItems = useMemo(
+    () => [...filteredCommands, ...remoteItems],
+    [filteredCommands, remoteItems],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -130,12 +197,12 @@ export function CommandPalette({
   }, [open, initialQuery]);
 
   useEffect(() => {
-    if (filteredCommands.length === 0) {
+    if (displayItems.length === 0) {
       setActiveIndex(0);
-    } else if (activeIndex >= filteredCommands.length) {
-      setActiveIndex(filteredCommands.length - 1);
+    } else if (activeIndex >= displayItems.length) {
+      setActiveIndex(displayItems.length - 1);
     }
-  }, [filteredCommands.length, activeIndex]);
+  }, [displayItems.length, activeIndex]);
 
   if (!open) {
     return null;
@@ -159,15 +226,15 @@ export function CommandPalette({
     }
     if (event.key === 'ArrowDown' || (event.ctrlKey && event.key.toLowerCase() === 'n')) {
       event.preventDefault();
-      if (filteredCommands.length > 0) {
-        setActiveIndex((prev) => (prev + 1) % filteredCommands.length);
+      if (displayItems.length > 0) {
+        setActiveIndex((prev) => (prev + 1) % displayItems.length);
       }
       return;
     }
     if (event.key === 'ArrowUp' || (event.ctrlKey && event.key.toLowerCase() === 'p')) {
       event.preventDefault();
-      if (filteredCommands.length > 0) {
-        setActiveIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length);
+      if (displayItems.length > 0) {
+        setActiveIndex((prev) => (prev - 1 + displayItems.length) % displayItems.length);
       }
       return;
     }
@@ -178,14 +245,14 @@ export function CommandPalette({
     }
     if (event.key === 'End') {
       event.preventDefault();
-      if (filteredCommands.length > 0) {
-        setActiveIndex(filteredCommands.length - 1);
+      if (displayItems.length > 0) {
+        setActiveIndex(displayItems.length - 1);
       }
       return;
     }
     if (event.key === 'Enter') {
       event.preventDefault();
-      const target = filteredCommands[activeIndex] ?? filteredCommands[0];
+      const target = displayItems[activeIndex] ?? displayItems[0];
       if (target) {
         executeCommand(target);
       }
@@ -221,11 +288,11 @@ export function CommandPalette({
               setActiveIndex(0);
             }}
             {...ime.compositionProps}
-            placeholder="输入命令、工作台名称或快捷键 (Ctrl+K)..."
+            placeholder="搜索命令、台词、书架、往期精选、乐评与生词卡 (Ctrl+K)..."
             aria-label="命令搜索"
             aria-activedescendant={
-              filteredCommands[activeIndex]
-                ? `omni-cmd-${filteredCommands[activeIndex].id}`
+              displayItems[activeIndex]
+                ? `omni-cmd-${displayItems[activeIndex].id}`
                 : undefined
             }
             className="w-full bg-transparent text-[16px] text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
@@ -257,12 +324,12 @@ export function CommandPalette({
         )}
 
         <div role="listbox" aria-label="可用命令列表" className="max-h-[54vh] overflow-y-auto p-2.5">
-          {filteredCommands.length === 0 ? (
+          {displayItems.length === 0 ? (
             <div className="px-4 py-10 text-center text-[15.5px] text-[var(--text-muted)]">
-              未找到匹配“{query}”的命令
+              {searching ? '正在检索工作台、归档与命令…' : `未找到匹配“${query}”的内容`}
             </div>
           ) : (
-            filteredCommands.map((cmd, idx) => {
+            displayItems.map((cmd, idx) => {
               const selected = idx === activeIndex;
               const domainColor = cmd.domain ? DOMAIN_CSS_VARS[cmd.domain] : 'var(--domain-core)';
               return (
@@ -325,7 +392,9 @@ export function CommandPalette({
             <Command className="h-3.5 w-3.5" aria-hidden="true" />
             <span>↑↓ 导航 · Enter 执行 · Esc 关闭</span>
           </span>
-          <span>共 {filteredCommands.length} 项</span>
+          <span>
+            {searching ? '检索中… · ' : ''}共 {displayItems.length} 项
+          </span>
         </div>
       </div>
     </div>

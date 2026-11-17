@@ -184,6 +184,18 @@ fn call_raw_blocks_reserved_keys_disallowed_ops_and_fixes_bus_timeout() {
         assert_eq!(client.call_raw("ping", Some(json!({"method": "plugin.unload"})), None).await["error_code"], "invalid_argument");
         assert_eq!(client.call_raw("plugin.load", Some(json!({"plugin_id": "plugin-demo", "path": "/tmp/evil"})), None).await["error_code"], "invalid_argument");
         assert_eq!(client.call_raw("bus.subscribe", None, None).await["error_code"], "invalid_argument");
+        assert_eq!(
+            client.call_raw("ui.action", Some(json!({"kind": "dialog", "spec_id": "tab", "action_id": "open"})), None).await["error_code"],
+            "invalid_argument"
+        );
+        assert_eq!(
+            client.call_raw("ui.action", Some(json!({"kind": "workspace_tab", "spec_id": " ", "action_id": "open"})), None).await["error_code"],
+            "invalid_argument"
+        );
+        assert_eq!(
+            client.call_raw("ui.action", Some(json!({"kind": "dock_widget", "spec_id": "dock", "action_id": "refresh", "state": []})), None).await["error_code"],
+            "invalid_argument"
+        );
 
         let bad_timeout = client.call_raw("bus.publish", Some(json!({"topic": "entity.media.open", "timeout": 99999.0})), None).await;
         assert_eq!(bad_timeout["error_code"], "invalid_argument");

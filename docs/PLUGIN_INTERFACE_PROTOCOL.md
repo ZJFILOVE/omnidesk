@@ -136,6 +136,45 @@ class ExamplePlugin(BasePlugin):
    - 插件设置页由前端直接根据 `plugin.json` 的 `config_schema` 渲染。
    - 插件若需挂载专属页签（`WorkspaceTabSpec`）或 `F8` 伴读小部件（`DockWidgetSpec`），仅返回轻量 JSON Schema（`Section / Form / KeyValue / List / ActionRow / Markdown`）并处理 `on_action(action_id, state)`，由 React 前端统一渲染并接入 2D 空间键盘焦点环。
 
+### 3.2 声明式页签与 F8 Dock 动作协议（`ui.action`）
+
+`domain.snapshot` 返回的 `workspace_tabs` / `dock_widgets` 只包含可 JSON 序列化的 `tab_id`、`widget_id`、`plugin_id`、`title`、`domain` / `supported_domains` 与 `ui_schema`；`render` 和 `on_action` 回调不会跨进程返回。前端通过 `ui.action` 显式回传按钮动作与表单状态：
+
+```json
+{
+  "op": "ui.action",
+  "kind": "workspace_tab",
+  "spec_id": "bili-home",
+  "plugin_id": "plugin-bilibili",
+  "action_id": "sync_favorites",
+  "state": {"query": "rust", "limit": 20},
+  "timeout": 30
+}
+```
+
+- `kind`：`workspace_tab` 或 `dock_widget`。
+- `spec_id`：对应 `WorkspaceTabSpec.tab_id` 或 `DockWidgetSpec.widget_id`。
+- `plugin_id`：可选；提供时同时校验声明归属，防止跨插件调用同名控件。
+- `state`：前端累积的表单字段（JSON object），会原样传给插件回调。
+- `timeout`：秒；默认 30 秒，仍受 Core 单次 RPC 上限约束。
+
+插件回调支持 `on_action(action_id, state)`、单参数 `on_action({...state, "action": action_id})` 与无参三种签名；同步回调在线程池执行，异步回调直接 await。成功响应可直接返回新的 `ui_schema`，前端用它替换当前声明式面板：
+
+```json
+{
+  "ok": true,
+  "provider_plugin_id": "plugin-bilibili",
+  "data": {
+    "ui_schema": {
+      "type": "Markdown",
+      "content": "已同步 20 条收藏"
+    }
+  }
+}
+```
+
+`spec_id` 不存在、`plugin_id` 不匹配时返回 `not_found`；控件未注册 `on_action` 时返回 `capability_not_found`；插件异常隔离为 `plugin_fault`，超时返回 `timeout`。返回值统一经过密钥清洗，错误信息不得包含 Cookie、Token 或密钥明文。
+
 ---
 
 ## 四、核心总线协议：`CapabilityRegistry` 与 `EntityBus`
@@ -234,6 +273,7 @@ class ExamplePlugin(BasePlugin):
   - `{"action": "list_quotas"}`：请求 `GET /v1/magpie/quotas`（或回退 `magpie quota --json`）归一化剩余窗口百分比与重置时间。
   - `{"action": "set_route", "group_id": "omnidesk-active", "model_id": "...", "effort": "...", "routing": "order", "stays": "turn", "fallbacks": [...]}`：校验嵌套不自指后执行 `magpie group add/set`（`manual` 时追加 `magpie group pick`），保存配置并广播 `"entity.ai.route_changed"`。
 - **`ai.agent.v1` / `llm.chat.v1`**：支持同步与流式 SSE 转发，返回 `reply`、`served_model`、`route_group` 与 `usage`。
+- **`ai.agent.v1` 会话持久化**：普通对话可带 `session_id` 继续已有会话；不传时自动创建。每轮用户消息、助手回复、动作、领域、模型、路由与 usage 都写入插件数据目录下的 `agent-sessions/`（目录 `0700`、文件 `0600`）。`session_action` 支持 `list` / `get` / `rename` / `delete` / `export`，其中导出支持 `markdown` 与 `json`。聊天响应返回 `session_id`、`session` 摘要与 `persisted`，前端据此恢复历史、继续会话和下载导出。
 
 ---
 

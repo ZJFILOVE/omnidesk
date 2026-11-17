@@ -46,6 +46,20 @@ pub struct ShellState {
     shutdown_once: AtomicBool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostPathsSnapshot {
+    pub home_dir: String,
+    pub config_dir: String,
+    pub data_dir: String,
+    pub state_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_dir: Option<String>,
+    pub plugin_dirs: Vec<String>,
+    pub control_socket: String,
+    pub mpv_socket: String,
+}
+
 impl ShellState {
     pub fn new(
         client: ControlClient,
@@ -672,6 +686,29 @@ pub fn runtime_status(state: State<'_, ShellState>) -> RuntimeStatus {
         state.mpris.status(),
         Some(state.daemon.snapshot()),
     )
+}
+
+#[tauri::command]
+pub fn host_paths(state: State<'_, ShellState>) -> HostPathsSnapshot {
+    let paths = state.client.paths();
+    HostPathsSnapshot {
+        home_dir: paths.home_dir.display().to_string(),
+        config_dir: paths.config_dir.display().to_string(),
+        data_dir: paths.data_dir.display().to_string(),
+        state_dir: paths.state_dir.display().to_string(),
+        runtime_dir: paths.runtime_dir.as_ref().map(|path| path.display().to_string()),
+        plugin_dirs: paths
+            .plugin_search_dirs()
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        control_socket: paths
+            .resolve_active_socket()
+            .unwrap_or_else(|_| paths.primary_socket_path())
+            .display()
+            .to_string(),
+        mpv_socket: paths.mpv_socket_path().display().to_string(),
+    }
 }
 
 #[tauri::command]

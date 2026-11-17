@@ -43,6 +43,7 @@ export type ControlOp =
   | 'capability.call'
   | 'domain.snapshot'
   | 'domain.invoke'
+  | 'ui.action'
   | 'bus.publish'
   | 'bus.emit'
   | 'job.submit'
@@ -67,6 +68,8 @@ export interface ListPluginsArgs {
 export interface CallCapabilityArgs {
   capability: string;
   payload?: Record<string, unknown>;
+  providerPluginId?: string;
+  provider_plugin_id?: string;
   timeoutMs?: number;
   timeout_ms?: number;
 }
@@ -85,6 +88,40 @@ export interface ReadSourceArgs {
   payload?: Record<string, unknown>;
   timeoutMs?: number;
   timeout_ms?: number;
+}
+
+export interface WorkspaceTabSnapshot {
+  tab_id: string;
+  plugin_id: string;
+  title: string;
+  domain: ContentDomain;
+  badge?: string;
+  ui_schema?: Record<string, unknown> | Array<Record<string, unknown>>;
+}
+
+export interface DockWidgetSnapshot {
+  widget_id: string;
+  plugin_id: string;
+  title: string;
+  supported_domains?: ContentDomain[];
+  ui_schema?: Record<string, unknown> | Array<Record<string, unknown>>;
+}
+
+export interface WorkspaceSnapshotData {
+  workspace_tabs: WorkspaceTabSnapshot[];
+  dock_widgets: DockWidgetSnapshot[];
+  media_sources?: Array<Record<string, unknown>>;
+  text_sources?: Array<Record<string, unknown>>;
+  book_sources?: Array<Record<string, unknown>>;
+}
+
+export interface WorkspaceUiActionArgs {
+  kind: 'workspace_tab' | 'dock_widget';
+  specId: string;
+  actionId: string;
+  pluginId?: string;
+  state?: Record<string, unknown>;
+  timeoutMs?: number;
 }
 
 export interface CallRawArgs {
@@ -263,33 +300,110 @@ export interface BusEventEnvelope {
 }
 
 export interface AiAgentRequestPayload {
-  action?: 'chat' | 'summarize' | 'translate' | 'etymology' | 'clause_parse' | 'qa' | 'custom';
+  action?:
+    | 'chat'
+    | 'summarize'
+    | 'translate'
+    | 'etymology'
+    | 'parse_sentence'
+    | 'clause_parse'
+    | 'qa'
+    | 'custom';
+  session_action?: 'list' | 'get' | 'delete' | 'rename' | 'export';
+  session_id?: string;
+  session_title?: string;
+  session_format?: 'markdown' | 'json';
   domain?: ContentDomain;
   context?: string;
+  context_title?: string;
   context_refs?: Array<{
     capability: string;
     label?: string;
     payload?: Record<string, unknown>;
   }>;
   system_prompt?: string;
-  prompt: string;
+  selection?: string;
+  prompt?: string;
   messages?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   route_override?: string;
   temperature?: number;
   timeout_ms?: number;
+  limit?: number;
 }
 
-export interface AiAgentResponseData {
-  reply: string;
-  structured?: unknown;
+export interface AgentSessionMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  created_at: string;
+  action?: string;
+  domain?: string;
   served_model?: string;
-  model?: string;
   route_group?: string;
+  is_error?: boolean;
+  error_code?: string;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
   };
+}
+
+export interface AgentSessionSummary {
+  id: string;
+  session_id: string;
+  title: string;
+  domain: string;
+  context_title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+  model: string;
+  served_model: string;
+  route_group: string;
+  last_message: string;
+  last_role: string;
+}
+
+export interface AgentSessionRecord extends AgentSessionSummary {
+  schema_version: number;
+  messages: AgentSessionMessage[];
+  context_refs?: Array<{ capability: string; label: string }>;
+}
+
+export interface AgentSessionExport {
+  session_id: string;
+  format: 'markdown' | 'json';
+  mime_type: string;
+  filename: string;
+  content: string;
+}
+
+export interface AiAgentResponseData {
+  reply?: string;
+  structured?: unknown;
+  served_model?: string;
+  model?: string;
+  route_group?: string;
+  action?: string;
+  domain?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+  session_id?: string;
+  session?: AgentSessionSummary & { messages?: AgentSessionMessage[] };
+  sessions?: AgentSessionSummary[];
+  persisted?: boolean;
+  user_message_id?: string;
+  assistant_message_id?: string;
+  count?: number;
+  deleted?: boolean;
+  format?: 'markdown' | 'json';
+  mime_type?: string;
+  filename?: string;
+  content?: string;
 }
 
 export interface LlmChatRequestPayload {

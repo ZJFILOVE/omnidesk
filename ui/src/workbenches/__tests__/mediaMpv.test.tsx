@@ -3,7 +3,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MpvPlaybackState, TauriEvent } from '../../api';
 import { MPV_FRAME_CHANNEL, MPV_STATE_CHANNEL } from '../../api';
+import type { MediaItem } from '../../data/mock';
 import { MediaWorkbench } from '../MediaWorkbench';
+import { resolveMediaStream } from '../useMpvPlayback';
 
 const stoppedState: MpvPlaybackState = {
   available: true,
@@ -61,6 +63,111 @@ afterEach(() => {
 });
 
 describe('MediaWorkbench real mpv integration', () => {
+  it('resolves plugin streams and strips the web Referer for Android media', async () => {
+    const invoke = vi.fn(async () => ({
+      ok: true,
+      provider_plugin_id: 'plugin-bilibili',
+      data: {
+        play_url: 'https://upos.example/video.m4s',
+        audio_url: 'https://upos.example/audio.m4s',
+        headers: { 'User-Agent': 'Bilibili Android' },
+        quality: '4k',
+        android_media: true,
+      },
+      error: '',
+    }));
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<
+          NonNullable<Window['__TAURI__']>['core']
+        >['invoke'],
+      },
+    };
+    const item: MediaItem = {
+      id: 'BV1android',
+      sourceId: 'plugin-bilibili',
+      kind: 'video',
+      title: 'Android 高画质',
+      subtitle: '',
+      creator: '',
+      durationSec: 120,
+      durationLabel: '2:00',
+      aspect: '16:9',
+      badge: 'Bilibili',
+      thumbGradient: '',
+      thumbTag: 'Bilibili',
+      playUrl: 'https://www.bilibili.com/video/BV1android',
+      httpHeaders: { Referer: 'https://www.bilibili.com/' },
+      summary: '',
+      streamResolver: {
+        capability: 'bilibili.media.v1',
+        payload: { action: 'resolve_stream', item_id: 'BV1android', emit_open: false },
+        qualityOptions: ['auto', '4k', '1080p'],
+      },
+    };
+
+    const result = await resolveMediaStream(item, '4k');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.stream.url).toBe('https://upos.example/video.m4s');
+    expect(result.stream.audioUrl).toBe('https://upos.example/audio.m4s');
+    expect(result.stream.httpHeaders).toEqual({ 'User-Agent': 'Bilibili Android' });
+    expect(result.stream.quality).toBe('4k');
+    expect(invoke).toHaveBeenCalledWith('call', {
+      args: expect.objectContaining({
+        op: 'capability.call',
+        params: expect.objectContaining({
+          capability: 'bilibili.media.v1',
+          provider_plugin_id: 'plugin-bilibili',
+          payload: expect.objectContaining({ quality: '4k', emit_open: false }),
+        }),
+      }),
+    });
+  });
+
+  it('fails closed instead of falling back to the web page when resolution fails', async () => {
+    window.__TAURI__ = {
+      core: {
+        invoke: vi.fn(async () => ({
+          ok: false,
+          provider_plugin_id: 'plugin-youtube',
+          data: {},
+          error: 'yt-dlp 解析失败',
+          error_code: 'service_offline',
+        })) as unknown as NonNullable<
+          NonNullable<Window['__TAURI__']>['core']
+        >['invoke'],
+      },
+    };
+    const item: MediaItem = {
+      id: 'video-id-01',
+      sourceId: 'plugin-youtube',
+      kind: 'video',
+      title: '失败流',
+      subtitle: '',
+      creator: '',
+      durationSec: 0,
+      durationLabel: '--:--',
+      aspect: '16:9',
+      badge: 'YouTube',
+      thumbGradient: '',
+      thumbTag: 'YouTube',
+      playUrl: 'https://www.youtube.com/watch?v=video-id-01',
+      summary: '',
+      streamResolver: {
+        capability: 'media.youtube.v1',
+        payload: { action: 'resolve_stream', video_id: 'video-id-01' },
+        qualityOptions: ['best', '1080p'],
+      },
+    };
+
+    const result = await resolveMediaStream(item);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('取流失败');
+    expect(result.message).not.toContain('youtube.com/watch');
+  });
+
   it('opens, pauses, seeks, changes volume and follows omnidesk:mpv-state', async () => {
     let state = stoppedState;
     const handlers = new Map<string, (event: TauriEvent<unknown>) => void>();

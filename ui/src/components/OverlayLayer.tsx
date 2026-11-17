@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { DockWidgetSnapshot } from '../api';
 import { isEditableTarget, useImeGuard } from '../hooks/useImeGuard';
 import { applyTheme, getInitialTheme, nextTheme } from '../theme';
 import type {
@@ -7,6 +8,7 @@ import type {
   DockLayout,
   ThemeMode,
   WorkbenchId,
+  WorkbenchMeta,
 } from '../types';
 import { CommandPalette, type CommandPaletteItem } from './CommandPalette';
 import { CompanionDock } from './CompanionDock';
@@ -40,11 +42,14 @@ export interface OverlayLayerProps {
   dockOpen?: boolean;
   domain?: ContentDomain;
   contextEntity?: ActiveEntityContext | null;
+  dockWidgets?: readonly DockWidgetSnapshot[];
   pendingPrompt?: string | null;
   onConsumePrompt?: () => void;
+  onRefreshExtensions?: () => void;
   onOpenAiWorkbench?: () => void;
   onOpenPluginStore?: () => void;
   commands?: CommandPaletteItem[];
+  workbenchMetas?: readonly WorkbenchMeta[];
   enableGlobalShortcuts?: boolean;
 }
 
@@ -97,11 +102,14 @@ export function OverlayLayer({
   dockOpen,
   domain,
   contextEntity,
+  dockWidgets,
   pendingPrompt,
   onConsumePrompt,
+  onRefreshExtensions,
   onOpenAiWorkbench,
   onOpenPluginStore,
   commands,
+  workbenchMetas,
   enableGlobalShortcuts = true,
 }: OverlayLayerProps) {
   const [internalPaletteOpen, setInternalPaletteOpen] = useState(false);
@@ -300,10 +308,12 @@ export function OverlayLayer({
         activeWorkbench={activeWorkbench}
         domain={domain}
         contextEntity={contextEntity}
+        dockWidgets={dockWidgets}
         pendingPrompt={pendingPrompt}
         onConsumePrompt={onConsumePrompt}
         onOpenAiWorkbench={onOpenAiWorkbench}
         onOpenPluginStore={onOpenPluginStore}
+        onRefreshExtensions={onRefreshExtensions}
       />
 
       <HintOverlay
@@ -321,12 +331,18 @@ export function OverlayLayer({
         theme={theme}
         dockOpen={dockOpen ?? effectiveCompanionOpen}
         commands={commands}
+        workbenches={workbenchMetas}
       />
 
       <KeyboardHelp
         open={effectiveHelpOpen}
         onClose={closeHelp}
         activeWorkbench={activeWorkbench}
+        activeMeta={
+          activeWorkbench
+            ? workbenchMetas?.find((meta) => meta.id === activeWorkbench)
+            : undefined
+        }
       />
     </div>
   );

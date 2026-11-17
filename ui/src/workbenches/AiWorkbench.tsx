@@ -20,6 +20,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
   onFocus,
   focusedItemId,
   lastBusEvent,
+  onOpenCuration,
   onContextChange,
 }) => {
   const [activeFocusId, emitFocus] = useWorkbenchFocus(
@@ -163,6 +164,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
                   void ctrl.updateRemoteRoute(route.primaryModel, route.effort, strategy)
                 }
                 onRehydrate={() => void ctrl.handleRehydrate()}
+                onOpenCuration={onOpenCuration}
               />
             ) : (
               <AiLedgerPanel

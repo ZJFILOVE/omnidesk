@@ -1,13 +1,14 @@
 import { useEffect } from 'react';
 import { Keyboard, ShieldCheck, X } from 'lucide-react';
 import { useImeGuard } from '../hooks/useImeGuard';
-import { DOMAIN_CSS_VARS, WORKBENCH_MAP } from '../theme';
-import type { ContentDomain, WorkbenchId } from '../types';
+import { DOMAIN_CSS_VARS } from '../theme';
+import type { ContentDomain, WorkbenchId, WorkbenchMeta } from '../types';
 
 export interface KeyboardHelpProps {
   open: boolean;
   onClose: () => void;
   activeWorkbench?: WorkbenchId;
+  activeMeta?: WorkbenchMeta;
 }
 
 export interface ShortcutBinding {
@@ -73,7 +74,12 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
   },
 ];
 
-export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpProps) {
+export function KeyboardHelp({
+  open,
+  onClose,
+  activeWorkbench,
+  activeMeta: activeMetaProp,
+}: KeyboardHelpProps) {
   const ime = useImeGuard();
 
   useEffect(() => {
@@ -102,7 +108,7 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
     return null;
   }
 
-  const activeMeta = activeWorkbench ? WORKBENCH_MAP[activeWorkbench] : null;
+  const activeMeta = activeMetaProp ?? (activeWorkbench ? { label: String(activeWorkbench), shortcut: '' } : null);
 
   return (
     <div

@@ -1,4 +1,11 @@
-import type { ContentDomain, ThemeMode, WorkbenchId, WorkbenchMeta } from './types';
+import type { WorkspaceTabSnapshot } from './api/types';
+import type {
+  BuiltinWorkbenchId,
+  ContentDomain,
+  ThemeMode,
+  WorkbenchId,
+  WorkbenchMeta,
+} from './types';
 
 export const THEME_STORAGE_KEY = 'omnidesk:theme';
 export const DOCK_ASPECT_THRESHOLD = 1.45;
@@ -104,13 +111,130 @@ export const WORKBENCHES: readonly WorkbenchMeta[] = [
   },
 ] as const;
 
-export const WORKBENCH_MAP: Record<WorkbenchId, WorkbenchMeta> = {
+export const WORKBENCH_MAP: Record<BuiltinWorkbenchId, WorkbenchMeta> = {
   media: WORKBENCHES[0],
   text: WORKBENCHES[1],
   book: WORKBENCHES[2],
   ai: WORKBENCHES[3],
   store: WORKBENCHES[4],
 };
+
+export function pluginWorkbenchId(
+  tab: Pick<WorkspaceTabSnapshot, 'plugin_id' | 'tab_id'>,
+): WorkbenchId {
+  return `plugin:${tab.plugin_id}:${tab.tab_id}`;
+}
+
+export function isPluginWorkbenchId(id: WorkbenchId): id is `plugin:${string}` {
+  return id.startsWith('plugin:');
+}
+
+function pluginPreferredShortcut(tab: WorkspaceTabSnapshot): string {
+  const key = `${tab.plugin_id} ${tab.tab_id} ${tab.title}`.toLowerCase();
+  if (key.includes('bilibili') || key.includes('b站')) return 'b';
+  if (key.includes('youtube')) return 'y';
+  if (key.includes('music') || key.includes('歌词')) return 'm';
+  if (key.includes('fnos') || key.includes('nas')) return 'n';
+  if (key.includes('journal') || key.includes('期刊')) return 'j';
+  if (key.includes('zlib') || key.includes('z-lib')) return 'z';
+  if (key.includes('anna')) return 'a';
+  if (key.includes('ebook') || key.includes('epub')) return 'e';
+  if (key.includes('pdf') || key.includes('babeldoc')) return 'p';
+  return '';
+}
+
+function firstUnusedAlphabetic(text: string, used: Set<string>): string {
+  for (const char of text.toLowerCase()) {
+    if (/[a-z]/.test(char) && !used.has(char)) return char;
+  }
+  return '';
+}
+
+function nextUnusedShortcut(used: Set<string>): string {
+  for (const char of 'abcdefghijklmnopqrstuvwxyz') {
+    if (!used.has(char)) return char;
+  }
+  for (const char of '0123456789') {
+    if (!used.has(char)) return char;
+  }
+  return '';
+}
+
+export interface PluginWorkbenchAssignment {
+  workbenches: WorkbenchMeta[];
+  shortcutMap: Record<string, WorkbenchId>;
+}
+
+/**
+ * Build deterministic first-class workbench rows for plugin tabs.
+ *
+ * Canonical plugin mnemonics win when free, then title/tab-id letters; the
+ * result matches the v1 `Alt+<letter>` navigation contract without allowing
+ * two plugins to claim the same key.
+ */
+export function assignPluginWorkbenches(
+  tabs: readonly WorkspaceTabSnapshot[],
+  reservedShortcuts: Iterable<string> = [],
+): PluginWorkbenchAssignment {
+  const used = new Set(Array.from(reservedShortcuts, (key) => key.toLowerCase()));
+  const assigned = tabs.map((tab) => {
+    let key = pluginPreferredShortcut(tab);
+    if (!key || used.has(key)) {
+      key =
+        firstUnusedAlphabetic(tab.title, used) ||
+        firstUnusedAlphabetic(tab.tab_id.replace(/^tab[-_]?/, ''), used) ||
+        firstUnusedAlphabetic(tab.plugin_id.replace(/^plugin[-_]?/, ''), used) ||
+        nextUnusedShortcut(used);
+    }
+    if (key) used.add(key);
+    const id = pluginWorkbenchId(tab);
+    return {
+      tab,
+      id,
+      shortcut: key ? `Alt+${key.toUpperCase()}` : '',
+      key,
+    };
+  });
+  const domainRank: Record<ContentDomain, number> = { media: 0, text: 1, book: 2, core: 3 };
+  assigned.sort((a, b) => {
+    const domainDelta = domainRank[a.tab.domain] - domainRank[b.tab.domain];
+    if (domainDelta !== 0) return domainDelta;
+    return a.tab.title.localeCompare(b.tab.title, 'zh-CN');
+  });
+  const workbenches = assigned.map(({ tab, id, shortcut }) => ({
+    id,
+    label: tab.title,
+    shortLabel: tab.badge || tab.title,
+    domain: tab.domain,
+    shortcut,
+    description: `${tab.plugin_id} · 插件声明式工作台`,
+    badge: tab.badge,
+    pluginId: tab.plugin_id,
+  }));
+  const shortcutMap: Record<string, WorkbenchId> = {};
+  for (const entry of assigned) {
+    if (entry.key) shortcutMap[entry.key] = entry.id;
+  }
+  return { workbenches, shortcutMap };
+}
+
+export function resolveWorkbenchMeta(
+  id: WorkbenchId,
+  pluginWorkbenches: readonly WorkbenchMeta[] = [],
+): WorkbenchMeta {
+  const builtin = WORKBENCH_MAP[id as BuiltinWorkbenchId];
+  if (builtin) return builtin;
+  const pluginMeta = pluginWorkbenches.find((entry) => entry.id === id);
+  if (pluginMeta) return pluginMeta;
+  return {
+    id,
+    label: id.replace(/^plugin:/, ''),
+    shortLabel: 'Plugin',
+    domain: 'core',
+    shortcut: '',
+    description: '插件工作台',
+  };
+}
 
 export const DOMAIN_CSS_VARS: Record<ContentDomain, string> = {
   media: 'var(--domain-media)',

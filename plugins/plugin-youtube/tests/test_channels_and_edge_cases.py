@@ -145,7 +145,7 @@ else:
     # WorkspaceTabSpec on_action and invalid page argument
     tab = ctx.domains.workspace_tabs(domain="media")[0]
     tab_out = await tab.on_action("categories", {})
-    assert tab_out["ok"] is True and "search" in tab_out["result"]["categories"]
+    assert tab_out["ok"] is True and "search" in tab_out["data"]["categories"]
     bad_page = await ctx.capabilities.call("media.youtube.v1", {"action": "search", "query": "x", "page": "not-an-int"})
     assert bad_page.ok is False and bad_page.data["error_code"] == "invalid_argument"
 

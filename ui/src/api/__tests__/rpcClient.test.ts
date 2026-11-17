@@ -4,6 +4,7 @@ import {
   call,
   callCapability,
   coreStatus,
+  domainSources,
   emitEvent,
   eventBridgeStatus,
   formatRpcError,
@@ -116,6 +117,48 @@ describe('Typed Tauri RPC client', () => {
     await call({ op: 'plugin.reload', params: { plugin_id: 'plugin-demo' } });
     expect(invoke).toHaveBeenCalledWith('call', {
       args: { op: 'plugin.reload', params: { plugin_id: 'plugin-demo' } },
+    });
+  });
+
+  it('maps source categories from domain.snapshot metadata', async () => {
+    const invoke = vi.fn(async () => ({
+      ok: true,
+      provider_plugin_id: '',
+      data: {
+        media_sources: [
+          {
+            source_id: 'plugin-youtube',
+            plugin_id: 'plugin-youtube',
+            title: 'YouTube',
+            category: '',
+            priority: 20,
+            metadata: {
+              categories: ['subscriptions', 'trending', 'podcast', 'history'],
+            },
+          },
+        ],
+      },
+      error: '',
+    }));
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<
+          NonNullable<Window['__TAURI__']>['core']
+        >['invoke'],
+      },
+    };
+
+    const result = await domainSources('media');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data[0]?.categories).toEqual([
+      'subscriptions',
+      'trending',
+      'podcast',
+      'history',
+    ]);
+    expect(invoke).toHaveBeenCalledWith('call', {
+      args: { op: 'domain.snapshot', params: { domain: 'media' } },
     });
   });
 

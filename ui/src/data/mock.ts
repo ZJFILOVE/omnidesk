@@ -22,12 +22,23 @@ export interface MediaItem {
   thumbGradient: string;
   thumbTag: string;
   playUrl: string;
+  audioUrl?: string;
+  httpHeaders?: Record<string, string>;
+  qualityLabel?: string;
+  streamResolver?: StreamResolverDescriptor;
   summary: string;
   listeningCue?: string;
   appleMusicSongId?: string;
   chapters?: ChapterSegment[];
   lyrics?: LyricLine[];
   nasMeta?: { codec: string; resolution: string; path: string; subtitleStatus: string; imdbRating: string; clipQuote?: string };
+}
+
+export interface StreamResolverDescriptor {
+  capability: string;
+  payload: Record<string, unknown>;
+  qualityOptions: string[];
+  settingsAction?: string;
 }
 
 export type TextChannelId = 'all' | 'journal' | 'news' | 'reddit' | 'linuxdo' | 'zhihu';
@@ -174,6 +185,11 @@ export interface BookCatalogItem {
   sizeLabel: string;
   coverGradient: string;
   summary: string;
+  itemId?: string;
+  providerPluginId?: string;
+  detailUrl?: string;
+  downloadToken?: string;
+  downloadable?: boolean;
 }
 
 export interface AiPresetItem {

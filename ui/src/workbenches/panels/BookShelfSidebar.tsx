@@ -1,5 +1,6 @@
 import React from 'react';
-import { BookOpen, Plus } from 'lucide-react';
+import { AlertTriangle, BookOpen, LoaderCircle, Plus } from 'lucide-react';
+import type { BookSearchProvider } from '../../api';
 import StateView from '../../components/StateView';
 import { FocusButton, HAIRLINE_BORDER, focusClass, focusableProps } from '../../components/WorkbenchLayout';
 import { SearchInput, SegmentedPills } from '../../components/WorkbenchPrimitives';
@@ -15,8 +16,16 @@ export interface BookShelfSidebarProps {
   onFocus: (id: string) => void;
   onTabChange: (tab: 'shelf' | 'search') => void;
   onCatalogQueryChange: (q: string) => void;
+  searchLoading?: boolean;
+  searchError?: string | null;
+  searchProvider?: BookSearchProvider;
+  onSearchProviderChange?: (provider: BookSearchProvider) => void;
   onSelectBook: (book: BookItem) => void;
   onImportBook: (entry: BookCatalogItem) => void;
+  onCatalogAction?: (
+    entry: BookCatalogItem,
+    action: 'download' | 'open_in_babeldoc' | 'open_in_ebook' | 'send_to_nas',
+  ) => void;
 }
 
 export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
@@ -29,8 +38,13 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
   onFocus,
   onTabChange,
   onCatalogQueryChange,
+  searchLoading = false,
+  searchError = null,
+  searchProvider = 'auto',
+  onSearchProviderChange,
   onSelectBook,
   onImportBook,
+  onCatalogAction,
 }) => (
   <div
     className="flex flex-col gap-4 border-b px-6 py-5"
@@ -71,6 +85,41 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
         </span>
       )}
     </div>
+
+    {leftTab === 'search' && onSearchProviderChange ? (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SegmentedPills
+          options={[
+            { id: 'auto', label: '自动回退' },
+            { id: 'plugin-zlib', label: 'Z-Library' },
+            { id: 'plugin-annas-archive', label: "Anna's Archive" },
+          ]}
+          value={searchProvider}
+          onChange={(value) => onSearchProviderChange(value as BookSearchProvider)}
+          focusPrefix="book:provider:"
+          activeFocusId={activeFocusId}
+          onFocus={onFocus}
+          tone="book"
+          ariaLabel="图书搜索提供方"
+        />
+        <span className="inline-flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
+          {searchLoading ? (
+            <>
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> 正在调用 book.search.v1
+            </>
+          ) : (
+            '真实 book.search.v1 结果'
+          )}
+        </span>
+      </div>
+    ) : null}
+
+    {leftTab === 'search' && searchError ? (
+      <div className="flex items-start gap-2 rounded-[9px] bg-[var(--status-err-bg)] px-3 py-2 text-[13px] text-[var(--status-err-fg)]">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span>{searchError}</span>
+      </div>
+    ) : null}
 
     {leftTab === 'shelf' ? (
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6">
@@ -141,8 +190,12 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
       <StateView
         mode="empty"
         variant="inline"
-        title="未找到匹配的图书"
-        description="尝试更换书名或作者关键词。"
+        title={catalogQuery.trim() ? '未找到匹配的图书' : '输入书名、作者或 ISBN 开始检索'}
+        description={
+          catalogQuery.trim()
+            ? '正在走真实 book.search.v1；可切换提供方或更换关键词。'
+            : '至少输入 2 个字符，结果来自 Z-Library / Anna’s Archive。'
+        }
         activeFocusId={activeFocusId}
         onFocus={onFocus}
         action={{
@@ -154,29 +207,58 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
     ) : (
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {catalog.map((entry) => (
-          <FocusButton
-            key={entry.id}
-            focusId={`book:catalog:${entry.id}`}
-            activeFocusId={activeFocusId}
-            onFocus={onFocus}
-            onActivate={() => onImportBook(entry)}
-            surface="surface"
-            className="flex flex-col gap-1.5 p-4 text-left"
-          >
-            <div className="flex items-center justify-between text-[13.5px]">
-              <span className="font-mono font-semibold" style={{ color: 'var(--domain-book)' }}>
-                {entry.format.toUpperCase()} · {entry.sizeLabel}
-              </span>
-              <span className="inline-flex items-center gap-1 font-medium text-[var(--text-muted)]">
-                <Plus className="h-3 w-3" aria-hidden="true" />
-                <span>导入书架</span>
-              </span>
-            </div>
-            <div className="text-[15.5px] font-semibold text-[var(--text-primary)]">
-              {entry.title}
-            </div>
-            <div className="text-[14px] text-[var(--text-muted)]">{entry.author}</div>
-          </FocusButton>
+          <article key={entry.id} className="flex flex-col gap-1.5">
+            <FocusButton
+              focusId={`book:catalog:${entry.id}`}
+              activeFocusId={activeFocusId}
+              onFocus={onFocus}
+              onActivate={() => onImportBook(entry)}
+              surface="surface"
+              className="flex flex-col gap-1.5 p-4 text-left"
+            >
+              <div className="flex items-center justify-between text-[13.5px]">
+                <span className="font-mono font-semibold" style={{ color: 'var(--domain-book)' }}>
+                  {entry.format.toUpperCase()} · {entry.sizeLabel}
+                </span>
+                <span className="inline-flex items-center gap-1 font-medium text-[var(--text-muted)]">
+                  <Plus className="h-3 w-3" aria-hidden="true" />
+                  <span>{entry.providerPluginId ? '下载并导入' : '导入书架'}</span>
+                </span>
+              </div>
+              <div className="text-[15.5px] font-semibold text-[var(--text-primary)]">
+                {entry.title}
+              </div>
+              <div className="text-[14px] text-[var(--text-muted)]">{entry.author}</div>
+              <div className="truncate text-[12.5px] text-[var(--text-subtle)]">
+                {entry.sourceName}
+              </div>
+            </FocusButton>
+            {entry.providerPluginId && onCatalogAction ? (
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  type="button"
+                  onClick={() => onCatalogAction(entry, 'open_in_babeldoc')}
+                  className="cursor-pointer rounded-[7px] bg-[var(--bg-canvas)] px-1.5 py-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                >
+                  BabelDOC
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCatalogAction(entry, 'open_in_ebook')}
+                  className="cursor-pointer rounded-[7px] bg-[var(--bg-canvas)] px-1.5 py-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                >
+                  EPUB 阅读
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCatalogAction(entry, 'send_to_nas')}
+                  className="cursor-pointer rounded-[7px] bg-[var(--bg-canvas)] px-1.5 py-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                >
+                  送 NAS
+                </button>
+              </div>
+            ) : null}
+          </article>
         ))}
       </div>
     )}

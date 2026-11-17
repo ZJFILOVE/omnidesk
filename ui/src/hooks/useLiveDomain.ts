@@ -12,6 +12,7 @@ import type {
   BookSpread,
   CommentNode,
   MediaItem,
+  StreamResolverDescriptor,
   TextArticle,
   VocabCard,
 } from '../data/mock';
@@ -24,6 +25,35 @@ const num = (v: unknown, fallback = 0): number =>
   typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const dict = (v: unknown): Dict => (v && typeof v === 'object' ? (v as Dict) : {});
+
+function toStringMap(value: unknown): Record<string, string> | undefined {
+  const raw = dict(value);
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (typeof entry === 'string' && key.trim() && entry.trim()) {
+      out[key] = entry;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function toStreamResolver(value: unknown): StreamResolverDescriptor | undefined {
+  const raw = dict(value);
+  const capability = str(raw.capability);
+  if (!capability) return undefined;
+  return {
+    capability,
+    payload: dict(raw.payload),
+    qualityOptions: arr(raw.quality_options)
+      .map((entry) => (isRecord(entry) ? str(entry.value) : str(entry)))
+      .filter(Boolean),
+    settingsAction: str(raw.settings_action) || undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Dict {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
 
 function formatDuration(sec: number): string {
   if (sec <= 0) return '--:--';
@@ -178,6 +208,10 @@ export function toMediaItem(raw: unknown): MediaItem | null {
   const duration = num(item.duration_sec);
   const extra = dict(item.extra);
   const playUrl = str(item.play_url);
+  const httpHeaders =
+    toStringMap(item.http_headers) ??
+    toStringMap(item.headers) ??
+    toStringMap(extra.http_headers);
   const appleMusicSongId =
     str(extra.apple_music_song_id) ||
     str(extra.song_id) ||
@@ -200,6 +234,10 @@ export function toMediaItem(raw: unknown): MediaItem | null {
     thumbGradient: gradientFor(id),
     thumbTag: str(item.source_badge, kind.toUpperCase()),
     playUrl,
+    audioUrl: str(item.audio_url) || undefined,
+    httpHeaders,
+    qualityLabel: str(item.quality_label) || undefined,
+    streamResolver: toStreamResolver(extra.stream_resolver),
     summary: str(item.summary),
     listeningCue: str(item.listening_cue) || undefined,
     appleMusicSongId: appleMusicSongId || undefined,
@@ -239,6 +277,7 @@ export function toVocabCard(raw: unknown): VocabCard | null {
 export interface LiveFeed<T> {
   items: T[];
   sources: DomainSourceDescriptor[];
+  categories: string[];
   sourceId: string;
   live: boolean;
   loading: boolean;
@@ -252,9 +291,11 @@ function useLiveSource<T>(
   payload: Dict,
   mapItem: (raw: unknown, sourceId: string) => T | null,
   deps: unknown[],
+  preferredSourceId = '',
 ): LiveFeed<T> {
   const [items, setItems] = useState<T[]>([]);
   const [sources, setSources] = useState<DomainSourceDescriptor[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
   const [sourceId, setSourceId] = useState('');
   const [live, setLive] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -292,11 +333,18 @@ function useLiveSource<T>(
       const list = sourcesRes.data;
       setSources(list);
       if (list.length === 0) {
+        setCategories([]);
         setLive(false);
         setLoading(false);
         return;
       }
-      const chosen = (sourceId && list.some((s) => s.sourceId === sourceId) ? sourceId : list[0].sourceId);
+      const preferred = preferredSourceId && list.some((s) => s.sourceId === preferredSourceId)
+        ? preferredSourceId
+        : '';
+      const chosen = preferred || (
+        sourceId && list.some((s) => s.sourceId === sourceId) ? sourceId : list[0].sourceId
+      );
+      setCategories(list.find((source) => source.sourceId === chosen)?.categories ?? []);
       const res: RpcResult<unknown> = await invokeDomain({
         domain,
         sourceId: chosen,
@@ -333,9 +381,9 @@ function useLiveSource<T>(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [domain, method, payloadKey, sourceId, nonce, ...deps]);
+  }, [domain, method, payloadKey, sourceId, nonce, preferredSourceId, ...deps]);
 
-  return { items, sources, sourceId, live, loading, error, reload };
+  return { items, sources, categories, sourceId, live, loading, error, reload };
 }
 
 export function useLiveTextFeed(query = '', channelId = ''): LiveFeed<TextArticle> {
@@ -352,11 +400,19 @@ export function useLiveBooks(): LiveFeed<BookItem> {
   return useLiveSource<BookItem>('book', 'list_books', {}, (raw) => toBookItem(raw), []);
 }
 
-export function useLiveMedia(category = '', query = ''): LiveFeed<MediaItem> {
-  return useLiveSource<MediaItem>('media', 'fetch_items', { category, query, page: 1 }, (raw) => toMediaItem(raw), [
-    category,
-    query,
-  ]);
+export function useLiveMedia(
+  category = '',
+  query = '',
+  sourceId = '',
+): LiveFeed<MediaItem> {
+  return useLiveSource<MediaItem>(
+    'media',
+    'fetch_items',
+    { category, query, page: 1 },
+    (raw) => toMediaItem(raw),
+    [category, query],
+    sourceId,
+  );
 }
 
 export interface LiveArticleDetail {

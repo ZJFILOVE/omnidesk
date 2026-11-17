@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .android_player import fetch_play_view_unite
 from .client import BilibiliApiError, BilibiliClient
 from .parsers import QN_TO_QUALITY
-from .security import DEFAULT_USER_AGENT, SecurityValidationError, redact_bilibili_secrets, to_netscape_cookie_txt, validate_url
+from .security import (
+    DEFAULT_ANDROID_USER_AGENT,
+    DEFAULT_USER_AGENT,
+    validate_url,
+)
+from .ytdlp_streams import resolve_via_ytdlp
 
 if TYPE_CHECKING:
     from plugin import BilibiliPlugin
@@ -40,152 +43,6 @@ async def resolve_target_cid(client: BilibiliClient, target: dict[str, Any], coo
     if not cid:
         raise BilibiliApiError("分P信息缺少有效 CID", error_code="invalid_response")
     return int(cid), title or str(pages[idx].get("part") or "")
-
-
-def _format_matches_quality(fmt: Mapping[str, Any], label: str, qn: int | None) -> bool:
-    if qn is None:
-        return True
-    fid = str(fmt.get("format_id") or "")
-    if fid.isdigit() and int(fid) == qn:
-        return True
-    height = int(fmt.get("height") or 0)
-    fps = float(fmt.get("fps") or 0.0)
-    note = str(fmt.get("format_note") or "").lower()
-    if label == "4k":
-        return height >= 2160 or "4k" in note
-    if label == "8k":
-        return height >= 4320 or "8k" in note
-    if label == "1080p60":
-        return height >= 1080 and fps >= 50
-    if label == "1080p+":
-        return height >= 1080 and ("1080p+" in note or "高码" in note or float(fmt.get("vbr") or 0) >= 3000)
-    return height >= {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}.get(label, 0)
-
-
-def _extract_ytdlp_streams(
-    info: Mapping[str, Any], *, req_label: str, req_qn: int | None, allowed_origins: frozenset[str]
-) -> dict[str, Any]:
-    if info.get("has_drm") or info.get("drm"):
-        raise BilibiliApiError("目标视频受 DRM 保护，拒绝绕过", error_code="drm_protected")
-    formats = [f for f in (info.get("formats") or []) if isinstance(f, Mapping)]
-    if any(f.get("has_drm") for f in formats):
-        raise BilibiliApiError("流清单包含 DRM 受保护轨道，拒绝绕过", error_code="drm_protected")
-
-    video_streams, audio_streams, progressive_streams = [], [], []
-    for fmt in formats:
-        raw_url = str(fmt.get("url") or "").strip()
-        if not raw_url:
-            continue
-        safe_url = validate_url(raw_url, allow_cdn=True, allowed_loopback_origins=allowed_origins)
-        vcodec, acodec = str(fmt.get("vcodec") or "none"), str(fmt.get("acodec") or "none")
-        entry = {
-            "url": safe_url,
-            "format_id": str(fmt.get("format_id") or ""),
-            "format_note": str(fmt.get("format_note") or ""),
-            "codecs": vcodec if vcodec != "none" else acodec,
-            "width": int(fmt.get("width") or 0),
-            "height": int(fmt.get("height") or 0),
-            "fps": float(fmt.get("fps") or 0.0),
-            "bandwidth": int(fmt.get("tbr") or fmt.get("vbr") or fmt.get("abr") or 0),
-        }
-        if vcodec != "none" and acodec != "none":
-            progressive_streams.append(entry)
-        elif vcodec != "none":
-            video_streams.append(entry)
-        elif acodec != "none":
-            audio_streams.append(entry)
-
-    top_url = str(info.get("url") or "").strip()
-    if top_url and not (video_streams or progressive_streams):
-        safe_top = validate_url(top_url, allow_cdn=True, allowed_loopback_origins=allowed_origins)
-        progressive_streams.append({"url": safe_top, "format_id": "", "height": int(info.get("height") or 0)})
-
-    candidates = video_streams or progressive_streams
-    if not candidates:
-        raise BilibiliApiError("yt-dlp 未返回可用视频流", error_code="quality_unavailable")
-
-    matching = [s for s in candidates if _format_matches_quality(s, req_label, req_qn)]
-    if req_qn is not None and not matching:
-        raise BilibiliApiError(
-            f"请求的清晰度 {req_label} 不可用（可能需要登录或大会员权限）",
-            error_code="quality_unavailable",
-        )
-    chosen_v = (matching or candidates)[-1] if req_label == "auto" else matching[0]
-    chosen_a = audio_streams[-1] if audio_streams else {}
-    return {
-        "title": str(info.get("title") or ""),
-        "duration_sec": float(info.get("duration") or 0.0),
-        "quality": req_label if req_label != "auto" else (chosen_v.get("format_note") or f"{chosen_v.get('height', '')}p"),
-        "qn": req_qn,
-        "video_url": chosen_v["url"],
-        "audio_url": str(chosen_a.get("url") or ""),
-        "play_url": chosen_v["url"],
-        "streams": {"video": video_streams, "audio": audio_streams, "progressive": progressive_streams},
-        "source": "yt-dlp",
-    }
-
-
-async def resolve_via_ytdlp(
-    plugin: BilibiliPlugin,
-    ytdlp_bin: str,
-    target_url: str,
-    *,
-    cookie: str,
-    proxy: str,
-    timeout_sec: float,
-    req_label: str,
-    req_qn: int | None,
-    allowed_origins: frozenset[str],
-) -> dict[str, Any]:
-    """Run yt-dlp via `ctx.exec_subprocess` (shell=False) with 0600 ephemeral cookie file."""
-    assert plugin.ctx is not None
-    cookie_path = ""
-    secrets = tuple(s for s in (cookie, proxy) if s)
-    try:
-        if cookie:
-            fd, cookie_path = tempfile.mkstemp(prefix="bili-ck-", suffix=".txt")
-            try:
-                os.fchmod(fd, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(to_netscape_cookie_txt(cookie))
-            except Exception:
-                os.close(fd)
-                raise
-        args = [ytdlp_bin, "--dump-single-json", "--no-playlist", "--no-warnings"]
-        if proxy:
-            args.extend(["--proxy", proxy])
-        if cookie_path:
-            args.extend(["--cookies", cookie_path])
-        args.append(target_url)
-
-        res = await plugin.ctx.exec_subprocess(args, timeout_sec=timeout_sec)
-        if res.timed_out:
-            raise BilibiliApiError("yt-dlp 流解析超时", error_code="timeout", extra_secrets=secrets)
-        if res.cancelled:
-            raise BilibiliApiError("yt-dlp 流解析被取消", error_code="cancelled", extra_secrets=secrets)
-        if not res.ok:
-            err = redact_bilibili_secrets(res.stderr or res.stdout, secrets)
-            lowered = err.lower()
-            code = (
-                "rate_limited" if "412" in lowered
-                else ("unauthorized" if any(k in lowered for k in ("401", "login", "cookie"))
-                      else ("drm_protected" if "drm" in lowered else "service_offline"))
-            )
-            raise BilibiliApiError(f"yt-dlp 执行失败: {err or f'rc={res.returncode}'}", error_code=code, extra_secrets=secrets)
-
-        info = json.loads(res.stdout)
-        if not isinstance(info, Mapping):
-            raise BilibiliApiError("yt-dlp 输出格式无效", error_code="invalid_response")
-        return _extract_ytdlp_streams(info, req_label=req_label, req_qn=req_qn, allowed_origins=allowed_origins)
-    except SecurityValidationError as exc:
-        raise BilibiliApiError(str(exc), error_code=exc.error_code, extra_secrets=secrets) from None
-    except FileNotFoundError:
-        raise BilibiliApiError(f"未找到 yt-dlp 可执行文件: {ytdlp_bin}", error_code="service_offline") from None
-    except ValueError as exc:
-        raise BilibiliApiError(f"yt-dlp JSON 解析失败: {exc}", error_code="invalid_response") from None
-    finally:
-        if cookie_path:
-            Path(cookie_path).unlink(missing_ok=True)
 
 
 async def _resolve_live_playurl(
@@ -234,7 +91,19 @@ async def _resolve_live_playurl(
 
 
 async def resolve_via_playurl(
-    client: BilibiliClient, target: dict[str, Any], *, cookie: str, req_label: str, req_qn: int | None
+    client: BilibiliClient,
+    target: dict[str, Any],
+    *,
+    cookie: str,
+    req_label: str,
+    req_qn: int | None,
+    android_token: str = "",
+    unlock_hd: bool = False,
+    preferred_codec: int = 0,
+    proxy: str = "",
+    grpc_endpoint: str = "",
+    curl_bin: str = "curl",
+    plugin: BilibiliPlugin | None = None,
 ) -> dict[str, Any]:
     """Resolve video/audio streams via Bilibili `/x/player/wbi/playurl` or live playInfo API."""
     if target.get("room_id") and not target.get("bvid") and not target.get("aid"):
@@ -286,15 +155,50 @@ async def resolve_via_playurl(
     ]
 
     video_qns = {v["qn"] for v in videos if v["qn"] > 0}
+    current_best = max(video_qns) if video_qns else actual_qn
     if req_qn is not None:
         has_exact = (req_qn in video_qns) or (bool(progressive) and actual_qn == req_qn)
         accepted = (not accept_qns) or (req_qn in accept_qns)
         if not has_exact or not accepted:
+            android = await _try_android_stream(
+                plugin,
+                target=target,
+                aid=target.get("aid"),
+                cid=cid,
+                req_qn=req_qn,
+                current_best=current_best,
+                android_token=android_token,
+                unlock_hd=unlock_hd,
+                preferred_codec=preferred_codec,
+                proxy=proxy,
+                grpc_endpoint=grpc_endpoint,
+                curl_bin=curl_bin,
+            )
+            if android is not None:
+                return {**android, "cid": cid, "title": title}
             avail = [QN_TO_QUALITY.get(q, str(q)) for q in sorted(accept_qns or video_qns, reverse=True)]
+            hint = "" if android_token else "；4K/HDR 可能需要在插件页签授权 Android/TV 会话"
             raise BilibiliApiError(
-                f"请求的清晰度 {req_label} (qn={req_qn}) 不可用，可用清晰度: {', '.join(avail) or 'none'}",
+                f"请求的清晰度 {req_label} (qn={req_qn}) 不可用，可用清晰度: {', '.join(avail) or 'none'}{hint}",
                 error_code="quality_unavailable",
             )
+    elif unlock_hd and android_token and target.get("aid") and cid:
+        android = await _try_android_stream(
+            plugin,
+            target=target,
+            aid=target.get("aid"),
+            cid=cid,
+            req_qn=127,
+            current_best=current_best,
+            android_token=android_token,
+            unlock_hd=unlock_hd,
+            preferred_codec=preferred_codec,
+            proxy=proxy,
+            grpc_endpoint=grpc_endpoint,
+            curl_bin=curl_bin,
+        )
+        if android is not None:
+            return {**android, "cid": cid, "title": title}
 
     chosen_v = next((v for v in videos if v["qn"] == req_qn), None) if req_qn is not None else (max(videos, key=lambda v: v["qn"]) if videos else None)
     if chosen_v is None and progressive:
@@ -318,6 +222,46 @@ async def resolve_via_playurl(
     }
 
 
+async def _try_android_stream(
+    plugin: BilibiliPlugin | None,
+    *,
+    target: dict[str, Any],
+    aid: Any,
+    cid: int,
+    req_qn: int | None,
+    current_best: int,
+    android_token: str,
+    unlock_hd: bool,
+    preferred_codec: int,
+    proxy: str,
+    grpc_endpoint: str,
+    curl_bin: str,
+) -> dict[str, Any] | None:
+    if plugin is None or not unlock_hd or not android_token or not aid or cid <= 0:
+        return None
+    try:
+        candidate = await fetch_play_view_unite(
+            plugin,
+            aid=int(aid),
+            cid=cid,
+            qn=req_qn if req_qn is not None else 127,
+            token=android_token,
+            preferred_codec=preferred_codec,
+            proxy=proxy,
+            endpoint=grpc_endpoint,
+            curl_bin=curl_bin,
+            timeout_sec=12.0,
+            allowed_loopback_origins=plugin._build_client().allowed_loopback_origins,
+        )
+    except (BilibiliApiError, ValueError, TypeError):
+        return None
+    if int(candidate.get("qn") or 0) <= current_best:
+        return None
+    if req_qn is not None and int(candidate.get("qn") or 0) < req_qn:
+        return None
+    return candidate
+
+
 def resolve_ytdlp_mode(client: BilibiliClient, *, method: str, ytdlp_bin: str) -> tuple[str, str]:
     """Select `ytdlp` vs `playurl` without accidentally calling host yt-dlp against local mock servers."""
     if method == "playurl":
@@ -338,7 +282,14 @@ def resolve_ytdlp_mode(client: BilibiliClient, *, method: str, ytdlp_bin: str) -
     return "playurl", ""
 
 
-def default_stream_headers(bvid: str = "", aid: int | None = None) -> dict[str, str]:
+def default_stream_headers(
+    bvid: str = "",
+    aid: int | None = None,
+    *,
+    android_media: bool = False,
+) -> dict[str, str]:
     """Return safe playback headers (strictly excluding Cookie/Authorization)."""
+    if android_media:
+        return {"User-Agent": DEFAULT_ANDROID_USER_AGENT}
     referer = f"https://www.bilibili.com/video/{bvid}" if bvid else (f"https://www.bilibili.com/video/av{aid}" if aid else "https://www.bilibili.com/")
     return {"Referer": referer, "User-Agent": DEFAULT_USER_AGENT}

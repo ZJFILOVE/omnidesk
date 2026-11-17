@@ -8,11 +8,13 @@
 | :--- | :--- | :--- | :--- |
 | Borealis + C++ 窗口壳 | `shell-tauri/`（Rust + Tauri v2） | 已替换 | 不再依赖 NanoVG/C++ 运行时 |
 | 插件 `.so` ABI / 头文件指纹 | `plugin.json` + `plugin.py` + Pydantic 契约 | 已替换 | 零 ABI；热重载无需编译 |
-| `control.sock` 单请求 IPC | `ControlServer` + 长连接 `bus.subscribe` / `capability.stream` | 已实现 | 支持 `config.*`、`domain.snapshot`、`plugin.load/unload` |
+| `control.sock` 单请求 IPC | `ControlServer` + 长连接 `bus.subscribe` / `capability.stream` | 已实现 | 支持 `config.*`、`domain.snapshot`、`domain.invoke`、`ui.action`、`plugin.load/unload` |
 | 插件安装 / 更新 / 回滚 | `omnidesk-pm install/update/rollback` | 已实现 | staging 验证、`upstreams.lock.json`、5 快照保留、并发锁 |
 | 插件启停 / 配置 / 密钥 | `omnidesk-pm enable/disable/config` | 已实现 | 0600 ConfigStore / SecretVault；不掩码回显 secret |
 | MCP stdio | `omnidesk-pm mcp-serve` | 已实现 | 仅能力调用，不暴露任意 shell |
 | 全键盘空间导航 | `ui/` 2D 焦点引擎 | 已实现 | `hjkl`/方向键、`f` 跳点、`Ctrl+K`、`F8`、`?`、`Ctrl+Tab` |
+| 插件专属工作台页签 | `WorkspaceTabSpec` + `ui/` 动态导航 | 已实现 | 一级导航动态挂载插件页签，`Alt+<字母>` 确定性分配；声明式 Schema 由前端统一渲染 |
+| F8 AI 伴读 / 插件组件 | `CompanionDock` + `DockWidgetSpec` | 已实现 | v1 风格 Chat / 组件双页签、会话恢复与导出、当前域 starter/quick prompts；插件 Dock 组件可执行 `ui.action` |
 | 原生硬解 / 媒体键 | `shell-tauri/` libmpv 嵌入 + MPRIS2 | 已实现 | 真实 libmpv 出帧测试仍为 `#[ignore]`，需本机 libmpv/ffmpeg/音频设备手动跑 |
 | Chrome `--app` 阅读窗 | `plugin-chrome-web` | 已迁移 | Cookies SQLite、CDP 提取/同源代理；cookie 读取已移出事件循环 |
 | 文本阅读 / 公式 / 评论树 | `ui/` TextWorkbench + 社区插件 | 已实现 | 通过 `domain.invoke` 拉取 `fetch_feed` / `fetch_article`，离线时回退示例数据 |
@@ -80,6 +82,7 @@ MCP 侧已有统一入口：`omnidesk_list_plugins`、`omnidesk_list_capabilitie
 | 推荐流 / 策展 | `recommend.feed.v1` / `ai.curation.v1` | 已注册，可调用 |
 | 书籍下载 / 送 NAS / 打开阅读器 | `book.search.v1` 的 `download` / `send_to_nas` / `open_in_babeldoc` / `open_in_ebook` 动作 | 已注册，可调用 |
 | 统一上下文收集 | `context.collect.v1` | 已注册；`ai.agent.v1` 传 `context_refs` 时自动收集 |
+| Agent 会话记录 | `ai.agent.v1` + `session_action` | 已落盘；支持列出、恢复、继续、重命名、删除及 Markdown / JSON 导出 |
 
 **当前边界**：`context.collect.v1` 只接受白名单能力（web/book/subtitle/speech/text/media），会剥离 secret/token/cookie 等敏感字段，并限制总字符数与单项超时；多个上下文按最多 6 路并发收集，单项可传 `provider_plugin_id` 指定来源。`ai.agent.v1` 传 `context_refs` 时会自动收集；不传时仍只消费调用方给的 `context` / `selection`。UI 的 Text/Book/Media 伴读栏会按当前条目自动附带 `context_refs`。`subtitle.translate.v1` 目前直接解析 `.srt` / `.vtt`；`.ass` / `.ssa` 需先经 ffmpeg 转为 SRT。
 
@@ -90,5 +93,5 @@ MCP 侧已有统一入口：`omnidesk_list_plugins`、`omnidesk_list_capabilitie
 - `ui/`：在线源不可用（浏览器直连 / daemon 未启动）时回退 `data/mock.ts` 示例数据，属预期行为。
 - `ui/`：笔记暂存于 `localStorage`（键 `omnidesk.notes.v1`），尚未抽象为独立 capability。
 - `shell-tauri/`：真实 libmpv 出帧测试需要 `OMNIDESK_MPV_E2E=1` + `libmpv` + `ffmpeg`，已在 `.github/workflows/ci.yml` 中强制执行。
-- Agent 上下文：`context.collect.v1` 已落地，但 UI 伴读栏尚未自动传入当前网页/电子书/字幕引用。
+- Agent 上下文：`context.collect.v1` 已落地；Text/Book/Media 伴读栏会按当前条目自动附带 `context_refs`。网页/字幕等更细粒度引用仍由对应工作台继续补齐。
 - Agent 审批：当前是显式 `confirm` + `reason` + 审计日志，还没有桌面端人工确认弹窗或按 agent 的细粒度权限白名单。

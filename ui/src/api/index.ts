@@ -1,6 +1,7 @@
 export {
   call,
   callCapability,
+  bookSearchAction,
   coreStatus,
   cancelJob,
   type DomainInvokeArgs,
@@ -10,13 +11,18 @@ export {
   eventBridgeStatus,
   formatRpcError,
   getJob,
+  getDateBundle,
   getTauriGlobal,
+  hostPaths,
+  invokeWorkspaceAction,
   invokeDomain,
   isTauriAvailable,
   isTauriEventsAvailable,
   listPlugins,
+  listArchiveDates,
   listJobs,
   type JobRecord,
+  type HostPathsSnapshot,
   listenTauriEvent,
   MPV_FRAME_CHANNEL,
   mpvOpen,
@@ -38,11 +44,27 @@ export {
   readSource,
   runtimeStatus,
   searchIndex,
+  searchArchive,
+  searchBooks,
   type SearchHit,
+  syncCurationArchive,
   submitJob,
+  workspaceSnapshot,
 } from './client';
 
 export type {
+  ArchiveDateStats,
+  BookSearchProvider,
+  BookSearchResult,
+  CurationBundle,
+  CurationDomainFilter,
+} from './client';
+
+export type {
+  AgentSessionExport,
+  AgentSessionMessage,
+  AgentSessionRecord,
+  AgentSessionSummary,
   AiAgentRequestPayload,
   AiAgentResponseData,
   BackendPluginRecord,
@@ -74,4 +96,8 @@ export type {
   TauriEventApi,
   TauriGlobal,
   TauriUnlistenFn,
+  DockWidgetSnapshot,
+  WorkspaceSnapshotData,
+  WorkspaceTabSnapshot,
+  WorkspaceUiActionArgs,
 } from './types';

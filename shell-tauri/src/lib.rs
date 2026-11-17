@@ -56,6 +56,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::runtime_status,
+            commands::host_paths,
             commands::mpv_probe,
             commands::mpv_embed_probe,
             commands::mpv_embed_enable,

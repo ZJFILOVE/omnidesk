@@ -174,6 +174,37 @@ class YouTubeApiClient:
         )
         return enriched, str(data.get("nextPageToken") or ""), None
 
+    async def fetch_trending(
+        self,
+        *,
+        api_key: str = "",
+        oauth_token: str = "",
+        region: str = "US",
+        max_results: int = 20,
+        page_token: str = "",
+        timeout_sec: float = 15.0,
+    ) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None]:
+        """Fetch the regional most-popular chart via `/videos?chart=mostPopular`."""
+        params: dict[str, Any] = {
+            "part": "snippet,contentDetails,statistics",
+            "chart": "mostPopular",
+            "regionCode": region or "US",
+            "maxResults": max(1, min(50, max_results)),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        data, err = await self._call_api(
+            "videos",
+            params,
+            api_key=api_key,
+            oauth_token=oauth_token,
+            timeout_sec=timeout_sec,
+        )
+        if err is not None or data is None:
+            return [], "", err
+        items = [dict(item) for item in (data.get("items") or []) if isinstance(item, Mapping)]
+        return items, str(data.get("nextPageToken") or ""), None
+
     async def fetch_playlist_videos(
         self,
         playlist_id: str,
