@@ -567,7 +567,13 @@ class ShuiyuanPlugin(BasePlugin):
                     "id": "shuiyuan-search-form",
                     "fields": [
                         {"name": "query", "label": "搜索水源", "type": "string", "default": ""},
-                        {"name": "channel_id", "label": "栏目", "type": "string", "default": "latest"},
+                        {
+                            "name": "channel_id", "label": "栏目 / 版面", "type": "combobox", "default": "latest",
+                            "options": [{"value": c.id, "label": c.name + (" · 需登录" if c.requires_auth else "")}
+                                        for c in self.text_source.channels()],
+                            "placeholder": "例如 cat:版面ID",
+                            "description": "包含最新、热门、未读及已发现的版面；刷新帖子后自动更新。",
+                        },
                     ],
                 },
                 {

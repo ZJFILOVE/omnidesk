@@ -516,7 +516,12 @@ class V2exPlugin(BasePlugin):
                     "type": "Form",
                     "id": "v2ex-controls-form",
                     "fields": [
-                        {"name": "channel_id", "label": "栏目 / 节点 (hot, tech, node:python)", "type": "string", "default": "hot"},
+                        {
+                            "name": "channel_id", "label": "栏目 / 节点", "type": "combobox", "default": "hot",
+                            "options": [{"value": c.id, "label": c.name + (" · 需登录" if c.requires_auth else "")}
+                                        for c in self.source.channels()],
+                            "placeholder": "例如 node:python 或 node:linux",
+                        },
                         {"name": "query", "label": "关键词过滤", "type": "string", "default": ""},
                     ],
                 },

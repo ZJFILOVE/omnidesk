@@ -918,6 +918,7 @@ async def test_chrome_fetch_and_html_extract_fallback_and_malformed_html(tmp_pat
         extract_mode = "valid_listing"
 
         async def _fake_web_fetch(req: dict[str, Any]) -> CapabilityResult:
+            assert req["headless"] is True
             nonlocal fetch_calls
             fetch_calls += 1
             if fetch_calls == 1:
@@ -934,6 +935,7 @@ async def test_chrome_fetch_and_html_extract_fallback_and_malformed_html(tmp_pat
             return CapabilityResult.fail("Cloudflare fetch blocked", error_code="service_offline")
 
         async def _fake_web_extract(req: dict[str, Any]) -> CapabilityResult:
+            assert req["headless"] is True
             if extract_mode == "valid_listing":
                 return CapabilityResult.ok(
                     {

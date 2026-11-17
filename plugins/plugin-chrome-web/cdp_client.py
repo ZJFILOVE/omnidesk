@@ -37,6 +37,9 @@ class CdpTransport(Protocol):
     async def list_targets(self, host: str, port: int, *, timeout_sec: float = 5.0) -> list[dict[str, Any]]:
         """Return CDP target descriptors from `/json/list`."""
 
+    async def close_browser(self, ws_url: str, *, timeout_sec: float = 2.0) -> None:
+        """Ask Chrome to flush profile state and exit normally."""
+
     async def evaluate(
         self,
         ws_url: str,
@@ -217,6 +220,16 @@ class LoopbackWebSocketCdpTransport:
         navigate_url: str | None = None,
         timeout_sec: float = 15.0,
     ) -> dict[str, Any]:
+        commands = []
+        if navigate_url:
+            commands.append(("Page.navigate", {"url": navigate_url}))
+        commands.append(("Runtime.evaluate", {"expression": expression, "returnByValue": return_by_value, "awaitPromise": await_promise}))
+        return await self._execute(ws_url, commands, timeout_sec=timeout_sec)
+
+    async def close_browser(self, ws_url: str, *, timeout_sec: float = 2.0) -> None:
+        await self._execute(ws_url, [("Browser.close", {})], timeout_sec=timeout_sec)
+
+    async def _execute(self, ws_url: str, commands: list[tuple[str, dict[str, Any]]], *, timeout_sec: float) -> dict[str, Any]:
         try:
             host, port, path = validate_cdp_ws_url(ws_url)
         except ValidationProblem as exc:
@@ -241,28 +254,19 @@ class LoopbackWebSocketCdpTransport:
                     if status != 101 or resp_headers.get("sec-websocket-accept", "") != expected:
                         raise CdpError("CDP WebSocket 握手校验失败", error_code="service_offline")
 
-                    next_id = 1
-                    if navigate_url:
-                        nav_resp = await _send_cdp_rpc(reader, writer, next_id, "Page.navigate", {"url": navigate_url})
-                        next_id += 1
-                        nav_err = nav_resp.get("error")
-                        if isinstance(nav_err, Mapping) and nav_err.get("code") != -32601:
-                            raise CdpError(f"CDP 页面导航失败: {nav_err.get('message', 'error')}", error_code="service_offline")
-                        nav_res = nav_resp.get("result")
-                        if isinstance(nav_res, Mapping) and nav_res.get("errorText"):
-                            raise CdpError(f"页面加载失败: {nav_res['errorText']}", error_code="service_offline")
-
-                    eval_resp = await _send_cdp_rpc(
-                        reader,
-                        writer,
-                        next_id,
-                        "Runtime.evaluate",
-                        {"expression": expression, "returnByValue": return_by_value, "awaitPromise": await_promise},
-                    )
+                    response: dict[str, Any] = {}
+                    for rpc_id, (method, params) in enumerate(commands, 1):
+                        response = await _send_cdp_rpc(reader, writer, rpc_id, method, params)
+                        if method == "Page.navigate":
+                            nav_err, nav_res = response.get("error"), response.get("result")
+                            if isinstance(nav_err, Mapping) and nav_err.get("code") != -32601:
+                                raise CdpError(f"CDP 页面导航失败: {nav_err.get('message', 'error')}", error_code="service_offline")
+                            if isinstance(nav_res, Mapping) and nav_res.get("errorText"):
+                                raise CdpError(f"页面加载失败: {nav_res['errorText']}", error_code="service_offline")
                     with contextlib.suppress(Exception):
                         writer.write(_encode_ws_frame(0x8, b""))
                         await writer.drain()
-                    return eval_resp
+                    return response
                 finally:
                     writer.close()
                     with contextlib.suppress(Exception):

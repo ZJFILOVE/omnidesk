@@ -504,6 +504,7 @@ class RedditHttpClient:
                 "body": "",
                 "credentials": "include",
                 "open_tab_if_missing": True,
+                "headless": True,
                 "tab_url": tab_url,
                 "timeout_ms": timeout_ms,
             },
@@ -576,6 +577,7 @@ class RedditHttpClient:
                 "mode": "auto",
                 "use_cookies": True,
                 "render_js": True,
+                "headless": True,
                 "timeout_ms": timeout_ms,
             },
         )

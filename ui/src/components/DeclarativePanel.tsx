@@ -156,6 +156,9 @@ function FieldControl({
   const type = textValue(field.type || 'string').toLowerCase();
   const description = textValue(field.description);
   const options = normalizeOptions(field.options);
+  const [customEntry, setCustomEntry] = useState(false);
+  const custom = type === 'combobox' && (customEntry || !options.some((option) => option.value === textValue(value)));
+  const FieldLabel = type === 'combobox' ? 'div' : 'label';
   const controlClass =
     'w-full rounded-[9px] border border-[var(--border-line)] bg-[var(--bg-canvas)] px-3 py-2 text-[14.5px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-subtle)] focus:border-[var(--focus-ring)]';
 
@@ -168,20 +171,23 @@ function FieldControl({
       onActivate={() => inputRef.current?.focus()}
       className="rounded-[10px] p-1 -m-1"
     >
-      <label className="block">
+      <FieldLabel className="block">
         <span className="mb-1.5 flex items-center justify-between gap-2 text-[13.5px] font-medium text-[var(--text-secondary)]">
           <span>{label}</span>
           {field.required ? (
             <span className="font-mono text-[12.5px] text-[var(--status-warn-fg)]">required</span>
           ) : null}
         </span>
-        {type === 'select' ? (
+        {type === 'select' || type === 'combobox' ? (
           <select
             ref={(node) => {
               inputRef.current = node;
             }}
-            value={textValue(value)}
-            onChange={(event) => onChange(event.target.value)}
+            value={custom ? '' : textValue(value)}
+            onChange={(event) => {
+              setCustomEntry(event.target.value === '');
+              onChange(event.target.value);
+            }}
             aria-label={label}
             tabIndex={-1}
             className={controlClass}
@@ -192,6 +198,7 @@ function FieldControl({
                 {option.label}
               </option>
             ))}
+            {type === 'combobox' ? <option value="">自定义频道…</option> : null}
           </select>
         ) : type === 'bool' || type === 'boolean' ? (
           <span className="flex h-9 items-center gap-2 text-[14px] text-[var(--text-muted)]">
@@ -241,13 +248,24 @@ function FieldControl({
             className={controlClass}
           />
         )}
+        {custom ? (
+          <input
+            type="text"
+            value={textValue(value)}
+            onChange={(event) => onChange(event.target.value)}
+            aria-label={`${label}（自定义）`}
+            placeholder={textValue(field.placeholder)}
+            autoComplete="off"
+            className={`${controlClass} mt-2`}
+          />
+        ) : null}
         {description ? (
           <span className="mt-1 block text-[12.75px] leading-[1.45] text-[var(--text-subtle)]">
             {description}
           </span>
         ) : null}
         <span className="sr-only">{name}</span>
-      </label>
+      </FieldLabel>
     </FocusItem>
   );
 }

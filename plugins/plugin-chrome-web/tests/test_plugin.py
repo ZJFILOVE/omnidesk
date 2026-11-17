@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import socket
 import stat
 import sys
 from pathlib import Path
@@ -78,6 +79,92 @@ def _pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+@pytest.mark.asyncio
+async def test_background_requests_reuse_headless_and_explicit_login_switches_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    module = _load_plugin_module()
+    plugin = module.create_plugin()
+    args_file = tmp_path / "background-args.json"
+    binary = _write_fake_chrome(tmp_path, args_file)
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text())
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, data_dir=tmp_path / "data",
+                        config_dir=tmp_path / "config", config_schema=manifest["config_schema"])
+    ctx.set_config({"chrome_bin": str(binary), "profile_dir": str(tmp_path / "profile"), "cdp_port": 9444})
+
+    class Transport:
+        evaluations = 0
+        external = False
+        ready_checks = 0
+        close_calls = 0
+
+        async def close_browser(self, ws_url, **kwargs):
+            self.close_calls += 1
+            plugin._sessions.latest_session().process.terminate()
+
+        async def list_targets(self, host, port, **kwargs):
+            if not plugin._sessions.active_sessions() and not self.external:
+                raise module.CdpError("offline")
+            return [{"id": "page", "type": "page", "url": "https://www.reddit.com/",
+                     "webSocketDebuggerUrl": "ws://127.0.0.1:9444/devtools/page/page"}]
+
+        async def evaluate(self, ws_url, expression, **kwargs):
+            if expression.startswith("window.location.origin ==="):
+                self.ready_checks += 1
+                return {"result": {"result": {"value": self.ready_checks > 1}}}
+            self.evaluations += 1
+            value = ({"ok": True, "status": 200, "url": "https://www.reddit.com/r/rust.json", "body": "{}", "headers": {}}
+                     if kwargs.get("await_promise") else "<html><body><p>Background article</p></body></html>")
+            return {"result": {"result": {"value": value}}}
+
+    transport = Transport()
+    plugin.set_cdp_transport(transport)
+    await plugin.on_load(ctx)
+    request = {"url": "https://www.reddit.com/r/rust.json", "headless": True, "open_tab_if_missing": True}
+    try:
+        # A locked profile must never forward a URL to a pre-existing GUI Chrome.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        (profile / "SingletonLock").symlink_to("other-host-12345")
+        blocked = await plugin.handle_fetch(request)
+        assert not blocked.ok and not args_file.exists()
+        (profile / "SingletonLock").unlink()
+        transport.external = True
+        occupied = await plugin.handle_fetch(request)
+        assert not occupied.ok and not args_file.exists()
+        transport.external = False
+        # A stale lock left by an already-exited local Chrome is recoverable.
+        (profile / "SingletonLock").symlink_to(f"{socket.gethostname()}-2147483647")
+
+        first, second = await asyncio.gather(plugin.handle_fetch(request), plugin.handle_fetch(request))
+        assert first.ok and second.ok
+        assert len(plugin._sessions.active_sessions()) == 1
+        background = plugin._sessions.latest_session()
+        assert background.headless and background.cdp_port == 9444
+        recorded = await _wait_for_file(args_file)
+        assert "--headless=new" in recorded
+        assert not any(arg.startswith("--app=") for arg in recorded)
+        assert transport.evaluations == 2
+
+        login = await plugin.handle_embed({"action": "open", "url": "https://www.reddit.com/login/"})
+        assert login.ok and not login.data["headless"]
+        assert transport.close_calls == 1
+        assert not background.is_running
+        assert "--app=https://www.reddit.com/login/" in login.data["args"]
+        assert "--headless=new" not in login.data["args"]
+        blocked = await plugin.handle_fetch(request)
+        assert not blocked.ok and transport.evaluations == 2
+        await plugin.handle_embed({"action": "close"})
+        extracted = await plugin.handle_extract({"url": "https://www.reddit.com/r/rust/", "headless": True})
+        assert extracted.ok and "Background article" in extracted.data["text"]
+        assert plugin._sessions.latest_session().headless
+        assert plugin._sessions.latest_session().profile_dir == background.profile_dir
+    finally:
+        await plugin.on_unload()
+        await ctx.acleanup()
+    assert not plugin._sessions.active_sessions()
+    assert transport.close_calls == 2
 
 
 def test_manifest_matches_v2_schema_and_no_hardcoded_topology() -> None:

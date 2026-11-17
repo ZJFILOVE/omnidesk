@@ -643,6 +643,25 @@ class RedditPlugin(BasePlugin):
 
     def _build_ui_schema(self) -> dict[str, Any]:
         status = self.auth.safe_status()
+        channels = {
+            c.id.casefold(): {"value": c.id, "label": c.name + (" · 需登录" if c.requires_auth else "")}
+            for c in self.text_source.channels()
+        }
+        for channel_id, label in (
+            ("all", "全站帖子"),
+            ("r/LocalLLaMA", "本地大模型"),
+            ("r/MachineLearning", "机器学习"),
+            ("r/programming", "编程"),
+            ("r/Python", "Python"),
+            ("r/cpp", "C++"),
+            ("r/rust", "Rust"),
+            ("r/linux", "Linux"),
+            ("r/selfhosted", "自托管"),
+            ("r/technology", "科技"),
+            ("r/science", "科学"),
+            ("r/books", "读书"),
+        ):
+            channels.setdefault(channel_id.casefold(), {"value": channel_id, "label": f"{label} · {channel_id}"})
         return {
             "type": "Section",
             "id": "reddit-workspace-root",
@@ -670,7 +689,12 @@ class RedditPlugin(BasePlugin):
                     "type": "Form",
                     "id": "reddit-action-form",
                     "fields": [
-                        {"name": "channel_id", "label": "频道 / Subreddit", "type": "string", "default": "popular"},
+                        {
+                            "name": "channel_id", "label": "频道 / Subreddit", "type": "combobox", "default": "popular",
+                            "options": list(channels.values()),
+                            "placeholder": "例如 r/LocalLLaMA 或 r/rust/top",
+                            "description": "选择常用频道或自定义；帖子在后台拉取，登录时才打开窗口。",
+                        },
                         {"name": "query", "label": "搜索关键词", "type": "string", "default": ""},
                     ],
                 },

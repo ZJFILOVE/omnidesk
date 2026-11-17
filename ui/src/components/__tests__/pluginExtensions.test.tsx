@@ -400,6 +400,30 @@ describe('Declarative plugin UI', () => {
     });
   });
 
+  it('submits preset channel IDs and preserves custom input when presets refresh', () => {
+    const onAction = vi.fn();
+    const schema = (extra = false) => ({ type: 'Section', children: [
+      { type: 'Form', fields: [{ name: 'channel_id', label: '频道', type: 'combobox', default: 'popular',
+        options: [{ value: 'popular', label: '全站热门' }, { value: 'r/rust', label: 'Rust' },
+          ...(extra ? [{ value: 'r/linux', label: 'Linux' }] : [])] }] },
+      { type: 'ActionRow', actions: [{ id: 'fetch_feed', label: '拉取' }] },
+    ] });
+    const { rerender } = render(<DeclarativePanel schema={schema()} focusPrefix="channel-test" onAction={onAction} />);
+    fireEvent.change(screen.getByLabelText('频道'), { target: { value: 'r/rust' } });
+    fireEvent.click(screen.getByRole('button', { name: '拉取' }));
+    expect(onAction).toHaveBeenLastCalledWith('fetch_feed', { channel_id: 'r/rust' });
+    fireEvent.change(screen.getByLabelText('频道'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('频道（自定义）'), { target: { value: 'r/rust/top' } });
+    rerender(<DeclarativePanel schema={schema(true)} focusPrefix="channel-test" onAction={onAction} />);
+    expect((screen.getByLabelText('频道（自定义）') as HTMLInputElement).value).toBe('r/rust/top');
+    fireEvent.click(screen.getByRole('button', { name: '拉取' }));
+    expect(onAction).toHaveBeenLastCalledWith('fetch_feed', { channel_id: 'r/rust/top' });
+    fireEvent.change(screen.getByLabelText('频道'), { target: { value: 'r/linux' } });
+    expect(screen.queryByLabelText('频道（自定义）')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '拉取' }));
+    expect(onAction).toHaveBeenLastCalledWith('fetch_feed', { channel_id: 'r/linux' });
+  });
+
   it('loads plugin workspace tabs from domain.snapshot and applies ui_schema returned by ui.action', async () => {
     const invoke = installTauriMock({ type: 'Markdown', content: '已同步 3 条收藏' });
     render(<App />);

@@ -11,6 +11,7 @@ from typing import Any
 from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext
 
 if __package__:
+    from .browser_runtime import browser_operation, close_headless, request_targets, wait_fetch_context
     from .cdp_client import (
         CdpError,
         CdpTransport,
@@ -37,6 +38,7 @@ else:  # pragma: no cover - direct module import fallback
     _PLUGIN_DIR = str(Path(__file__).resolve().parent)
     if _PLUGIN_DIR not in sys.path:
         sys.path.insert(0, _PLUGIN_DIR)
+    from browser_runtime import browser_operation, close_headless, request_targets, wait_fetch_context
     from cdp_client import (
         CdpError,
         CdpTransport,
@@ -70,7 +72,8 @@ class ChromeWebPlugin(BasePlugin):
         cdp_transport: CdpTransport | None = None,
         cookie_decryptor: CookieDecryptor | None = None,
     ) -> None:
-        self._sessions = ChromeSessionManager()
+        self._sessions = ChromeSessionManager(before_close=lambda session: close_headless(self, session_id=session.session_id))
+        self._browser_lock = asyncio.Lock()
         self._cdp_transport: CdpTransport = cdp_transport or LoopbackWebSocketCdpTransport()
         self._cookie_decryptor = cookie_decryptor
 
@@ -92,7 +95,8 @@ class ChromeWebPlugin(BasePlugin):
 
     async def on_unload(self) -> None:
         """Cleanly terminate all managed Chrome `--app` subprocesses on unload."""
-        await self._sessions.shutdown_all()
+        async with self._browser_lock:
+            await self._sessions.shutdown_all()
         self.ctx = None
 
     async def on_health_check(self) -> dict[str, Any]:
@@ -147,6 +151,7 @@ class ChromeWebPlugin(BasePlugin):
             raise ValidationProblem("timeout_ms 必须在 1..120000 毫秒之间")
         return max(0.05, ms / 1000.0)
 
+    @browser_operation
     async def handle_embed(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Handle `web.embed.v1` actions (`open`, `close`, `status`)."""
         assert self.ctx is not None
@@ -217,6 +222,7 @@ class ChromeWebPlugin(BasePlugin):
             decryptor=self._cookie_decryptor,
         )
 
+    @browser_operation
     async def handle_extract(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Handle `web.extract.v1` rendered DOM extraction exclusively via loopback CDP."""
         assert self.ctx is not None
@@ -236,7 +242,7 @@ class ChromeWebPlugin(BasePlugin):
             return CapabilityResult.fail(str(exc), error_code=exc.error_code)
 
         try:
-            targets = await self._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
+            targets = await request_targets(self, payload, url, timeout_sec)
             target, needs_nav = select_extract_target(targets, url)
             navigate_url = url if (needs_nav and payload.get("navigate", True) is not False) else None
             deadline = asyncio.get_running_loop().time() + timeout_sec
@@ -290,6 +296,7 @@ class ChromeWebPlugin(BasePlugin):
             }
         )
 
+    @browser_operation
     async def handle_fetch(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Handle `web.fetch.v1` same-origin `fetch()` via CDP `Runtime.evaluate` + `awaitPromise`."""
         payload = dict(req) if req is not None else {}
@@ -309,27 +316,7 @@ class ChromeWebPlugin(BasePlugin):
             return CapabilityResult.fail(str(exc), error_code=exc.error_code)
 
         try:
-            try:
-                targets = await self._cdp_transport.list_targets(host, port, timeout_sec=timeout_sec)
-            except CdpError as exc:
-                if exc.error_code != "service_offline" or not payload.get("open_tab_if_missing"):
-                    raise
-                tab_url = validate_http_url(str(payload.get("tab_url") or f"{origin_string(url)}/"), field_name="tab_url")
-                if origin_string(tab_url) != origin_string(url):
-                    raise CdpError("tab_url 与目标 URL 不同源", error_code="permission_denied")
-                opened = await self.handle_embed({"action": "open", "url": tab_url})
-                if not opened.ok:
-                    return opened
-                host, port = self._resolve_cdp_endpoint(payload)
-                # Startup is asynchronous; retry only the local browser endpoint.
-                for attempt in range(20):
-                    try:
-                        targets = await self._cdp_transport.list_targets(host, port, timeout_sec=min(timeout_sec, 1.0))
-                        break
-                    except CdpError:
-                        if attempt == 19:
-                            raise
-                        await asyncio.sleep(0.15)
+            targets = await request_targets(self, payload, url, timeout_sec)
             navigate_url: str | None = None
             try:
                 target = select_same_origin_target(targets, url)
@@ -345,6 +332,9 @@ class ChromeWebPlugin(BasePlugin):
                     ) from None
                 target, needs_nav = select_extract_target(targets, tab_url)
                 navigate_url = tab_url if needs_nav else None
+            if payload.get("headless") is True:
+                timeout_sec = await wait_fetch_context(self, target, url, navigate_url, timeout_sec)
+                navigate_url = None
             js_expr = build_fetch_js(
                 url=url,
                 expected_origin=origin_string(url),

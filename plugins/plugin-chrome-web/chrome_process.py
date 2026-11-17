@@ -7,6 +7,7 @@ import contextlib
 import os
 import shutil
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ class ManagedChromeSession:
     cancel_event: asyncio.Event
     finished_event: asyncio.Event
     task: asyncio.Task[Any]
+    headless: bool = False
     process: asyncio.subprocess.Process | None = None
     pid: int | None = None
     result: SubprocessResult | None = None
@@ -70,6 +72,7 @@ class ManagedChromeSession:
             "cdp_port": self.cdp_port,
             "extension_enabled": self.extension_enabled,
             "running": self.is_running,
+            "headless": self.headless,
         }
 
 
@@ -113,16 +116,16 @@ def build_chrome_args(
     profile_dir: Path,
     extension_dir: Path | None = None,
     cdp_port: int = 0,
+    headless: bool = False,
 ) -> list[str]:
     """Build arg-list for Chrome `--app` window (`shell=False`)."""
     args = [
         chrome_executable,
         f"--user-data-dir={profile_dir}",
-        f"--app={url}",
-        "--class=omnidesk-reader",
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    args.extend(["--headless=new", url] if headless else [f"--app={url}", "--class=omnidesk-reader"])
     if extension_dir is not None:
         args.append(f"--load-extension={extension_dir}")
     if cdp_port > 0:
@@ -134,8 +137,9 @@ def build_chrome_args(
 class ChromeSessionManager:
     """Manages Chrome `--app` subprocesses via `PluginContext.exec_subprocess`."""
 
-    def __init__(self) -> None:
+    def __init__(self, before_close: Callable[[ManagedChromeSession], Awaitable[None]] | None = None) -> None:
         self._sessions: dict[str, ManagedChromeSession] = {}
+        self._before_close = before_close
 
     def active_sessions(self) -> list[ManagedChromeSession]:
         return [s for s in self._sessions.values() if s.is_running]
@@ -157,6 +161,7 @@ class ChromeSessionManager:
         profile_dir: Path,
         extension_enabled: bool,
         cdp_port: int,
+        headless: bool = False,
     ) -> CapabilityResult:
         """Validate URL and launch managed Chrome `--app` window via `ctx.exec_subprocess`."""
         try:
@@ -185,13 +190,20 @@ class ChromeSessionManager:
             )
         profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+        # Explicit login can take over the persistent profile from a background
+        # browser. Never interrupt a visible login for an automatic request.
+        for session in self.active_sessions():
+            if session.profile_dir != profile_dir:
+                continue
+            if headless and not session.headless:
+                return CapabilityResult.fail("请完成并关闭 Chrome 登录窗口后重试后台拉取", error_code="service_offline")
+            if session.headless and not headless:
+                await self._terminate_session(session)
+
         ext_dir = resolve_extension_dir(ctx.plugin_dir) if extension_enabled else None
         argv = build_chrome_args(
-            executable,
-            url=url,
-            profile_dir=profile_dir,
-            extension_dir=ext_dir,
-            cdp_port=valid_port,
+            executable, url=url, profile_dir=profile_dir,
+            extension_dir=ext_dir, cdp_port=valid_port, headless=headless,
         )
 
         session_id = uuid.uuid4().hex[:12]
@@ -272,6 +284,7 @@ class ChromeSessionManager:
             cancel_event=cancel_event,
             finished_event=finished_event,
             task=task,
+            headless=headless,
             process=captured_proc,
             pid=pid,
             result=runner_state["result"],
@@ -282,6 +295,7 @@ class ChromeSessionManager:
             {
                 "launched": True,
                 "running": session.is_running,
+                "headless": headless,
                 "pid": pid,
                 "session_id": session_id,
                 "url": url,
@@ -295,6 +309,8 @@ class ChromeSessionManager:
 
     async def _terminate_session(self, session: ManagedChromeSession) -> None:
         session.closed_by_request = True
+        if session.headless and self._before_close is not None:
+            await self._before_close(session)
         session.cancel_event.set()
         if not session.finished_event.is_set():
             try:

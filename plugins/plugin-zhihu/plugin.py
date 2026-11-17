@@ -442,7 +442,12 @@ class ZhihuPlugin(BasePlugin):
                     "id": "zhihu-search-form",
                     "fields": [
                         {"name": "query", "label": "搜索关键词或知乎链接", "type": "string", "default": ""},
-                        {"name": "channel_id", "label": "栏目 ID", "type": "string", "default": "hot"},
+                        {
+                            "name": "channel_id", "label": "栏目 / 收藏夹", "type": "combobox", "default": "hot",
+                            "options": [{"value": c.id, "label": c.name + (" · 需登录" if c.requires_auth else "")}
+                                        for c in self.text_source.channels()],
+                            "placeholder": "例如 collection:收藏夹ID",
+                        },
                     ],
                 },
                 {
