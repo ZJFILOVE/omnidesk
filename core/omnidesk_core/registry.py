@@ -489,9 +489,18 @@ class CapabilityRegistry:
             entries = self._entries.get(capability_id)
             return entries[0] if entries else None
 
-    def resolve(self, capability_id: str) -> CapabilityRegistration:
-        """Validate versioned ID and return highest-priority registration or raise CapabilityNotFoundError."""
+    def resolve(self, capability_id: str, *, plugin_id: str | None = None) -> CapabilityRegistration:
+        """Validate versioned ID and return a provider registration or raise CapabilityNotFoundError."""
         parsed = parse_capability_id(capability_id)
+        if plugin_id:
+            with self._lock:
+                entries = list(self._entries.get(parsed.raw, ()))
+            if (entry := next((e for e in entries if e.plugin_id == plugin_id), None)) is None:
+                raise CapabilityNotFoundError(
+                    parsed.raw,
+                    details={"provider_plugin_id": plugin_id, "providers": [e.plugin_id for e in entries]},
+                )
+            return entry
         if (entry := self.get(parsed.raw)) is None:
             raise CapabilityNotFoundError(parsed.raw)
         return entry
@@ -524,10 +533,16 @@ class CapabilityRegistry:
         return versions[-1] if versions else None
 
     def _prepare(
-        self, capability_id: str, payload: Mapping[str, Any] | Any, timeout: float | None, isolate_errors: bool | None
+        self,
+        capability_id: str,
+        payload: Mapping[str, Any] | Any,
+        timeout: float | None,
+        isolate_errors: bool | None,
+        *,
+        plugin_id: str | None = None,
     ) -> tuple[CapabilityRegistration, dict[str, Any], bool, str, float | None]:
         effective_timeout = _validate_timeout(timeout)
-        entry = self.resolve(capability_id)
+        entry = self.resolve(capability_id, plugin_id=plugin_id)
         isolate = self._isolate_errors if isolate_errors is None else isolate_errors
         mode = _call_mode(entry.handler, streaming=entry.streaming)
         return entry, _normalize_request(payload), isolate, mode, effective_timeout
@@ -599,17 +614,33 @@ class CapabilityRegistry:
             return self._build_fault_outcome(entry, exc, isolate=isolate)
 
     async def call(
-        self, capability_id: str, payload: Mapping[str, Any] | Any = None, *, timeout: float | None = None, isolate_errors: bool | None = None
+        self,
+        capability_id: str,
+        payload: Mapping[str, Any] | Any = None,
+        *,
+        timeout: float | None = None,
+        isolate_errors: bool | None = None,
+        plugin_id: str | None = None,
     ) -> CapabilityResult:
         """Invoke a sync or async capability asynchronously."""
-        entry, req, isolate, mode, effective_timeout = self._prepare(capability_id, payload, timeout, isolate_errors)
+        entry, req, isolate, mode, effective_timeout = self._prepare(
+            capability_id, payload, timeout, isolate_errors, plugin_id=plugin_id
+        )
         return await self._call_entry(entry, req, timeout=effective_timeout, isolate=isolate, mode=mode)
 
     def call_sync(
-        self, capability_id: str, payload: Mapping[str, Any] | Any = None, *, timeout: float | None = None, isolate_errors: bool | None = None
+        self,
+        capability_id: str,
+        payload: Mapping[str, Any] | Any = None,
+        *,
+        timeout: float | None = None,
+        isolate_errors: bool | None = None,
+        plugin_id: str | None = None,
     ) -> CapabilityResult:
         """Invoke a capability synchronously, bridging awaitables when required."""
-        entry, req, isolate, mode, effective_timeout = self._prepare(capability_id, payload, timeout, isolate_errors)
+        entry, req, isolate, mode, effective_timeout = self._prepare(
+            capability_id, payload, timeout, isolate_errors, plugin_id=plugin_id
+        )
         if mode in ("async_gen", "stream_cb", "stream_cb_kw") or _is_coroutine_handler(entry.handler):
             return self._run_coro_sync(self._call_entry(entry, req, timeout=effective_timeout, isolate=isolate, mode=mode))
         try:
@@ -657,10 +688,18 @@ class CapabilityRegistry:
             return fut.result()
 
     async def stream(
-        self, capability_id: str, payload: Mapping[str, Any] | Any = None, *, timeout: float | None = None, isolate_errors: bool | None = None
+        self,
+        capability_id: str,
+        payload: Mapping[str, Any] | Any = None,
+        *,
+        timeout: float | None = None,
+        isolate_errors: bool | None = None,
+        plugin_id: str | None = None,
     ) -> AsyncIterator[CapabilityStreamChunk]:
         """Invoke a capability and yield live CapabilityStreamChunk items."""
-        entry, req, isolate, mode, effective_timeout = self._prepare(capability_id, payload, timeout, isolate_errors)
+        entry, req, isolate, mode, effective_timeout = self._prepare(
+            capability_id, payload, timeout, isolate_errors, plugin_id=plugin_id
+        )
         if mode in ("stream_cb", "stream_cb_kw"):
             inner = self._stream_callback(
                 entry, req, timeout=effective_timeout, isolate=isolate, kw_stream=(mode == "stream_cb_kw")

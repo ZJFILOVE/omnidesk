@@ -601,3 +601,68 @@ def test_cli_mcp_serve_stdio_list_call_and_no_shell(
     assert by_id[8]["error"]["code"] == -32601
     parse_err = next(msg for msg in lines if msg.get("id") is None)
     assert parse_err["error"]["code"] == -32700
+
+
+def test_cli_mcp_side_effect_requires_confirmation_and_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _isolate_xdg_env(tmp_path, monkeypatch)
+    src = _write_cli_plugin(tmp_path / "src-mcp-book", plugin_id="plugin-mcp-book", cap_id="book.search.v1")
+    assert pm_main(["install", str(src), "--json"]) == 0
+
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "omnidesk_download_book",
+                "arguments": {"item_id": "book-1", "format": "pdf"},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "omnidesk_download_book",
+                "arguments": {"item_id": "book-1", "format": "pdf", "confirm": True, "reason": "test download"},
+            },
+        },
+    ]
+    env = {
+        **os.environ,
+        "XDG_CONFIG_HOME": str(paths.config_dir.parent),
+        "XDG_DATA_HOME": str(paths.data_dir.parent),
+        "XDG_STATE_HOME": str(paths.state_dir.parent),
+        "XDG_CACHE_HOME": str(paths.cache_dir.parent),
+        "XDG_RUNTIME_DIR": str(paths.runtime_dir.parent),
+        "OMNIDESK_STAGING_DIR": str(paths.staging_dir),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "omnidesk_core", "mcp-serve", "--plugins-dir", str(paths.plugins_dir)],
+        input="\n".join(json.dumps(r) for r in requests) + "\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15.0,
+        check=False,
+    )
+    assert proc.returncode == 0
+    lines = [json.loads(line) for line in proc.stdout.strip().splitlines() if line.strip()]
+    by_id = {msg.get("id"): msg for msg in lines}
+
+    denied = json.loads(by_id[2]["result"]["content"][0]["text"])
+    assert by_id[2]["result"]["isError"] is True
+    assert denied["error_code"] == "approval_required"
+
+    approved = json.loads(by_id[3]["result"]["content"][0]["text"])
+    assert by_id[3]["result"]["isError"] is False
+    assert approved["ok"] is True
+
+    audit_path = paths.data_dir / "audit" / "agent-actions.jsonl"
+    records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line]
+    assert records[0]["approved"] is False
+    assert records[0]["result"] == "denied:approval_required"
+    assert any(record["approved"] is True and record["result"] == "ok" for record in records)

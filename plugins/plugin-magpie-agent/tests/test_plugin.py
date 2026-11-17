@@ -49,8 +49,21 @@ def test_manifest_matches_spec_and_schema() -> None:
         "ai.curation.v1",
         "llm.chat.v1",
         "llm.translate.v1",
+        "context.collect.v1",
     }
-    assert set(manifest["consumes"]) == {"recommend.feed.v1", "media.playlist.v1"}
+    assert set(manifest["consumes"]) == {
+        "recommend.feed.v1",
+        "media.playlist.v1",
+        "web.extract.v1",
+        "web.fetch.v1",
+        "book.source.v1",
+        "subtitle.fetch.v1",
+        "subtitle.sync.v1",
+        "speech.asr.v1",
+        "text.source.v1",
+        "media.source.v1",
+        "book.bilingual_pdf.v1",
+    }
     assert set(manifest["permissions"]) == {"process:magpie", "network:loopback", "config:read", "config:write", "secret:vault"}
 
     allowed_top = set(schema["properties"].keys())

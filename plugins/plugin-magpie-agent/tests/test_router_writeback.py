@@ -186,11 +186,11 @@ async def test_plugin_manager_lifecycle_and_unload_cleanup(tmp_path: Path) -> No
     mgr.secret_vault.set("plugin-magpie-agent", "gateway_key", "vault-mgr-secret-xyz")
     rec = await mgr.load_plugin(PLUGIN_DIR)
     assert rec.plugin_id == "plugin-magpie-agent"
-    for cap in ("llm.router.v1", "llm.chat.v1", "llm.translate.v1", "ai.agent.v1", "ai.curation.v1"):
+    for cap in ("llm.router.v1", "llm.chat.v1", "llm.translate.v1", "ai.agent.v1", "ai.curation.v1", "context.collect.v1"):
         assert mgr.capabilities.has(cap)
     hc = await mgr.health_check("plugin-magpie-agent")
     assert hc["ok"] is True
 
     await mgr.unload_plugin("plugin-magpie-agent")
-    for cap in ("llm.router.v1", "llm.chat.v1", "llm.translate.v1", "ai.agent.v1", "ai.curation.v1"):
+    for cap in ("llm.router.v1", "llm.chat.v1", "llm.translate.v1", "ai.agent.v1", "ai.curation.v1", "context.collect.v1"):
         assert not mgr.capabilities.has(cap)

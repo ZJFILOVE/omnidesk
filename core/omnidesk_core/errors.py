@@ -156,11 +156,11 @@ class CapabilityNotFoundError(CapabilityError):
 
     default_code = ErrorCode.CAPABILITY_NOT_FOUND
 
-    def __init__(self, capability_id: str) -> None:
+    def __init__(self, capability_id: str, *, details: Mapping[str, Any] | None = None) -> None:
         self.capability_id = capability_id
         super().__init__(
             f"Capability not found: {capability_id}",
-            details={"capability_id": capability_id},
+            details={"capability_id": capability_id, **dict(details or {})},
         )
 
 

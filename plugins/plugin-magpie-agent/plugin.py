@@ -34,6 +34,7 @@ _gateway_mod = _import_sibling("magpie_gateway")
 _chat_mod = _import_sibling("magpie_chat")
 _agent_mod = _import_sibling("magpie_agent_actions")
 _curation_mod = _import_sibling("magpie_curation")
+_context_mod = _import_sibling("magpie_context")
 
 DEFAULT_GATEWAY_URL = _common.DEFAULT_GATEWAY_URL
 DEFAULT_GROUP_ID = _common.DEFAULT_GROUP_ID
@@ -82,6 +83,7 @@ class MagpieAgentPlugin(BasePlugin):
         ctx.register_capability("llm.translate.v1", self.handle_translate)
         ctx.register_streaming_capability("ai.agent.v1", self.handle_agent_stream)
         ctx.register_capability("ai.curation.v1", self.handle_curation)
+        ctx.register_capability("context.collect.v1", self.handle_context_collect)
 
     async def on_unload(self) -> None:
         """Abort active gateway connections and clear transient session state."""
@@ -105,6 +107,7 @@ class MagpieAgentPlugin(BasePlugin):
                 "llm.translate.v1",
                 "ai.agent.v1",
                 "ai.curation.v1",
+                "context.collect.v1",
             ],
             "streaming_capabilities": ["llm.chat.v1", "ai.agent.v1"],
             "magpie_bin_configured": bool(magpie_bin),
@@ -253,8 +256,18 @@ class MagpieAgentPlugin(BasePlugin):
         if self._unloaded:
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
         return await _agent_mod.handle_agent(
-            req, call_chat=self._call_chat_via_ctx, secret=secret, stream_sink=stream
+            req,
+            call_chat=self._call_chat_via_ctx,
+            secret=secret,
+            stream_sink=stream,
+            collect_context=self.handle_context_collect,
         )
+
+    async def handle_context_collect(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """Collect bounded web/book/subtitle context for `ai.agent.v1` or MCP callers."""
+        if self._unloaded or self.ctx is None:
+            return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded")
+        return await _context_mod.collect_context(req, call_capability=self.ctx.capabilities.call)
 
     async def handle_curation(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Handle `ai.curation.v1` interactive and daily orchestration."""

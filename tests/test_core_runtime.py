@@ -132,6 +132,10 @@ def test_capability_registration_versioning_and_validation() -> None:
     # Different plugin registering same capability succeeds without conflict (first-registered wins on tie)
     reg.register("llm.chat.v1", lambda req: {"v": 99}, plugin_id="plugin-b")
     assert reg.resolve("llm.chat.v1").plugin_id == "plugin-a"
+    assert reg.resolve("llm.chat.v1", plugin_id="plugin-b").plugin_id == "plugin-b"
+    assert reg.call_sync("llm.chat.v1", plugin_id="plugin-b").data == {"v": 99}
+    with pytest.raises(CapabilityNotFoundError):
+        reg.resolve("llm.chat.v1", plugin_id="plugin-missing")
     assert len(reg.list_capabilities(prefix="llm.chat.v1")) == 2
 
     # Same plugin duplicate registration without replace=True conflicts
