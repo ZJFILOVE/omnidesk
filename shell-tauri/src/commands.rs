@@ -781,7 +781,7 @@ pub fn mpv_embed_set_viewport(state: State<'_, ShellState>, args: RawJsonArgs) -
     let fps = map
         .get("fps")
         .and_then(Value::as_u64)
-        .unwrap_or(24)
+        .unwrap_or(60)
         .clamp(1, 60) as u32;
     match state.mpv.set_embedded_viewport(width, height, fps) {
         Ok(()) => ok_envelope(

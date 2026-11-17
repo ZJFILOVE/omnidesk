@@ -619,12 +619,13 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                 playbackBackend={mpv.embedded ? 'libmpv' : mpv.enabled ? 'mpv' : 'preview'}
                 videoSurface={
                   selectedItem.kind === 'video' && mpv.embedded ? (
-                    <MpvCanvas active={mpv.embedded && isActive} />
+                    <MpvCanvas active={mpv.embedded && isActive} fps={mpv.state?.fps} />
                   ) : undefined
                 }
                 activeLyricIndex={activeLyricIndex}
                 lyricsLoading={mediaLyrics.loading}
                 lyricsMessage={mediaLyrics.message}
+                onReloadLyrics={mediaLyrics.reload}
                 nextSponsorSegment={nextSponsorSegment}
                 inEphemeralQueue={ephemeralQueue.includes(selectedItem.id)}
                 activeFocusId={activeFocusId}

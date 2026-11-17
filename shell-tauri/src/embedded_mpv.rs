@@ -55,7 +55,7 @@ const MPV_RENDER_UPDATE_FRAME: u64 = 1;
 
 const DEFAULT_FRAME_WIDTH: u32 = 960;
 const DEFAULT_FRAME_HEIGHT: u32 = 540;
-const DEFAULT_FRAME_FPS: u32 = 24;
+const DEFAULT_FRAME_FPS: u32 = 60;
 const JPEG_QUALITY: u8 = 72;
 const STATE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -475,9 +475,6 @@ impl EmbeddedMpv {
                 ready.complete(Ok(()));
 
                 let mut buffer: Vec<u32> = Vec::new();
-                let mut last_frame = Instant::now()
-                    .checked_sub(Duration::from_secs(1))
-                    .unwrap_or_else(Instant::now);
 
                 loop {
                     if stop.load(Ordering::Acquire) {
@@ -509,7 +506,8 @@ impl EmbeddedMpv {
                     let frame_width = width.load(Ordering::Relaxed).max(1);
                     let frame_height = height.load(Ordering::Relaxed).max(1);
                     let target_fps = fps.load(Ordering::Relaxed).clamp(1, 60);
-                    let frame_interval = Duration::from_millis(1000 / target_fps as u64);
+                    let frame_interval = Duration::from_secs_f64(1.0 / target_fps as f64);
+                    let frame_started = Instant::now();
                     let buffer_pixels = frame_width as usize * frame_height as usize;
                     if buffer.len() != buffer_pixels {
                         buffer.resize(buffer_pixels, 0);
@@ -552,7 +550,7 @@ impl EmbeddedMpv {
                         continue;
                     }
 
-                    if last_frame.elapsed() >= frame_interval {
+                    {
                         let frame_bytes = rgb0_to_rgb(&buffer, frame_width, frame_height, stride);
                         let mut jpeg = Vec::with_capacity(frame_bytes.len() / 8);
                         let encoder = Encoder::new(&mut jpeg, JPEG_QUALITY);
@@ -578,13 +576,14 @@ impl EmbeddedMpv {
                                             "data": base64::engine::general_purpose::STANDARD.encode(&jpeg),
                                         }),
                                     );
-                                    last_frame = Instant::now();
                                 }
                             }
                         }
                     }
 
-                    let elapsed = last_frame.elapsed();
+                    // Rendering, JPEG encoding and IPC all consume this frame's
+                    // budget. Sleeping a full interval *after* them halves FPS.
+                    let elapsed = frame_started.elapsed();
                     if elapsed < frame_interval {
                         thread::sleep(frame_interval - elapsed);
                     }

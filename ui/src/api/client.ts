@@ -313,7 +313,7 @@ export async function mpvEmbedDisable(): Promise<RpcResult<MpvPlaybackState>> {
 export async function mpvEmbedSetViewport(
   width: number,
   height: number,
-  fps = 24,
+  fps = 60,
 ): Promise<RpcResult<{ width: number; height: number; fps: number }>> {
   return invokeTauri('mpv_embed_set_viewport', {
     args: { width, height, fps },

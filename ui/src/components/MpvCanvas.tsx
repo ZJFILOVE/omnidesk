@@ -10,10 +10,9 @@ import {
 
 export interface MpvCanvasProps {
   active: boolean;
+  fps?: number;
   className?: string;
 }
-
-const TARGET_FPS = 24;
 
 function isFrameEnvelope(payload: unknown): payload is MpvFrameEnvelope {
   if (typeof payload !== 'object' || payload === null) return false;
@@ -61,22 +60,24 @@ async function decodeFrame(frame: MpvFrameEnvelope): Promise<CanvasImageSource> 
   }
 }
 
-export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, className }) => {
+export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, fps = 60, className }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSeqRef = useRef(0);
-  const decodingRef = useRef(0);
   const viewportTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!active) return undefined;
     let disposed = false;
     let unlisten: TauriUnlistenFn | null = null;
+    let decoding = false;
+    let pending: MpvFrameEnvelope | null = null;
+    lastSeqRef.current = 0;
 
     const drawFrame = async (frame: MpvFrameEnvelope) => {
       if (disposed || frame.seq <= lastSeqRef.current) return;
-      if (decodingRef.current > 1) return;
+      if (decoding) { if (!pending || frame.seq > pending.seq) pending = frame; return; }
       lastSeqRef.current = frame.seq;
-      decodingRef.current += 1;
+      decoding = true;
       try {
         const bitmap = await decodeFrame(frame);
         const canvas = canvasRef.current;
@@ -96,7 +97,10 @@ export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, className }) => {
       } catch {
         // A dropped frame is preferable to blocking the event stream.
       } finally {
-        decodingRef.current = Math.max(0, decodingRef.current - 1);
+        decoding = false;
+        const next = pending;
+        pending = null;
+        if (next && !disposed) void drawFrame(next);
       }
     };
 
@@ -136,7 +140,7 @@ export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, className }) => {
       }
       viewportTimerRef.current = window.setTimeout(() => {
         viewportTimerRef.current = null;
-        void mpvEmbedSetViewport(width, height, TARGET_FPS);
+        void mpvEmbedSetViewport(width, height, Number.isFinite(fps) && fps > 0 ? Math.min(60, Math.ceil(fps)) : 60);
       }, 120);
     };
 
@@ -161,7 +165,7 @@ export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, className }) => {
         viewportTimerRef.current = null;
       }
     };
-  }, [active]);
+  }, [active, fps]);
 
   return (
     <canvas
