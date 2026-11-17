@@ -526,8 +526,11 @@ class RecipeEngine:
                 else:
                     text = json_to_str(item)
                     kind = "paragraph"
-                if text:
-                    paragraphs.append(TextParagraph(id=f"p{idx + 1}", kind=kind, original=text))
+                image = str(item.get("image_url") or item.get("imageUrl") or "") if isinstance(item, Mapping) else ""
+                if text or (kind == "image" and image):
+                    paragraphs.append(TextParagraph(id=f"p{idx + 1}", kind=kind, original=text,
+                        image_url=image, alt=str(item.get("alt") or "") if isinstance(item, Mapping) else "",
+                        caption=str(item.get("caption") or "") if isinstance(item, Mapping) else ""))
         elif isinstance(body_value, str) and body_value.strip():
             if "<" in body_value and ">" in body_value:
                 paragraphs = html_to_paragraphs(body_value, url)

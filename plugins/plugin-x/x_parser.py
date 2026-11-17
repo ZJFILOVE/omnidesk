@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from omnidesk_sdk.media_markup import image_markdown
+
 import html
 import re
 import urllib.parse
@@ -738,7 +740,14 @@ def split_tweet_text_to_paragraphs(
             else ("[GIF 附件] " if m.type == "animated_gif" else "[图片附件] ")
         )
         text_val = f"{label}{m.url}" + (f" ({m.alt_text})" if m.alt_text else "")
-        out.append(TextParagraph(id=f"{id_prefix}_media_{seq}", kind="paragraph", original=text_val))
+        if m.type == "photo":
+            out.append(TextParagraph(id=f"{id_prefix}_media_{seq}", kind="image",
+                                     image_url=m.url, alt=m.alt_text or "推文图片", original=m.alt_text))
+        else:
+            if m.poster_url:
+                out.append(TextParagraph(id=f"{id_prefix}_poster_{seq}", kind="image",
+                                         image_url=m.poster_url, alt=m.alt_text or label.strip(), caption="媒体预览"))
+            out.append(TextParagraph(id=f"{id_prefix}_media_{seq}", kind="paragraph", original=text_val))
 
     return out
 
@@ -933,7 +942,7 @@ def _tweet_to_comment_node(
         qa = f"@{tweet.quoted_author_handle}" if tweet.quoted_author_handle else tweet.quoted_author_name
         body_parts.append(f"> [引用 {qa}] {tweet.quoted_text}")
     for m in tweet.media:
-        body_parts.append(f"[{m.type}] {m.url}")
+        body_parts.append(image_markdown(m.url, m.alt_text) if m.type == "photo" else f"[{m.type}] {m.url}")
     return CommentNode(
         id=tweet.id,
         author=format_author_display(tweet),

@@ -587,7 +587,7 @@ class XPlugin(BasePlugin):
                 doc = await self.client.fetch_tweet_detail(self.auth, tweet_id)
                 parsed = parse_tweet_detail_graphql(doc, tweet_id)
                 if parsed.article is not None:
-                    return parsed.article, {"transport": "graphql:TweetDetail", "tweet_id": tweet_id}
+                    return parsed.article, {"transport": "graphql:TweetDetail", "tweet_id": tweet_id, "next_cursor": parsed.next_cursor, "has_more": parsed.has_more}
             except XPluginError as exc:
                 errors.append(f"{exc.error_code}: {exc.message}")
             try:
@@ -778,6 +778,17 @@ class XPlugin(BasePlugin):
             article_id = _str_chain(req_obj, ("article_id", "tweet_id", "id", "url"))
             if not article_id:
                 return self._fail("invalid_argument", "article_id or tweet_id is required")
+            cursor = req_obj.get("cursor", "")
+            if not isinstance(cursor, str):
+                return self._fail("invalid_argument", "cursor 必须为字符串")
+            if cursor:
+                target = parse_target_id_or_url(article_id)
+                if target.kind != "tweet" or target.unsafe_scheme or not target.tweet_id:
+                    return self._fail("invalid_argument", "无效的推文 ID")
+                doc = await self.client.fetch_tweet_detail(self.auth, target.tweet_id, cursor=cursor)
+                parsed = parse_tweet_detail_graphql(doc, target.tweet_id)
+                return CapabilityResult.ok({"comments": [comment.model_dump() for comment in parsed.comments],
+                    "article_id": article_id, "next_cursor": parsed.next_cursor, "has_more": parsed.has_more})
             article, meta = await self.fetch_article(article_id)
             comments = article.comments
             if _coerce_bool(req_obj.get("translate", self.auto_translate()), self.auto_translate()):

@@ -933,7 +933,7 @@ class LuaEngine:
             for idx, entry in enumerate(raw_paras, start=1):
                 if isinstance(entry, Mapping):
                     orig = str(entry.get("original") or "")
-                    if orig:
+                    if orig or entry.get("image_url") or entry.get("imageUrl"):
                         kind = str(entry.get("kind") or "paragraph")
                         if kind not in {"heading", "paragraph", "quote", "code", "formula", "image"}:
                             kind = "paragraph"
@@ -942,6 +942,9 @@ class LuaEngine:
                                 id=str(entry.get("id") or f"p_{idx}"),
                                 kind=kind,  # type: ignore[arg-type]
                                 original=orig,
+                                image_url=str(entry.get("image_url") or entry.get("imageUrl") or ""),
+                                alt=str(entry.get("alt") or ""),
+                                caption=str(entry.get("caption") or ""),
                                 translated=str(entry.get("translated") or ""),
                             )
                         )

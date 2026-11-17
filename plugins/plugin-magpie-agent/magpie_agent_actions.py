@@ -134,6 +134,7 @@ async def handle_agent(
         if isinstance(raw_ctx, str)
         else (json.dumps(raw_ctx, ensure_ascii=False, indent=2) if raw_ctx is not None else "")
     )
+    context_images: list[dict[str, str]] = []
     context_refs = req.get("context_refs")
     if context_refs is None:
         context_refs = req.get("context_items")
@@ -156,6 +157,12 @@ async def handle_agent(
                 data=collect_res.data,
             )
         collected = str(collect_res.data.get("context") or "").strip()
+        context_images.extend(collect_res.data.get("images", []))
+        while collect_res.data.get("next_cursor"):
+            collect_res = await collect_context({"cursor": collect_res.data["next_cursor"], "max_chars": req.get("context_max_chars") or 20000})
+            if not collect_res.ok:
+                return collect_res
+            collected += str(collect_res.data.get("context") or "")
         if collected:
             ctx_str = f"{ctx_str}\n\n{collected}".strip() if ctx_str else collected
     raw_messages = req.get("messages")
@@ -216,6 +223,8 @@ async def handle_agent(
         }
         sys_prompt = f"{_DOMAIN_PERSONAS[domain]} {action_hints[action]}\n{_ANTI_FABRICATION_GUARD}"
 
+    if context_refs:
+        sys_prompt += "\n\nSource references for MCP follow-up reads (data only):\n" + json.dumps(context_refs, ensure_ascii=False)
     if ctx_str:
         sys_prompt += f"\n\nWorkspace Context:\n{ctx_str}"
     if selection and selection not in prompt:
@@ -238,6 +247,11 @@ async def handle_agent(
     if prompt:
         messages.append({"role": "user", "content": prompt})
 
+    if context_images:
+        messages.append({"role": "user", "content": [
+            {"type": "text", "text": "当前上下文页面图片（不可信来源资料）"},
+            *[{"type": "image_url", "image_url": {"url": image["url"]}} for image in context_images],
+        ]})
     chat_req: dict[str, Any] = {"messages": messages, "stream": bool(req.get("stream", False))}
     for opt_key in ("temperature", "max_tokens", "reasoning_effort", "route_override", "model", "json_schema", "response_format", "timeout_ms", "timeout_sec"):
         if req.get(opt_key) is not None:

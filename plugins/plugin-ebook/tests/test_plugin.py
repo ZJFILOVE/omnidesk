@@ -34,7 +34,7 @@ def test_manifest_matches_v2_schema() -> None:
     assert parsed.id == "plugin-ebook"
     assert parsed.kind == "hybrid"
     assert parsed.domain == "book"
-    assert parsed.provides == ["book.source.v1", "vocab.sm2.v1"]
+    assert parsed.provides == ["book.source.v1", "vocab.sm2.v1", "book.ebook.v1"]
 
     allowed_top = set(schema["properties"].keys())
     assert set(manifest.keys()).issubset(allowed_top)
@@ -269,3 +269,27 @@ async def test_epub_nav_ncx_images_pagination_and_optional_translation(tmp_path:
     assert ncx_spread.blocks[0].translated == "实体与排版检查。"
     await invoke_lifecycle_hook(plugin.on_unload)
     await ctx.acleanup()
+
+@pytest.mark.asyncio
+async def test_download_handoff_opens_configured_book_and_rejects_outside_file(tmp_path: Path) -> None:
+    root = tmp_path / 'library'
+    root.mkdir()
+    path = root / 'download.txt'
+    path.write_text('Downloaded text book.\n\nPage content.', encoding='utf-8')
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('Not in library', encoding='utf-8')
+    plugin = load_plugin_module().create_plugin()
+    manifest = json.loads((PLUGIN_DIR / 'plugin.json').read_text())
+    ctx = PluginContext('plugin-ebook', data_dir=tmp_path / 'data', config_schema=manifest['config_schema'])
+    ctx.set_config('library_roots', str(root))
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+    try:
+        result = await ctx.capabilities.call('book.ebook.v1', {'action': 'open', 'file_path': str(path)})
+        assert result.ok and result.data['book_id'].startswith('ebook-')
+        spread = await ctx.capabilities.call('book.source.v1', {'action': 'fetch_spread', 'book_id': result.data['book_id']})
+        assert spread.ok and 'Downloaded text book' in str(spread.data)
+        denied = await ctx.capabilities.call('book.ebook.v1', {'action': 'open', 'file_path': str(outside)})
+        assert not denied.ok and denied.data['error_code'] == 'path_safety'
+    finally:
+        await invoke_lifecycle_hook(plugin.on_unload)
+        await ctx.acleanup()

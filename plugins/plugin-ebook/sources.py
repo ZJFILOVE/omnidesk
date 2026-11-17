@@ -116,6 +116,15 @@ class EbookBookSource(BookSource):
             entries[stable_book_id(file_path)] = (root_dir, file_path, fmt)
         return entries
 
+    async def open_file(self, raw_path: str) -> BookItem:
+        roots = self._resolved_roots()
+        if not roots:
+            raise InvalidEbookArgError("请先把下载目录加入电子书插件的 library_roots")
+        path = validate_book_file(Path(raw_path).expanduser(), roots=roots)
+        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise InvalidEbookArgError("此格式不受电子书阅读器支持")
+        return await self.get_book(stable_book_id(path))
+
     def _get_cached_or_parse_sync(self, file_path: Path, fmt: BookFormat) -> ParsedBook | None:
         st = file_path.lstat()
         key = (file_path, st.st_mtime_ns, st.st_size, self._page_budget())

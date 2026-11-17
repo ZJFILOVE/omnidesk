@@ -1,3 +1,4 @@
+import { useLiveComments } from './useLiveComments';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LoadMoreState } from '../components/LoadMoreButton';
 import {
@@ -122,10 +123,11 @@ export function toTextArticle(raw: unknown, fallbackSource = ''): TextArticle | 
   };
 }
 
-function toBlocks(raw: unknown): TextArticle['blocks'] {
+export function toBlocks(raw: unknown): TextArticle['blocks'] {
   return arr(raw).map((entry, index) => {
     const block = dict(entry);
-    const kind = str(block.kind, 'paragraph');
+    const attachment = /^\[图片附件\]\s+(https?:\/\/\S+)(?:\s+\((.*)\))?$/u.exec(str(block.original, str(block.text)));
+    const kind = attachment ? 'image' : str(block.kind, 'paragraph');
     const safeKind = (
       ['heading', 'paragraph', 'quote', 'code', 'formula', 'image'] as const
     ).includes(kind as never)
@@ -137,8 +139,8 @@ function toBlocks(raw: unknown): TextArticle['blocks'] {
       original: str(block.original, str(block.text)),
       translated: str(block.translated) || undefined,
       language: str(block.language) || undefined,
-      imageUrl: str(block.image_url, str(block.imageUrl)) || undefined,
-      alt: str(block.alt) || undefined,
+      imageUrl: attachment?.[1] || str(block.image_url, str(block.imageUrl)) || undefined,
+      alt: attachment?.[2] || str(block.alt) || undefined,
       caption: str(block.caption) || undefined,
     };
   });
@@ -546,6 +548,7 @@ export function useLiveMedia(
 }
 
 export interface LiveArticleDetail {
+  discussion: ReturnType<typeof useLiveComments>;
   blocks: TextArticle['blocks'];
   comments: CommentNode[];
   loading: boolean;
@@ -557,6 +560,7 @@ export function useLiveArticleDetail(
   articleId: string,
   sourceId?: string,
 ): LiveArticleDetail {
+  const discussion = useLiveComments(articleId, sourceId);
   const [blocks, setBlocks] = useState<TextArticle['blocks']>([]);
   const [comments, setComments] = useState<CommentNode[]>([]);
   const [loading, setLoading] = useState(false);
@@ -602,7 +606,7 @@ export function useLiveArticleDetail(
     };
   }, [articleId, sourceId]);
 
-  return { blocks, comments, loading, error };
+  return { blocks, comments: discussion.supported ? discussion.comments : comments, loading, error, discussion };
 }
 
 export interface LiveSpread {

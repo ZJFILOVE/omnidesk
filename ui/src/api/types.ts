@@ -300,6 +300,7 @@ export interface BusEventEnvelope {
 }
 
 export interface AiAgentRequestPayload {
+  agent_id?: string;
   action?:
     | 'chat'
     | 'summarize'

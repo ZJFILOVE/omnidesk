@@ -1,3 +1,4 @@
+import { useAgentSelection } from '../hooks/useAgentSelection';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   callCapability,
@@ -113,6 +114,7 @@ export function useCompanionChat({
   contextEntity,
   restoreLastSessionOnOpen = true,
 }: UseCompanionChatOptions) {
+  const agentSelection = useAgentSelection();
   const tauriAvailable = isTauriAvailable();
   const [draft, setDraft] = useState('');
   const [isSending, setIsSending] = useState(false);
@@ -395,7 +397,8 @@ export function useCompanionChat({
                     }
                   : effectiveDomain === 'media'
                     ? {
-                        action: 'fetch_chapters',
+                        action: contextEntity.extra?.contextCapability === 'media.youtube.v1' || contextEntity.extra?.contextCapability === 'media.bilibili.v1' ? 'fetch_subtitles' : contextEntity.kind === 'music' ? 'fetch_lyrics' : 'fetch_chapters',
+                        bilingual: false,
                         item_id: contextEntity.extra?.contextItemId ?? contextEntity.itemId,
                         source_id: contextEntity.sourceId,
                       }
@@ -407,7 +410,13 @@ export function useCompanionChat({
             },
           ]
         : undefined;
+      if (effectiveDomain === 'text' && contextRefs && contextEntity?.extra?.commentsProvider) {
+        contextRefs.push({ capability: 'text.comments.v1', label: `${contextEntity.title} · 评论区`,
+          provider_plugin_id: String(contextEntity.extra.commentsProvider),
+          payload: { action: 'fetch_comments', article_id: contextEntity.itemId, source_id: contextEntity.sourceId ?? '' } });
+      }
       const payload: AiAgentRequestPayload = {
+        agent_id: agentSelection.agent.id,
         action: action ?? 'chat',
         domain: effectiveDomain,
         context: contextLabel,
@@ -421,8 +430,9 @@ export function useCompanionChat({
 
       const res = await callCapability<AiAgentResponseData>({
         capability: 'ai.agent.v1',
+        providerPluginId: agentSelection.agent.provider,
         payload: payload as unknown as Record<string, unknown>,
-        timeoutMs: 60000,
+        timeoutMs: 300000,
       });
       if (!mountedRef.current) return;
       setIsSending(false);
@@ -498,7 +508,7 @@ export function useCompanionChat({
         void refreshSessions();
       }
     },
-    [contextEntity, contextTitle, effectiveDomain, liveRouteLabel, refreshSessions],
+    [agentSelection.agent, contextEntity, contextTitle, effectiveDomain, liveRouteLabel, refreshSessions],
   );
 
   const resetConversation = useCallback(() => {
@@ -508,6 +518,7 @@ export function useCompanionChat({
   }, [startNewSession]);
 
   return {
+    agentSelection,
     tauriAvailable,
     draft,
     setDraft,

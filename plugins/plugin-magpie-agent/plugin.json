@@ -29,14 +29,18 @@
     "speech.asr.v1",
     "text.source.v1",
     "media.source.v1",
-    "book.bilingual_pdf.v1"
+    "book.bilingual_pdf.v1",
+    "text.comments.v1",
+    "media.youtube.v1",
+    "media.bilibili.v1"
   ],
   "permissions": [
     "process:magpie",
     "network:loopback",
     "config:read",
     "config:write",
-    "secret:vault"
+    "secret:vault",
+    "process:codex"
   ],
   "verify_cmd": "uv run pytest -q",
   "config_schema": [
@@ -102,6 +106,20 @@
       "type": "secret",
       "default": "",
       "description": "Stored exclusively in 0600 SecretVault (never written to plain config or logs)"
+    },
+    {
+      "key": "codex_bin",
+      "label": "Codex CLI 路径",
+      "type": "string",
+      "default": "",
+      "description": "留空自动检测 PATH 与 ~/.local/npm/bin/codex"
+    },
+    {
+      "key": "codex_model",
+      "label": "Codex 模型",
+      "type": "string",
+      "default": "",
+      "description": "留空使用 Codex CLI 自身默认模型；独立于 Magpie 路由"
     }
   ]
 }

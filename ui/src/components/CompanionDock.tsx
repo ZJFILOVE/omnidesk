@@ -1,3 +1,4 @@
+import { AgentSelector } from './AgentSelector';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import {
@@ -262,6 +263,7 @@ export function CompanionDock({
     dockError,
     liveRouteLabel,
     routeOnline,
+    agentSelection,
     messages,
     sessionId,
     activeSession,
@@ -378,7 +380,8 @@ export function CompanionDock({
         dockPositionClass,
       ].join(' ')}
     >
-      <header className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3.5 py-2.5">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3.5 py-2.5">
+        <AgentSelector selection={agentSelection} disabled={isSending} />
         <div className="flex min-w-0 items-center gap-2">
           <span
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px]"

@@ -52,7 +52,7 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   const [activeSourceId, setActiveSourceId] = useState('');
   const [dailyOnly, setDailyOnly] = useState<boolean>(false);
   const [tocOpen, setTocOpen] = useState<boolean>(true);
-  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(true);
   const [query, setQuery] = useState<string>('');
   const [selectedArticleId, setSelectedArticleId] = useState<string>(TEXT_ARTICLES[0]?.id ?? '');
   const [bilingualMode, setBilingualMode] = useState<BilingualMode>('bilingual');
@@ -113,10 +113,10 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
     if (!selectedArticle) return undefined;
     if (!liveFeed.live) return selectedArticle;
     const blocks = liveDetail.blocks.length > 0 ? liveDetail.blocks : selectedArticle.blocks;
-    const comments = liveDetail.comments.length > 0 ? liveDetail.comments : selectedArticle.comments;
+    const comments = liveDetail.discussion.supported ? liveDetail.comments : liveDetail.comments.length > 0 ? liveDetail.comments : selectedArticle.comments;
     if (blocks === selectedArticle.blocks && comments === selectedArticle.comments) return selectedArticle;
     return { ...selectedArticle, blocks, comments };
-  }, [liveDetail.blocks, liveDetail.comments, liveFeed.live, selectedArticle]);
+  }, [liveDetail.blocks, liveDetail.comments, liveDetail.discussion.supported, liveFeed.live, selectedArticle]);
 
   useEffect(() => {
     if (!onContextChange) return;
@@ -132,8 +132,9 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
       subtitle: selectedArticle.sourceName,
       sourceId: liveFeed.live ? liveFeed.sourceId : undefined,
       kind: selectedArticle.channelId,
+      extra: { commentsProvider: liveDetail.discussion.supported ? liveFeed.sources.find(source => source.sourceId === liveFeed.sourceId)?.pluginId : undefined },
     });
-  }, [onContextChange, selectedArticle, liveFeed.live, liveFeed.sourceId]);
+  }, [onContextChange, selectedArticle, liveFeed.live, liveFeed.sourceId, liveFeed.sources, liveDetail.discussion.supported]);
 
   const handleAddNote = () => {
     if (!selectedArticle || !noteDraft.trim()) return;
@@ -398,7 +399,10 @@ export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
             ]}
             noteDraft={noteDraft}
             activeFocusId={activeFocusId}
-            error={readerArticle.commentsError ?? liveDetail.error ?? null}
+            loading={liveDetail.discussion.loading}
+            error={liveDetail.discussion.error ?? readerArticle.commentsError ?? null}
+            onRetryComments={liveDetail.discussion.retry}
+            pagination={liveDetail.discussion.pagination}
             onFocus={emitFocus}
             onToggleCollapse={(id) =>
               setCollapsedComments((prev) => ({ ...prev, [id]: !prev[id] }))

@@ -55,6 +55,9 @@ const record: AgentSessionRecord = {
 function installTauriMock() {
   let deleted = false;
   const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
     if (cmd !== 'call_capability') {
       return { ok: true, provider_plugin_id: '', data: {}, error: '' };
     }
@@ -175,14 +178,11 @@ describe('CompanionDock persisted sessions', () => {
         ),
       ).not.toBeNull();
     });
-    expect(invoke).toHaveBeenCalledWith('call_capability', {
-      args: expect.objectContaining({
-        capability: 'ai.agent.v1',
-        payload: expect.objectContaining({
-          session_id: 'session-1',
-          prompt: '继续解释可串行化',
-        }),
-      }),
+    expect(invoke).toHaveBeenCalledWith('call', {
+      args: expect.objectContaining({ op: 'capability.call', params: expect.objectContaining({
+        capability: 'ai.agent.v1', provider_plugin_id: 'plugin-magpie-agent',
+        payload: expect.objectContaining({ session_id: 'session-1', prompt: '继续解释可串行化' }),
+      }) }),
     });
   });
 

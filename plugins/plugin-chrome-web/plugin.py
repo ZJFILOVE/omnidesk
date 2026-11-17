@@ -277,7 +277,10 @@ class ChromeWebPlugin(BasePlugin):
 
         target_url = str(target.get("url") or "")
         final_url = target_url if (not needs_nav and target_url.startswith(("http://", "https://"))) else url
-        parsed = extract_from_html(html_value, base_url=final_url, fallback_title=str(target.get("title") or ""))
+        try:
+            parsed = extract_from_html(html_value, base_url=final_url, fallback_title=str(target.get("title") or ""))
+        except ValueError as exc:
+            return CapabilityResult.fail(str(exc), error_code="response_too_large")
         translate_flag = bool(payload.get("translate") or payload.get("bilingual"))
         target_lang = str(payload.get("target_lang") or "zh-CN").strip() or "zh-CN"
         bilingual = await build_bilingual_segments(

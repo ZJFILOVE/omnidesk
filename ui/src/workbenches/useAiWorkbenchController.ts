@@ -1,3 +1,4 @@
+import { useAgentSelection } from '../hooks/useAgentSelection';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   callCapability,
@@ -77,6 +78,7 @@ function cardsFromCuration(data: Record<string, unknown>): AiStructuredCard[] {
 }
 
 export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null) {
+  const agentSelection = useAgentSelection();
   const tauriAvailable = isTauriAvailable();
   const [route, setRoute] = useState<MagpieRouteState>(() => ({
     ...INITIAL_MAGPIE_ROUTE,
@@ -210,7 +212,7 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
   const handleSendPrompt = useCallback(
     async (overridePrompt?: string, overrideMode?: CurationMode) => {
       const text = (overridePrompt ?? composerText).trim();
-      if (!text || isSending) return;
+      if (!text || isSending || !agentSelection.agent.available) return;
       const effectiveMode = overrideMode ?? curationMode;
       const ts = nowHHMM();
       const turn = turnSeqRef.current++;
@@ -239,7 +241,7 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
       }
 
       setIsSending(true);
-      if (effectiveMode === 'interactive_ephemeral' && looksLikeCurationPrompt(text)) {
+      if (agentSelection.agent.id === 'builtin' && effectiveMode === 'interactive_ephemeral' && looksLikeCurationPrompt(text)) {
         const sessionId = `ix-chat-${Date.now()}`;
         const domains = curationDomains(text);
         const curation = await callCapability<Record<string, unknown>>({
@@ -321,9 +323,10 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
       };
 
       const res = await callCapability<LlmChatResponseData>({
-        capability: 'llm.chat.v1',
-        payload: payload as unknown as Record<string, unknown>,
-        timeoutMs: 60000,
+        capability: agentSelection.agent.id === 'builtin' ? 'llm.chat.v1' : 'ai.agent.v1',
+        providerPluginId: agentSelection.agent.provider,
+        payload: { ...payload, agent_id: agentSelection.agent.id, prompt: text, messages: agentSelection.agent.id === 'builtin' ? payload.messages : priorHistory, timeout_ms: 300000 },
+        timeoutMs: 300000,
       });
       if (!mountedRef.current) return;
       setIsSending(false);
@@ -373,7 +376,7 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
       ]);
       appendLog(`${replyTs} · llm.chat.v1 [${effectiveMode}] → ${servedModel}`);
     },
-    [appendLog, composerText, curationMode, isSending, repeatPolicy, route],
+    [agentSelection.agent, appendLog, composerText, curationMode, isSending, repeatPolicy, route],
   );
 
   const updateRemoteRoute = useCallback(
@@ -470,6 +473,7 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
   };
 
   return {
+    agentSelection,
     tauriAvailable,
     route,
     curationMode,

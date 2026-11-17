@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from omnidesk_sdk.media_markup import image_markdown
+
 import html as std_html
 import re
 from dataclasses import dataclass, field
@@ -162,12 +164,7 @@ def _collect_inline_text(node: _DomNode | str, base_url: str, out: list[str]) ->
             return
         alt = node.attrs.get("alt", "").strip()
         src = resolve_url(base_url, node.attrs.get("src", "")) if base_url else node.attrs.get("src", "").strip()
-        if alt:
-            out.append(f"[图片: {alt}]")
-        elif src:
-            out.append(f"[图片: {src}]")
-        else:
-            out.append("[图片]")
+        out.append(image_markdown(src, alt, base_url=base_url))
         return
     if "math" in node.classes:
         parts: list[str] = []

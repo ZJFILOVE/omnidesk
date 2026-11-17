@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from omnidesk_sdk import PluginContext
+from omnidesk_sdk.media_markup import image_markdown
 
 if __package__:
     from .security import redact_sensitive
@@ -19,7 +20,6 @@ _IGNORED_TAGS = frozenset({"script", "style", "noscript", "template", "iframe", 
 _BLOCK_TAGS = frozenset({"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "dt", "dd", "figcaption", "pre"})
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _MAX_HTML_CHARS = 8 * 1024 * 1024
-_MAX_SEGMENTS = 120
 
 
 def _clean_ws(text: str) -> str:
@@ -51,6 +51,14 @@ class _UntrustedHtmlExtractor(HTMLParser):
             return
         if self._ignored_depth > 0:
             return
+        if t == "img":
+            image_attrs = {k.lower(): (v or "") for k, v in attrs}
+            image = image_markdown(image_attrs.get("src") or image_attrs.get("data-src") or "", image_attrs.get("alt", ""), base_url=self._base_url)
+            self._text_parts.append(image)
+            if self._block_stack:
+                self._block_stack[-1][1].append(image)
+            else:
+                self.paragraphs.append({"id": f"p{len(self.paragraphs) + 1}", "kind": "paragraph", "original": image})
         if t == "title":
             self._in_title = True
         if t == "a" and self._anchor_href is None:
@@ -81,7 +89,7 @@ class _UntrustedHtmlExtractor(HTMLParser):
                 if self._block_stack[idx][0] == t:
                     _, parts = self._block_stack.pop(idx)
                     content = _clean_ws("".join(parts))
-                    if content and len(self.paragraphs) < _MAX_SEGMENTS:
+                    if content:
                         kind = "heading" if t in _HEADING_TAGS else ("quote" if t == "blockquote" else "paragraph")
                         self.paragraphs.append(
                             {"id": f"p{len(self.paragraphs) + 1}", "kind": kind, "original": content}
@@ -129,7 +137,9 @@ class _UntrustedHtmlExtractor(HTMLParser):
 
 def extract_from_html(html: str, *, base_url: str, fallback_title: str = "") -> dict[str, Any]:
     """Parse untrusted HTML into `title`, `text`, `links`, and paragraph segments."""
-    bounded = html[:_MAX_HTML_CHARS]
+    if len(html) > _MAX_HTML_CHARS:
+        raise ValueError("网页 HTML 超过 8 MiB 解析上限，未返回截断正文")
+    bounded = html
     parser = _UntrustedHtmlExtractor(base_url=base_url)
     parser.feed(bounded)
     parser.close()
@@ -139,7 +149,7 @@ def extract_from_html(html: str, *, base_url: str, fallback_title: str = "") -> 
     if not paragraphs and text:
         paragraphs = [
             {"id": f"p{idx}", "kind": "paragraph", "original": line}
-            for idx, line in enumerate(text.splitlines()[:_MAX_SEGMENTS], start=1)
+            for idx, line in enumerate(text.splitlines(), start=1)
             if line.strip()
         ]
     return {

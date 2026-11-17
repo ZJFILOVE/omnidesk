@@ -6,6 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import { ExternalLink } from './ExternalLink';
+import { ArticleImage } from './ArticleImage';
 import {
   highlightCode,
   isExternalUrl,
@@ -192,17 +193,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             </span>
           );
         }
-        return (
-          <img
-            src={safeSrc}
-            alt={alt ?? ''}
-            title={title}
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            className="my-3 max-w-full rounded-[12px]"
-            style={{ boxShadow: 'var(--shadow-soft)' }}
-          />
-        );
+        return <ArticleImage url={safeSrc} alt={alt} caption={title} inline />;
       },
       code: ({ className: codeClassName, children }) => (
         <code

@@ -1,3 +1,4 @@
+import { LoadMoreButton, type LoadMoreState } from '../../components/LoadMoreButton';
 import React from 'react';
 import CommentTreeView, { countComments, type BilingualMode } from '../../components/CommentTreeView';
 import { PanelSectionHeading } from '../../components/WorkbenchPrimitives';
@@ -13,6 +14,7 @@ import type { CommentNode } from '../../data/mock';
 export { countComments, type BilingualMode };
 
 export interface CommentTreePanelProps {
+  pagination?: LoadMoreState;
   articleId: string;
   comments: CommentNode[];
   bilingualMode: BilingualMode;
@@ -32,6 +34,7 @@ export interface CommentTreePanelProps {
 }
 
 export const CommentTreePanel: React.FC<CommentTreePanelProps> = ({
+  pagination,
   articleId,
   comments,
   bilingualMode,
@@ -62,13 +65,15 @@ export const CommentTreePanel: React.FC<CommentTreePanelProps> = ({
       collapsedComments={collapsedComments}
       votedComments={votedComments}
       activeFocusId={activeFocusId}
-      loading={loading}
-      error={error}
+      loading={loading && comments.length === 0}
+      error={comments.length === 0 ? error : null}
       onFocus={onFocus}
       onToggleCollapse={onToggleCollapse}
       onToggleVote={onToggleVote}
       onRetry={onRetryComments}
     />
+
+    {pagination && (pagination.hasMore || (comments.length > 0 && pagination.loadMoreError)) ? <LoadMoreButton id={`text:comments:next:${articleId}`} pagination={pagination} /> : null}
 
     <div className="mt-2 flex flex-col gap-2.5 border-t pt-4" style={{ borderColor: HAIRLINE_BORDER }}>
       <PanelSectionHeading title="个人批注 · ## Notes" meta={`${notes.length}`} />

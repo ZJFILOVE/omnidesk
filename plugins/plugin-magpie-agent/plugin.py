@@ -33,6 +33,7 @@ _router_actions = _import_sibling("magpie_router_actions")
 _gateway_mod = _import_sibling("magpie_gateway")
 _chat_mod = _import_sibling("magpie_chat")
 _agent_mod = _import_sibling("magpie_agent_actions")
+_runtime_mod = _import_sibling("agent_runtime")
 _curation_mod = _import_sibling("magpie_curation")
 _context_mod = _import_sibling("magpie_context")
 _sessions_mod = _import_sibling("magpie_sessions")
@@ -72,6 +73,7 @@ class MagpieAgentPlugin(BasePlugin):
         self._gateway = _gateway_mod.MagpieGatewayClient()
         self._session_seen: dict[str, set[str]] = {}
         self._sessions: Any = None
+        self._context_snapshots = _context_mod.ContextSnapshots()
         self._unloaded = False
 
     async def on_load(self, ctx: PluginContext) -> None:
@@ -94,6 +96,7 @@ class MagpieAgentPlugin(BasePlugin):
         self._gateway.close_all()
         self._session_seen.clear()
         self._sessions = None
+        self._context_snapshots.clear()
 
     async def on_health_check(self) -> dict[str, Any]:
         """Return lightweight offline readiness diagnostics without network I/O."""
@@ -259,9 +262,18 @@ class MagpieAgentPlugin(BasePlugin):
         secret = self._gateway_key()
         if self._unloaded:
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
+        if req.get("action") == "list_agents":
+            return CapabilityResult.ok({"agents": _runtime_mod.agents(self.ctx)})
+        agent_id = str(req.get("agent_id") or "builtin")
+        if agent_id not in {"builtin", "codex"}:
+            return CapabilityResult.fail("未知 Agent", error_code="invalid_argument")
+        async def call_selected(payload: dict[str, Any], sink: Any) -> CapabilityResult:
+            if agent_id == "codex":
+                return await _runtime_mod.chat(payload, ctx=self.ctx, stream=sink)
+            return await self._call_chat_via_ctx(payload, sink)
         return await _agent_mod.handle_agent(
             req,
-            call_chat=self._call_chat_via_ctx,
+            call_chat=call_selected,
             secret=secret,
             stream_sink=stream,
             collect_context=self.handle_context_collect,
@@ -269,10 +281,10 @@ class MagpieAgentPlugin(BasePlugin):
         )
 
     async def handle_context_collect(self, req: Mapping[str, Any]) -> CapabilityResult:
-        """Collect bounded web/book/subtitle context for `ai.agent.v1` or MCP callers."""
+        """Collect complete or resumable web/book/subtitle/comment context for `ai.agent.v1` or MCP callers."""
         if self._unloaded or self.ctx is None:
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded")
-        return await _context_mod.collect_context(req, call_capability=self.ctx.capabilities.call)
+        return await _context_mod.collect_context(req, call_capability=self.ctx.capabilities.call, snapshots=self._context_snapshots)
 
     async def handle_curation(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Handle `ai.curation.v1` interactive and daily orchestration."""

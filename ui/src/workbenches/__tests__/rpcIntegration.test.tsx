@@ -61,6 +61,9 @@ describe('Offline preview behavior outside Tauri', () => {
 describe('PluginStore real Tauri RPC and bus health updates', () => {
   it('loads plugins via list_plugins, executes reload/verify/save via call/call_capability, and surfaces backend errors', async () => {
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
       if (cmd === 'list_plugins') {
         return {
           ok: true,
@@ -237,6 +240,9 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
   it('routes chart-style prompts through ai.curation.v1 and renders verified cards', async () => {
     const invokedCapabilities: string[] = [];
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
       if (cmd === 'call_capability') {
         const cap = String(payload?.args?.capability ?? '');
         invokedCapabilities.push(cap);
@@ -300,6 +306,9 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
   it('requests media and text domains for paper + YouTube prompts', async () => {
     let capturedPayload: Record<string, unknown> | undefined;
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
       if (cmd === 'call_capability') {
         const cap = String(payload?.args?.capability ?? '');
         if (cap === 'llm.router.v1') {
@@ -353,6 +362,9 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
 
   it('sends llm.chat.v1 in AiWorkbench and surfaces real reply or real backend error', async () => {
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
       if (cmd === 'call_capability') {
         const cap = payload?.args?.capability;
         const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
@@ -420,6 +432,9 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
   it('selects nested auto route without sending an unsupported effort suffix', async () => {
     const setRoutePayloads: Array<Record<string, unknown>> = [];
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
       if (cmd === 'call_capability') {
         const cap = payload?.args?.capability;
         const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
@@ -495,6 +510,9 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
 
   it('sends ai.agent.v1 in CompanionDock and surfaces real error on failure', async () => {
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
+        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
+      }
       if (cmd === 'call_capability') {
         const cap = payload?.args?.capability;
         const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
@@ -545,11 +563,11 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
     await waitFor(() => {
       expect(within(screen.getByTestId('companion-messages')).getByText('伴读真实回复：核心主句清晰。')).not.toBeNull();
     });
-    expect(invoke).toHaveBeenCalledWith('call_capability', {
-      args: expect.objectContaining({
-        capability: 'ai.agent.v1',
+    expect(invoke).toHaveBeenCalledWith('call', {
+      args: expect.objectContaining({ op: 'capability.call', params: expect.objectContaining({
+        capability: 'ai.agent.v1', provider_plugin_id: 'plugin-magpie-agent',
         payload: expect.objectContaining({ action: 'chat', domain: 'book', prompt: '解释这一段' }),
-      }),
+      }) }),
     });
 
     fireEvent.change(textarea, { target: { value: 'trigger error' } });

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from omnidesk_sdk.media_markup import image_markdown
+
 import html as html_lib
 import json
 import re
@@ -184,12 +186,7 @@ def _collect_inline_text(node: _Node, base_url: str, parts: list[str]) -> None:
         src = node.attrs.get("src", "").strip()
         if src and base_url:
             src = resolve_relative_url(base_url, src)
-        if alt:
-            parts.append(f"[图片: {alt}]")
-        elif src:
-            parts.append(f"[图片: {src}]")
-        else:
-            parts.append("[图片]")
+        parts.append(image_markdown(src, alt, base_url=base_url))
         return
 
     if node.has_class("math"):

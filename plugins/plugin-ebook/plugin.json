@@ -11,7 +11,8 @@
   "description": "Local EPUB/TXT/PDF-companion and Calibre-backed Kindle, FictionBook, office and comic reader, term etymology & sentence breakdown, and SM-2 spaced-repetition vocabulary studio.",
   "provides": [
     "book.source.v1",
-    "vocab.sm2.v1"
+    "vocab.sm2.v1",
+    "book.ebook.v1"
   ],
   "consumes": [
     "llm.chat.v1",

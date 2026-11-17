@@ -1,3 +1,4 @@
+import { AgentSelector } from '../components/AgentSelector';
 import React, { useEffect, useState } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
 import { StatusBanner } from '../components/StatusBanner';
@@ -56,6 +57,7 @@ export const AiWorkbench: React.FC<WorkbenchViewProps> = ({
       rightWidthClass="@[860px]/workbench:w-[320px]"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
+          <AgentSelector selection={ctrl.agentSelection} disabled={ctrl.isSending} />
           <span
             data-testid="ai-gateway-badge"
             className="rounded-full px-2.5 py-1 font-mono text-[13.5px] font-medium"

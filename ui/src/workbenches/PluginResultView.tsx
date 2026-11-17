@@ -1,3 +1,6 @@
+import { useLiveComments, mapComments } from '../hooks/useLiveComments';
+import CommentTreeView from '../components/CommentTreeView';
+import { LoadMoreButton } from '../components/LoadMoreButton';
 import { ExternalLink as ExternalLinkIcon, FileText, MessageSquare, Star } from 'lucide-react';
 import { MarkdownRenderer } from '../components/MarkdownRenderer';
 import { ExternalLink } from '../components/ExternalLink';
@@ -9,6 +12,7 @@ type Dict = Record<string, unknown>;
 interface PluginResultViewProps {
   payload: unknown;
   actionId: string;
+  providerPluginId?: string;
   onOpenItem?: (item: Dict) => void;
 }
 
@@ -148,6 +152,8 @@ function ArticleView({ article }: { article: Dict }) {
             const kind = text(block.kind).toLowerCase();
             const original = text(block.original || block.text || block.content);
             const translated = text(block.translated);
+            const attachment = /^\[图片附件\]\s+(https?:\/\/\S+)(?:\s+\((.*)\))?$/u.exec(original);
+            if (attachment) return <ArticleImage key={text(block.id) || index} url={attachment[1]} alt={attachment[2]} />;
             if (kind === 'image' && text(block.image_url || block.imageUrl)) {
               return <ArticleImage key={text(block.id) || index} url={text(block.image_url || block.imageUrl)} alt={text(block.alt)} caption={text(block.caption)} />;
             }
@@ -220,7 +226,7 @@ function KeyValueSummary({ body }: { body: Dict }) {
   );
 }
 
-export function PluginResultView({ payload, actionId, onOpenItem }: PluginResultViewProps) {
+export function PluginResultView({ payload, actionId, onOpenItem, providerPluginId }: PluginResultViewProps) {
   const body = resolveBody(payload);
   const items = asRecords(body.items);
   const article = isRecord(body.article)
@@ -228,9 +234,11 @@ export function PluginResultView({ payload, actionId, onOpenItem }: PluginResult
     : Object.keys(body).some((key) => key === 'paragraphs' || key === 'blocks') && text(body.title)
       ? body
       : null;
+  const discussion = useLiveComments(article ? text(article.id) : '', undefined, providerPluginId);
+  const comments = discussion.supported ? discussion.comments : mapComments(article?.comments ?? body.comments);
   const chapters = asRecords(body.chapters);
   const loadingAction = actionId === 'fetch_feed' || actionId === 'fetch_items';
-  const hasContent = items.length > 0 || Boolean(article) || chapters.length > 0;
+  const hasContent = items.length > 0 || Boolean(article) || chapters.length > 0 || comments.length > 0;
   const hasSummary = Object.keys(body).length > 1;
 
   if (!hasContent && !loadingAction && !hasSummary) return null;
@@ -252,6 +260,12 @@ export function PluginResultView({ payload, actionId, onOpenItem }: PluginResult
         <FeedItemCard key={text(item.id) || index} item={item} index={index} onOpenItem={onOpenItem} />
       ))}
       {article ? <ArticleView article={article} /> : null}
+      {comments.length > 0 || discussion.supported ? <section aria-label="评论区" className="space-y-3 rounded-xl border border-[var(--border-subtle)] p-4">
+        <h2 className="text-base font-semibold">评论与讨论</h2>
+        <CommentTreeView articleId={text(article?.id) || actionId} comments={comments}
+          loading={discussion.loading && comments.length === 0} error={comments.length ? null : discussion.error} onRetry={discussion.retry} />
+        {discussion.pagination.hasMore ? <LoadMoreButton id="plugin:comments:more" pagination={discussion.pagination} /> : null}
+      </section> : null}
       {chapters.length > 0 ? (
         <div className="space-y-2">
           <h2 className="text-[15.5px] font-semibold text-[var(--text-primary)]">章节</h2>

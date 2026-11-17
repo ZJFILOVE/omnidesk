@@ -266,7 +266,7 @@ export function PluginWorkspace({
             正在执行 {pendingAction}…
           </div>
         ) : null}
-        <PluginResultView payload={actionResult} actionId={lastActionId}
+        <PluginResultView payload={actionResult} actionId={lastActionId} providerPluginId={tab.plugin_id}
           onOpenItem={tab.domain === 'text' && feedRequest ? (item) => {
             void handleAction('fetch_article', { article_id: item.id || item.url, url: item.url });
           } : undefined} />

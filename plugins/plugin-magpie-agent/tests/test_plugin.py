@@ -64,8 +64,11 @@ def test_manifest_matches_spec_and_schema() -> None:
         "text.source.v1",
         "media.source.v1",
         "book.bilingual_pdf.v1",
+        "text.comments.v1",
+        "media.youtube.v1",
+        "media.bilibili.v1",
     }
-    assert set(manifest["permissions"]) == {"process:magpie", "network:loopback", "config:read", "config:write", "secret:vault"}
+    assert set(manifest["permissions"]) == {"process:codex", "process:magpie", "network:loopback", "config:read", "config:write", "secret:vault"}
 
     allowed_top = set(schema["properties"].keys())
     assert set(manifest.keys()).issubset(allowed_top)
@@ -84,6 +87,8 @@ def test_manifest_matches_spec_and_schema() -> None:
         "stays_policy",
         "request_timeout_ms",
         "gateway_key",
+        "codex_bin",
+        "codex_model",
     }
     assert fields["magpie_bin"]["type"] == "string"
     assert fields["magpie_bin"]["default"] == "magpie"

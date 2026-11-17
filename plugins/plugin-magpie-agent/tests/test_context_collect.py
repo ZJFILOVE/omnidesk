@@ -168,3 +168,63 @@ async def test_media_context_uses_dedicated_provider_but_rejects_writes() -> Non
     calls.clear()
     denied = await collect_context({"items": [{"capability": "media.youtube.v1", "payload": {"action": "update_settings"}}]}, call_capability=fake_call)
     assert not denied.ok and not calls
+
+@pytest.mark.asyncio
+async def test_complete_text_and_snapshot_resume_are_lossless() -> None:
+    from magpie_context import ContextSnapshots
+    snapshots = ContextSnapshots()
+    text = ('长段落 🐈 Unicode\n\n' * 18000) + '最后一段'
+    calls = 0
+    async def source(capability, payload):
+        nonlocal calls
+        calls += 1
+        return CapabilityResult.ok({'text': text, 'title': 'Full page'})
+    full = await collect_context({'items': [{'capability': 'web.extract.v1'}]}, call_capability=source)
+    assert text in full.data['context'] and not full.data['has_more']
+    result = await collect_context({'items': [{'capability': 'web.extract.v1'}], 'max_chars': 1001}, call_capability=source, snapshots=snapshots)
+    chunks = [result.data['context']]
+    first_cursor = result.data['next_cursor']
+    while result.data['next_cursor']:
+        result = await collect_context({'cursor': result.data['next_cursor'], 'max_chars': 1001}, call_capability=source, snapshots=snapshots)
+        assert result.ok
+        chunks.append(result.data['context'])
+    assert ''.join(chunks) == full.data['context'] and calls == 2
+    snapshots.clear()
+    expired = await collect_context({'cursor': first_cursor}, call_capability=source, snapshots=snapshots)
+    assert not expired.ok and expired.data['error_code'] == 'context_expired'
+
+
+@pytest.mark.asyncio
+async def test_images_are_multimodal_and_comment_context_readable() -> None:
+    async def source(capability, payload):
+        if capability == 'book.source.v1':
+            assert payload['record_progress'] is False
+            return CapabilityResult.ok({'blocks': [{'kind': 'image', 'image_url': 'data:image/png;base64,aW1n'}]})
+        assert capability == 'text.comments.v1'
+        return CapabilityResult.ok({'comments': [{'body': '读者评论', 'replies': [{'body': '嵌套回复'}]}]})
+    async def collector(req):
+        return await collect_context(req, call_capability=source)
+    captured = {}
+    async def chat(req, sink):
+        captured.update(req)
+        return CapabilityResult.ok({'reply': 'answer'})
+    result = await handle_agent({'prompt': 'compare', 'context_refs': [
+        {'capability': 'book.source.v1', 'payload': {'action': 'fetch_spread'}},
+        {'capability': 'text.comments.v1', 'payload': {'action': 'fetch_comments'}},
+    ]}, call_chat=chat, collect_context=collector, secret=None)
+    assert result.ok
+    assert '嵌套回复' in captured['messages'][0]['content']
+    assert 'base64' not in captured['messages'][0]['content']
+    assert captured['messages'][-1]['content'][1]['image_url']['url'].startswith('data:image/')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('capability,payload', [
+    ('web.fetch.v1', {'method': 'POST'}), ('book.source.v1', {'action': 'open'}),
+    ('book.bilingual_pdf.v1', {'action': 'translate'}), ('text.comments.v1', {'action': 'post'}),
+])
+async def test_context_reader_cannot_execute_writes(capability, payload):
+    async def source(*args):
+        raise AssertionError('write must not execute')
+    result = await collect_context({'items': [{'capability': capability, 'payload': payload}]}, call_capability=source)
+    assert not result.ok and result.data['errors'][0]['error_code'] == 'forbidden_capability'

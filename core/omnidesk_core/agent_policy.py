@@ -14,6 +14,9 @@ from .paths import OmnideskPaths
 
 #: Capability actions that mutate local files, playlists, feeds, or external services.
 SIDE_EFFECT_ACTIONS: dict[str, frozenset[str]] = {
+    "recommend.feed.v1": frozenset({"push_interactive_set", "publish_daily_bundle", "bootstrap_and_rehydrate"}),
+    "book.ebook.v1": frozenset({"open"}),
+    "book.source.v1": frozenset({"open", "update_progress", "set_progress"}),
     "book.search.v1": frozenset({"download", "open_in_babeldoc", "open_in_ebook", "send_to_nas"}),
     "book.bilingual_pdf.v1": frozenset({"translate", "enqueue", "run"}),
     "book.sync.v1": frozenset({"sync"}),

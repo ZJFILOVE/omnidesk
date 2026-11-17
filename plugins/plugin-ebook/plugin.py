@@ -30,6 +30,7 @@ else:
     from sources import EbookBookSource
 
 _BOOK_ACTIONS = (
+    "open",
     "list_books", "fetch_spread", "get_spread", "get_book", "book_info", "list_vocab",
     "update_progress", "set_progress", "probe_format", "lookup_term", "explain_sentence",
     "search_clips", "clip_jump", "sync",
@@ -84,6 +85,7 @@ class EbookPlugin(BasePlugin):
         _, source = self._ensure_stores(ctx)
         ctx.register_book_source(source)
         ctx.register_capability("book.source.v1", self.handle_book_source)
+        ctx.register_capability("book.ebook.v1", self.handle_book_source)
         ctx.register_capability("vocab.sm2.v1", self.handle_vocab_sm2)
         ctx.subscribe("entity.vocab.add", self._on_entity_vocab_add)
         ctx.register_workspace_tab(
@@ -171,6 +173,13 @@ class EbookPlugin(BasePlugin):
         action = str(payload.get("action") or "list_books").strip()
         vocab, source = self._ensure_stores()
         try:
+            if action == "open":
+                raw_path = str(payload.get("file_path") or "").strip()
+                if not raw_path:
+                    return CapabilityResult.fail("open 需要下载回执的 file_path", error_code="invalid_argument")
+                book = await source.open_file(raw_path)
+                await self.ctx.emit("entity.book.open", {"book_id": book.id, "source_id": "plugin-ebook", "domains": ["book"]})
+                return CapabilityResult.ok({"book_id": book.id, "source_id": "plugin-ebook", "book": book.model_dump()})
             if action == "list_books":
                 books = await source.list_books(
                     format_filter=str(payload.get("format_filter") or payload.get("format") or ""),

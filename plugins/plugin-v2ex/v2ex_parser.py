@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from omnidesk_sdk.media_markup import image_markdown
+
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -160,7 +162,7 @@ def _collect_text_raw(node: _Element | str, out: list[str], *, preserve_newlines
             joined = "".join(out)
             if joined and joined[-1] not in (" ", "\n"):
                 out.append(" ")
-            out.append(f"[图片: {src}]")
+            out.append(image_markdown(src, alt, base_url="https://www.v2ex.com/"))
         elif alt:
             out.append(alt)
         return
@@ -273,7 +275,7 @@ def _walk_rich_dom(
             cur = "".join(inline_buf)
             if cur and cur[-1] not in (" ", "\n"):
                 inline_buf.append(" ")
-            inline_buf.append(f"[图片: {src}]")
+            inline_buf.append(image_markdown(src, node.attr("alt"), base_url="https://www.v2ex.com/"))
         return
     if tag in _HEADING_TAGS:
         _flush_inline()

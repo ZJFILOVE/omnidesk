@@ -121,6 +121,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   focusedItemId,
   onContextChange,
   onOpenDock,
+  lastBusEvent,
   onAddVocab,
   sharedVocab,
   onNavigateWorkbench,
@@ -148,6 +149,14 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const searchError = catalogSearch.error;
   const [downloadedIds, setDownloadedIds] = useState<Set<string>>(() => new Set());
   const [selectedBookId, setSelectedBookId] = useState<string>(BOOK_ITEMS[0]?.id ?? '');
+  useEffect(() => {
+    if (lastBusEvent?.topic !== 'entity.book.open') return;
+    const { book_id, source_id } = lastBusEvent.payload;
+    if (typeof book_id === 'string' && typeof source_id === 'string') {
+      setActiveSourceId(source_id); setSelectedBookId(book_id); setLeftTab('shelf');
+      liveBooks.reload();
+    }
+  }, [lastBusEvent, liveBooks.reload]);
   const [spreadIndexByBook, setSpreadIndexByBook] = useState<Record<string, number>>({});
   const [glossaryLocked, setGlossaryLocked] = useState<boolean>(true);
   const [vocabCards, setVocabCards] = useState<VocabCard[]>(() => isTauriAvailable() ? [] : INITIAL_VOCAB_CARDS);

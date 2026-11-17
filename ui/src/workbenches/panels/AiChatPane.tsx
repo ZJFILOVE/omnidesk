@@ -228,7 +228,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             mode="loading"
             variant="inline"
             testId="ai-pending-status"
-            title="正在等待 llm.chat.v1 响应..."
+            title="正在等待 Agent 响应..."
             description=""
           />
         </div>
