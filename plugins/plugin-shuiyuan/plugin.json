@@ -1,0 +1,120 @@
+{
+  "schema_version": 2,
+  "id": "plugin-shuiyuan",
+  "name": "交大水源社区 (Discourse)",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "SJTU Shuiyuan Discourse reader with Chrome jAccount SSO login, _t cookie sync, clean thread typography, collapsible nested replies, and optional bilingual translation.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-shuiyuan",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-shuiyuan.git",
+    "branch": "main"
+  },
+  "python_dependencies": [],
+  "verify_cmd": "uv run pytest -q",
+  "provides": [
+    "text.source.v1",
+    "text.comments.v1"
+  ],
+  "consumes": [
+    "web.embed.v1",
+    "web.cookies.v1",
+    "web.fetch.v1",
+    "web.extract.v1",
+    "llm.translate.v1",
+    "llm.chat.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "network:wan",
+    "ipc:capability_call"
+  ],
+  "config_schema": [
+    {
+      "key": "chrome_cookie_source",
+      "label": "登录 Cookie 来源策略",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "plugin-chrome-web",
+        "vault",
+        "file",
+        "disabled"
+      ],
+      "required": false,
+      "description": "auto 会依次尝试 plugin-chrome-web (web.cookies.v1)、SecretVault 手动 Cookie 与本地 Cookie 文件。"
+    },
+    {
+      "key": "cookie_header",
+      "label": "手动 / 快照 Cookie Header (SecretVault)",
+      "type": "secret",
+      "default": "",
+      "required": false,
+      "description": "加密存储于 0600 SecretVault 的 Cookie Header，绝不写入普通配置或日志。"
+    },
+    {
+      "key": "cookie_file_path",
+      "label": "备用 Cookie 文件路径 (Netscape / JSON)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "可选：Chrome 导出的 cookies.json 或 cookies.txt 路径，按域名与过期时间匹配。"
+    },
+    {
+      "key": "prefer_chrome_fetch",
+      "label": "优先使用 Chrome 上下文代理请求",
+      "type": "bool",
+      "default": false,
+      "required": false,
+      "description": "遇到 Cloudflare、动态签名或 GraphQL 校验时，优先委托 plugin-chrome-web 代发请求。"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "HTTP 请求超时 (秒)",
+      "type": "int",
+      "default": 15,
+      "required": false,
+      "description": "单次抓取请求的超时时间。"
+    },
+    {
+      "key": "pinned_categories",
+      "label": "置顶版面列表 (ID/Slug)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "可选：逗号分隔的置顶版面（如 '22:谈天说地,13:二手市场' 或 slug），持久化于 subscriptions.json。"
+    },
+    {
+      "key": "auto_login_on_expire",
+      "label": "会话过期时自动呼起 Chrome 登录",
+      "type": "bool",
+      "default": true,
+      "required": false,
+      "description": "检测到 401/403 或重定向至 jAccount 时，自动调用 web.embed.v1 打开水源登录窗。"
+    },
+    {
+      "key": "auto_translate",
+      "label": "自动双语翻译正文与评论",
+      "type": "bool",
+      "default": false,
+      "required": false,
+      "description": "可选：开启后通过 llm.translate.v1 自动翻译标题、正文与评论（跳过代码块与公式）。"
+    },
+    {
+      "key": "base_url",
+      "label": "水源社区 HTTPS 基址",
+      "type": "string",
+      "default": "https://shuiyuan.sjtu.edu.cn",
+      "required": false,
+      "description": "交大水源 Discourse 站点 HTTPS 地址，默认 https://shuiyuan.sjtu.edu.cn。"
+    }
+  ]
+}

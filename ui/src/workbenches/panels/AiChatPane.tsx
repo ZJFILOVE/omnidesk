@@ -1,12 +1,14 @@
 import React from 'react';
+import { Pin, Send } from 'lucide-react';
+import StateView from '../../components/StateView';
 import {
   FocusButton,
-  HAIRLINE_BORDER,
   focusClass,
   focusableInputProps,
   focusableProps,
   isImeComposing,
 } from '../../components/WorkbenchLayout';
+import { TagChip } from '../../components/WorkbenchPrimitives';
 import {
   AI_QUICK_PRESETS,
   type AiChatMessage,
@@ -29,6 +31,7 @@ export interface AiChatPaneProps {
   messages: AiChatMessage[];
   pinnedCards: AiStructuredCard[];
   composerText: string;
+  isSending?: boolean;
   activeFocusId: string;
   onFocus: (id: string) => void;
   onModeChange: (mode: CurationMode) => void;
@@ -45,6 +48,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
   messages,
   pinnedCards,
   composerText,
+  isSending = false,
   activeFocusId,
   onFocus,
   onModeChange,
@@ -54,11 +58,12 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
   onRunPreset,
   onTogglePinCard,
 }) => (
-  <div className="flex h-full min-h-0 flex-col justify-between gap-3 p-5">
+  <div className="mx-auto flex h-full min-h-0 w-full max-w-[780px] flex-col justify-between gap-4 px-6 py-5 sm:px-8">
+    {/* Mode & Repeat Policy Header */}
     <div className="flex flex-col gap-2.5">
       <div
-        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3"
-        style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
+        className="flex flex-wrap items-center justify-between gap-2.5 rounded-[14px] px-4 py-2.5"
+        style={{ backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-page)' }}
       >
         <div className="flex flex-wrap items-center gap-2">
           <FocusButton
@@ -69,9 +74,9 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             selected={curationMode === 'interactive_ephemeral'}
             tone="core"
             surface="soft"
-            className="px-2.5 py-1 text-xs font-semibold"
+            className="px-3 py-1.5 text-[12.5px] font-semibold"
           >
-            interactive_ephemeral · 可重复灵感
+            可重复灵感 · interactive_ephemeral
           </FocusButton>
           <FocusButton
             focusId="ai:mode:daily"
@@ -81,20 +86,20 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             selected={curationMode === 'daily_immutable'}
             tone="ok"
             surface="soft"
-            className="px-2.5 py-1 text-xs font-semibold"
+            className="px-3 py-1.5 text-[12.5px] font-semibold"
           >
-            daily_immutable · 每日不重复账本
+            每日账本 · daily_immutable
           </FocusButton>
         </div>
-        <span className="font-mono text-[10px]" style={{ color: 'var(--text-muted, #66625D)' }}>
+        <span className="font-mono text-[12px] text-[var(--text-muted)]">
           {curationMode === 'daily_immutable'
-            ? '永久账本去重 + p.YJXV7dEIeb3GzZX 同步'
-            : 'record_permanent_history=false · 零仓库污染'}
+            ? '永久账本去重 + 歌单同步'
+            : '只读历史 · 零仓库污染'}
         </span>
       </div>
 
       {curationMode === 'interactive_ephemeral' ? (
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 px-1">
           {(['allow_any', 'prefer_familiar', 'session_dedup_only'] as const).map((pol) => (
             <FocusButton
               key={pol}
@@ -105,7 +110,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
               selected={repeatPolicy === pol}
               tone="core"
               surface="surface"
-              className="px-2 py-0.5 font-mono text-[10px]"
+              className="px-2.5 py-1 font-mono text-[12px]"
             >
               {REPEAT_LABELS[pol]}
             </FocusButton>
@@ -114,59 +119,73 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
       ) : null}
     </div>
 
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+    {/* Conversation Stream */}
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1 max-h-[44vh] @[860px]/workbench:max-h-none">
+      {messages.length === 0 && !isSending ? (
+        <StateView
+          mode="empty"
+          title="开始一次策展对话"
+          description="点击下方快捷指令或输入提示词，所有回复均来自真实模型路由或明确的离线示例标注。"
+        />
+      ) : null}
+
       {messages.map((msg) => {
         const msgFocusId = `ai:msg:${msg.id}`;
         const isUser = msg.role === 'user';
         return (
-          <div key={msg.id} className="flex flex-col gap-2">
+          <div key={msg.id} className="flex flex-col gap-3">
             <div
               data-focused={activeFocusId === msgFocusId ? 'true' : undefined}
               {...focusableProps(msgFocusId, activeFocusId, onFocus)}
               className={focusClass(
                 activeFocusId === msgFocusId,
-                `rounded-lg border p-3.5 ${isUser ? 'ml-8' : 'mr-4'}`,
+                `rounded-[16px] px-5 py-4 ${isUser ? 'ml-12' : 'mr-4'}`,
               )}
               style={{
-                backgroundColor: isUser ? 'var(--bg-soft, #F1EFEC)' : 'var(--bg-surface, #FCFBF9)',
-                borderColor: HAIRLINE_BORDER,
+                backgroundColor: msg.isError
+                  ? 'var(--status-err-bg)'
+                  : isUser
+                    ? 'var(--bg-soft)'
+                    : 'var(--bg-surface)',
+                color: msg.isError ? 'var(--status-err-fg)' : 'var(--text-primary)',
+                boxShadow: !isUser && !msg.isError ? 'var(--shadow-page)' : undefined,
               }}
             >
-              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[10px]">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12px]">
                 <span
-                  className="font-semibold uppercase"
+                  className="font-semibold"
                   style={{
-                    color: isUser ? 'var(--text-primary, #222120)' : 'var(--domain-core, #AC5F0C)',
+                    color: msg.isError
+                      ? 'var(--status-err-fg)'
+                      : isUser
+                        ? 'var(--text-primary)'
+                        : 'var(--domain-core)',
                   }}
                 >
-                  {isUser ? 'User Prompt' : msg.servedModel ?? 'OmniDesk Agent'}
+                  {isUser
+                    ? '你'
+                    : msg.isError
+                      ? msg.servedModel ?? 'Backend Error'
+                      : msg.isDemo
+                        ? `${msg.servedModel ?? '示例预览'} · DEMO`
+                        : msg.servedModel ?? 'OmniDesk Agent'}
                 </span>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   {msg.mode ? (
-                    <span
-                      className="rounded px-1.5 py-0.5 text-[9px]"
-                      style={{
-                        backgroundColor:
-                          msg.mode === 'daily_immutable'
-                            ? 'var(--status-ok-bg, #E7F5ED)'
-                            : 'var(--status-warn-bg, #FCF2DF)',
-                        color:
-                          msg.mode === 'daily_immutable'
-                            ? 'var(--status-ok-fg, #1E7244)'
-                            : 'var(--status-warn-fg, #AC5F0C)',
-                      }}
-                    >
+                    <TagChip tone={msg.mode === 'daily_immutable' ? 'ok' : 'warn'} mono>
                       {msg.mode}
-                    </span>
+                    </TagChip>
                   ) : null}
-                  <span style={{ color: 'var(--text-subtle, #8A847D)' }}>{msg.timestamp}</span>
+                  <span className="font-mono text-[12px] text-[var(--text-subtle)]">
+                    {msg.timestamp}
+                  </span>
                 </div>
               </div>
-              <p className="text-xs leading-relaxed">{msg.content}</p>
+              <p className="whitespace-pre-wrap text-[15px] leading-[1.76]">{msg.content}</p>
             </div>
 
             {msg.cards?.length ? (
-              <div className="mr-4 grid grid-cols-1 gap-2 md:grid-cols-2">
+              <div className="mr-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {msg.cards.map((card) => {
                   const isPinned = pinnedCards.some((c) => c.id === card.id);
                   return (
@@ -179,18 +198,21 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
                       selected={isPinned}
                       tone="core"
                       surface="surface"
-                      className="flex flex-col gap-1 p-3 text-left"
+                      className="flex flex-col gap-1.5 p-4 text-left"
                     >
-                      <div className="flex items-center justify-between gap-2 font-mono text-[10px]">
-                        <span style={{ color: 'var(--domain-core, #AC5F0C)' }}>
+                      <div className="flex items-center justify-between gap-2 text-[12px]">
+                        <span className="truncate font-mono font-semibold" style={{ color: 'var(--domain-core)' }}>
                           {card.domain.toUpperCase()} · {card.badge}
                         </span>
-                        <span>{isPinned ? '已暂存 ✓' : '+ 反写暂存'}</span>
+                        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-medium">
+                          <Pin className="h-3 w-3 shrink-0" aria-hidden="true" />
+                          <span>{isPinned ? '已暂存 ✓' : '+ 反写暂存'}</span>
+                        </span>
                       </div>
-                      <div className="text-xs font-semibold">{card.title}</div>
-                      <div className="text-[11px]" style={{ color: 'var(--text-muted, #66625D)' }}>
-                        {card.subtitle}
+                      <div className="text-[14px] font-semibold text-[var(--text-primary)]">
+                        {card.title}
                       </div>
+                      <div className="text-[13px] leading-[1.55] text-[var(--text-muted)]">{card.subtitle}</div>
                     </FocusButton>
                   );
                 })}
@@ -199,11 +221,24 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
           </div>
         );
       })}
+
+      {isSending ? (
+        <div className="mr-4">
+          <StateView
+            mode="loading"
+            variant="inline"
+            testId="ai-pending-status"
+            title="正在等待 llm.chat.v1 响应..."
+            description=""
+          />
+        </div>
+      ) : null}
     </div>
 
+    {/* Composer Dock */}
     <div
-      className="flex flex-col gap-2 rounded-lg border p-3"
-      style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
+      className="flex flex-col gap-3 rounded-[16px] p-4"
+      style={{ backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-soft)' }}
     >
       <div className="flex flex-wrap gap-1.5">
         {AI_QUICK_PRESETS.map((preset) => (
@@ -214,14 +249,14 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             onFocus={onFocus}
             onActivate={() => onRunPreset(preset)}
             surface="soft"
-            className="px-2 py-1 text-[11px] font-medium"
+            className="px-3 py-1 text-[12px] font-medium"
           >
             {preset.label}
           </FocusButton>
         ))}
       </div>
 
-      <div className="flex items-end gap-2">
+      <div className="flex items-end gap-2.5">
         <textarea
           rows={2}
           value={composerText}
@@ -230,7 +265,7 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
             if (isImeComposing(e)) return;
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
-              onSend();
+              if (!isSending) onSend();
             }
           }}
           placeholder="输入策展指令或问题（支持重温历史佳作；Enter 发送，Shift+Enter 换行）..."
@@ -239,9 +274,12 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
           {...focusableInputProps('ai:composer:input', activeFocusId, onFocus)}
           className={focusClass(
             activeFocusId === 'ai:composer:input',
-            'min-w-0 flex-1 rounded-md border p-2 text-xs',
+            'min-w-0 flex-1 rounded-[12px] border p-3 text-[14.5px] leading-[1.65]',
           )}
-          style={{ backgroundColor: 'var(--bg-canvas, #F6F5F3)', borderColor: HAIRLINE_BORDER }}
+          style={{
+            backgroundColor: 'var(--bg-canvas)',
+            borderColor: 'var(--border-line)',
+          }}
         />
         <FocusButton
           focusId="ai:composer:send"
@@ -250,9 +288,10 @@ export const AiChatPane: React.FC<AiChatPaneProps> = ({
           onActivate={onSend}
           selected
           tone="core"
-          className="shrink-0 px-3.5 py-2 text-xs font-semibold"
+          className="inline-flex shrink-0 items-center gap-1.5 px-4 py-2.5 text-[13px] font-semibold"
         >
-          发送执行
+          <Send className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>{isSending ? '执行中...' : '发送执行'}</span>
         </FocusButton>
       </div>
     </div>

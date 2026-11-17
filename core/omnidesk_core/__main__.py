@@ -16,22 +16,39 @@ from .paths import OmnideskPaths
 from .plugins import PluginManager
 
 
-async def _serve_runtime(plugin_dirs: list[Path], socket_path: str | None) -> int:
+async def _serve_runtime(
+    plugin_dirs: list[Path],
+    socket_path: str | None,
+    *,
+    state_path: Path | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> int:
     paths = OmnideskPaths.from_env()
     paths.ensure_dirs()
-    manager = PluginManager(plugin_dirs=plugin_dirs, paths=paths, isolate_errors=True)
-    await manager.load_all()
-    server = ControlServer(socket_path=socket_path, paths=paths, plugins=manager)
-    stop_event = asyncio.Event()
+    resolved_state_path = state_path if state_path is not None else (paths.state_dir / "plugins.json")
+    manager = PluginManager(
+        plugin_dirs=plugin_dirs,
+        paths=paths,
+        isolate_errors=True,
+        state_path=resolved_state_path,
+    )
+    stop_evt = stop_event or asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, stop_evt.set)
         except NotImplementedError:
             pass
-    async with server:
-        await stop_event.wait()
-    await manager.unload_all()
+    try:
+        await manager.load_all()
+        server = ControlServer(socket_path=socket_path, paths=paths, plugins=manager)
+        async with server:
+            await stop_evt.wait()
+    finally:
+        try:
+            await manager.unload_all()
+        finally:
+            manager.save_state()
     return 0
 
 
@@ -41,12 +58,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser = argparse.ArgumentParser(prog="python -m omnidesk_core serve")
         parser.add_argument("--plugins-dir", action="append", default=[])
         parser.add_argument("--socket", default=None)
+        parser.add_argument("--state-path", default=None)
         ns = parser.parse_args(args_list[1:])
         paths = OmnideskPaths.from_env()
         dirs = [Path(p).expanduser() for p in ns.plugins_dir] or (
             [Path.cwd() / "plugins"] if (Path.cwd() / "plugins").is_dir() else [paths.plugins_dir]
         )
-        return asyncio.run(_serve_runtime(dirs, ns.socket))
+        explicit_state = Path(ns.state_path).expanduser() if ns.state_path else None
+        try:
+            return asyncio.run(_serve_runtime(dirs, ns.socket, state_path=explicit_state))
+        except KeyboardInterrupt:
+            return 0
     if args_list and args_list[0] == "pm":
         return pm_main(args_list[1:])
     return pm_main(args_list)

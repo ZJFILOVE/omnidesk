@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { Direction, WorkbenchId } from '../types';
-import { isEditableTarget as isImeEditableTarget, useImeGuard } from './useImeGuard';
+import { isEditableElement } from '../utils/shortcuts';
+import { useImeGuard } from './useImeGuard';
 
 const WORKBENCH_SHORTCUT_MAP: Record<string, WorkbenchId> = {
   '1': 'media',
@@ -13,23 +14,22 @@ const WORKBENCH_SHORTCUT_MAP: Record<string, WorkbenchId> = {
 export interface UseGlobalKeysOptions {
   paletteOpen: boolean;
   hintActive: boolean;
+  helpOpen?: boolean;
   onSelectWorkbench: (id: WorkbenchId) => void;
   onTogglePalette: () => void;
   onClosePalette: () => void;
   onToggleDock: () => void;
   onToggleTheme: () => void;
+  onToggleHelp?: () => void;
+  onCloseHelp?: () => void;
   onTriggerHints: () => void;
   onCancelHints: () => void;
   onMove: (direction: Direction) => string | null;
   onActivate: () => boolean;
+  onSpace?: () => void;
+  onCycleZone?: () => void;
+  onAltShortcut?: (letter: string) => boolean | void;
   onTriggerSearch: () => void;
-}
-
-function isEditableElement(target: EventTarget | null): boolean {
-  if (isImeEditableTarget(target)) {
-    return true;
-  }
-  return target instanceof HTMLElement && target.closest('[contenteditable="true"]') !== null;
 }
 
 export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boolean } {
@@ -62,6 +62,7 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
           if (!event.repeat) {
             if (opts.hintActive) opts.onCancelHints();
             if (opts.paletteOpen) opts.onClosePalette();
+            if (opts.helpOpen) opts.onCloseHelp?.();
             opts.onSelectWorkbench(targetWorkbench);
           }
           return;
@@ -71,31 +72,64 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
           event.preventDefault();
           if (!event.repeat) {
             if (opts.hintActive) opts.onCancelHints();
+            if (opts.helpOpen) opts.onCloseHelp?.();
             opts.onTogglePalette();
           }
           return;
         }
       }
 
+      if (ctrlOrMeta && key === 'Tab') {
+        event.preventDefault();
+        if (!event.repeat) {
+          if (opts.hintActive) opts.onCancelHints();
+          if (opts.paletteOpen) opts.onClosePalette();
+          if (opts.helpOpen) opts.onCloseHelp?.();
+          opts.onCycleZone?.();
+        }
+        return;
+      }
+
       if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && key === 'F8') {
         event.preventDefault();
         if (!event.repeat) {
           if (opts.hintActive) opts.onCancelHints();
+          if (opts.helpOpen) opts.onCloseHelp?.();
           opts.onToggleDock();
         }
         return;
       }
 
-      if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && lowerKey === 't') {
-        event.preventDefault();
-        if (!event.repeat) {
-          opts.onToggleTheme();
+      if (
+        event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        /^[a-z]$/.test(lowerKey)
+      ) {
+        if (lowerKey === 't') {
+          event.preventDefault();
+          if (!event.repeat) {
+            opts.onToggleTheme();
+          }
+          return;
         }
-        return;
+        if (opts.onAltShortcut) {
+          if (!event.repeat) {
+            const handled = opts.onAltShortcut(lowerKey);
+            if (handled !== false) {
+              if (opts.hintActive) opts.onCancelHints();
+              if (opts.paletteOpen) opts.onClosePalette();
+              if (opts.helpOpen) opts.onCloseHelp?.();
+              event.preventDefault();
+            }
+          }
+          return;
+        }
       }
 
       if (opts.paletteOpen) {
-        if (key === 'Escape') {
+        if (key === 'Escape' && !event.defaultPrevented) {
           event.preventDefault();
           opts.onClosePalette();
         }
@@ -103,9 +137,19 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
       }
 
       if (opts.hintActive) {
-        if (key === 'Escape') {
+        if (key === 'Escape' && !event.defaultPrevented) {
           event.preventDefault();
           opts.onCancelHints();
+        }
+        return;
+      }
+
+      if (opts.helpOpen) {
+        if ((key === 'Escape' || key === '?') && !event.defaultPrevented) {
+          event.preventDefault();
+          if (!event.repeat) {
+            opts.onCloseHelp?.();
+          }
         }
         return;
       }
@@ -114,6 +158,10 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
         if (key === 'Escape' && event.target instanceof HTMLElement) {
           event.target.blur();
         }
+        return;
+      }
+
+      if (event.defaultPrevented) {
         return;
       }
 
@@ -148,6 +196,26 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
       if (key === 'Enter' && !event.shiftKey) {
         if (opts.onActivate()) {
           event.preventDefault();
+        }
+        return;
+      }
+
+      if ((key === ' ' || event.code === 'Space') && !event.shiftKey) {
+        event.preventDefault();
+        if (!event.repeat) {
+          if (opts.onSpace) {
+            opts.onSpace();
+          } else {
+            opts.onActivate();
+          }
+        }
+        return;
+      }
+
+      if (key === '?') {
+        event.preventDefault();
+        if (!event.repeat) {
+          opts.onToggleHelp?.();
         }
         return;
       }

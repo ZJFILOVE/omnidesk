@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "id": "plugin-ai-curator",
+  "name": "AI Curation & Archive Rehydrator",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "core",
+  "author": "OmniDesk",
+  "description": "Dual-repo Git mirror (ZJFILOVE/obsidian-vault & ZJFILOVE/music-daily), full historical archive rehydrator since 2026-09-04, and dual-mode cross-domain curation feed provider.",
+  "provides": [
+    "recommend.feed.v1"
+  ],
+  "consumes": [
+    "vocab.sm2.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "fs:user_mount",
+    "process:git",
+    "network:wan"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "obsidian_vault_dir",
+      "label": "Obsidian Vault 本地仓库路径",
+      "type": "string",
+      "default": "",
+      "description": "留空时依次探测工作区同级目录与 <XDG_DATA_HOME>/omnidesk/curation/repos/obsidian-vault"
+    },
+    {
+      "key": "music_daily_dir",
+      "label": "Music Daily 本地仓库路径",
+      "type": "string",
+      "default": "",
+      "description": "留空时依次探测工作区同级目录与 <XDG_DATA_HOME>/omnidesk/curation/repos/music-daily"
+    },
+    {
+      "key": "curation_root",
+      "label": "策展本地存储根目录（可选）",
+      "type": "string",
+      "default": "",
+      "description": "留空时使用 <XDG_DATA_HOME>/omnidesk/curation"
+    },
+    {
+      "key": "sync_remote",
+      "label": "同步时拉取远端 GitHub 更新",
+      "type": "bool",
+      "default": true,
+      "description": "启用后在执行 bootstrap_and_rehydrate 时仅对干净工作树执行 git fetch + merge --ff-only"
+    }
+  ]
+}

@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { BookMarked, BookOpen, ChevronDown, ChevronUp, Search } from 'lucide-react';
+import type { SelectionActionEvent } from '../components/SelectionBubble';
+import StateView from '../components/StateView';
 import WorkbenchLayout, {
   FocusButton,
   HAIRLINE_BORDER,
+  focusClass,
+  focusableProps,
   useWorkbenchFocus,
   type WorkbenchViewProps,
 } from '../components/WorkbenchLayout';
@@ -14,6 +19,7 @@ import {
   type VocabCard,
 } from '../data/mock';
 import BookShelfSidebar from './panels/BookShelfSidebar';
+import BookSpreadReader from './panels/BookSpreadReader';
 import VocabSm2Panel, { type Sm2Grade } from './panels/VocabSm2Panel';
 
 function applySm2(card: VocabCard, grade: Sm2Grade): VocabCard {
@@ -37,12 +43,47 @@ function applySm2(card: VocabCard, grade: Sm2Grade): VocabCard {
   };
 }
 
-export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
+function createVocabCard(
+  word: string,
+  contextSentence: string,
+  bookTitle: string,
+  page?: number,
+): VocabCard {
+  const slug =
+    word
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'term';
+  return {
+    id: `vocab-${slug}-${Date.now()}`,
+    word,
+    phonetic: '/待注音/',
+    pos: word.includes(' ') ? 'phrase' : 'term',
+    meaningZh: '待 AI 伴读补充释义（来自划词加入）',
+    etymology: page ? `摘自《${bookTitle}》p.${page}` : `摘自《${bookTitle}》`,
+    contextSentence: contextSentence || word,
+    bookTitle,
+    sourceDate: new Date().toISOString().slice(0, 10),
+    intervalDays: 1,
+    easeFactor: 2.5,
+    dueLabel: '新加入 · 今日待复习',
+  };
+}
+
+export interface BookWorkbenchProps extends WorkbenchViewProps {
+  onSelectionAction?: (event: SelectionActionEvent) => void;
+}
+
+export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   focusId,
   onFocus,
   focusedItemId,
   onContextChange,
+  onOpenDock,
+  onAddVocab,
+  sharedVocab,
   onNavigateWorkbench,
+  onSelectionAction,
 }) => {
   const [activeFocusId, emitFocus] = useWorkbenchFocus(
     `book:shelf:${BOOK_ITEMS[0]?.id ?? ''}`,
@@ -52,6 +93,9 @@ export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
   );
   const [books, setBooks] = useState<BookItem[]>(BOOK_ITEMS);
   const [leftTab, setLeftTab] = useState<'shelf' | 'search'>('shelf');
+  // Compact spine strip by default so the dual-page book spread maximizes above the fold at 1280x800
+  const [shelfOpen, setShelfOpen] = useState<boolean>(false);
+  const [vocabOpen, setVocabOpen] = useState<boolean>(true);
   const [catalogQuery, setCatalogQuery] = useState<string>('');
   const [selectedBookId, setSelectedBookId] = useState<string>(BOOK_ITEMS[0]?.id ?? '');
   const [spreadIndexByBook, setSpreadIndexByBook] = useState<Record<string, number>>({});
@@ -88,6 +132,27 @@ export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
   }, [catalogQuery]);
 
   useEffect(() => {
+    if (!sharedVocab?.length) return;
+    setVocabCards((prev) => {
+      const existingLower = new Set(prev.map((c) => c.word.toLowerCase()));
+      const additions: VocabCard[] = [];
+      for (const entry of sharedVocab) {
+        const clean = entry.word.trim();
+        if (!clean || existingLower.has(clean.toLowerCase())) continue;
+        existingLower.add(clean.toLowerCase());
+        additions.push(
+          createVocabCard(
+            clean,
+            entry.contextSentence ?? clean,
+            entry.sourceTitle ?? 'TextWorkbench',
+          ),
+        );
+      }
+      return additions.length > 0 ? [...additions.reverse(), ...prev] : prev;
+    });
+  }, [sharedVocab]);
+
+  useEffect(() => {
     if (!onContextChange) return;
     if (!selectedBook) {
       onContextChange(null);
@@ -117,9 +182,63 @@ export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
     if (matched) {
       setActiveVocabId(matched.id);
       setVocabRevealed(true);
+      setVocabOpen(true);
       setStatusMessage(`已定位词元「${matched.word}」— ${matched.meaningZh}`);
     } else {
       setStatusMessage(`已记录划词「${term}」（等待 BabelDOC 术语库解析）`);
+    }
+  };
+
+  const handleAddSelectionToVocab = (rawWord: string, contextSentence: string) => {
+    const cleanWord = rawWord.trim();
+    if (!cleanWord) return;
+    const bookTitle = selectedBook?.title ?? '当前书籍';
+    const existing = vocabCards.find((c) => c.word.toLowerCase() === cleanWord.toLowerCase());
+    if (existing) {
+      setActiveVocabId(existing.id);
+      setVocabRevealed(true);
+      setVocabOpen(true);
+      setStatusMessage(`「${existing.word}」已在生词本中，已聚焦到 SM-2 卡片`);
+    } else {
+      const nextCard = createVocabCard(cleanWord, contextSentence, bookTitle, activeSpread?.page);
+      setVocabCards((prev) => [nextCard, ...prev]);
+      setActiveVocabId(nextCard.id);
+      setVocabRevealed(true);
+      setVocabOpen(true);
+      setStatusMessage(`已加入生词本「${cleanWord}」（SM-2 队列共 ${vocabCards.length + 1} 词）`);
+    }
+    onAddVocab?.({
+      word: cleanWord,
+      contextSentence,
+      sourceTitle: bookTitle,
+    });
+  };
+
+  const handleSelectionAction = (event: SelectionActionEvent) => {
+    onSelectionAction?.(event);
+    const title = selectedBook?.title ?? '当前书籍';
+    const pageSuffix = activeSpread ? ` p.${activeSpread.page}` : '';
+    if (event.action === 'etymology') {
+      const matched = vocabCards.find((c) => c.word.toLowerCase() === event.text.toLowerCase());
+      if (matched) {
+        setActiveVocabId(matched.id);
+        setVocabRevealed(true);
+        setVocabOpen(true);
+        setStatusMessage(`词源联动「${matched.word}」：${matched.etymology}`);
+      } else {
+        onOpenDock?.(`请查词源与语境释义：「${event.text}」（语境：${event.contextSentence}）`);
+        setStatusMessage(`已查词源「${event.text}」（已同步 F8 伴读栏）`);
+      }
+    } else if (event.action === 'clause') {
+      onOpenDock?.(`请拆分长难句结构并标注从句层次：\n"${event.text}"`);
+      setStatusMessage(`已送 F8 拆解长难句：「${event.text.slice(0, 24)}」`);
+    } else if (event.action === 'vocab') {
+      handleAddSelectionToVocab(event.text, event.contextSentence);
+    } else if (event.action === 'companion') {
+      onOpenDock?.(`请结合《${title}》${pageSuffix} 解读选区：\n"${event.text}"`);
+      setStatusMessage('已将选区送入 F8 伴读栏');
+    } else if (event.action === 'copy') {
+      setStatusMessage(`已复制选区：「${event.text.slice(0, 26)}」`);
     }
   };
 
@@ -188,11 +307,43 @@ export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
   return (
     <WorkbenchLayout
       domain="book"
-      title="书架、BabelDOC 双栏 PDF 与 SM-2 生词台 · BookWorkbench"
-      subtitle="2:3 书架 · 左右基线对齐双栏对照 · 划词词源与美剧原声切片跳播"
-      badge="Book · Ctrl+3"
+      testId="workbench-book"
+      title="书本与双栏精读"
+      subtitle="2:3 书架封面墙 · 双栏原版对照 · SM-2 生词记忆"
+      editorialHeader
+      rightWidthClass="@[860px]/workbench:w-[292px]"
       headerActions={
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <FocusButton
+            focusId="book:toggle:shelf"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            onActivate={() => setShelfOpen((v) => !v)}
+            selected={shelfOpen}
+            tone="book"
+            surface="soft"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+          >
+            {shelfOpen ? (
+              <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{shelfOpen ? '收起封面墙' : `展开封面墙 (${books.length})`}</span>
+          </FocusButton>
+          <FocusButton
+            focusId="book:toggle:vocab"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            onActivate={() => setVocabOpen((v) => !v)}
+            selected={vocabOpen}
+            tone="book"
+            surface="soft"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+          >
+            <BookMarked className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>生词台 ({vocabCards.length})</span>
+          </FocusButton>
           <FocusButton
             focusId="book:action:glossary-lock"
             activeFocusId={activeFocusId}
@@ -201,135 +352,152 @@ export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
             selected={glossaryLocked}
             tone="ok"
             surface="soft"
-            className="px-2.5 py-1 text-xs font-medium"
+            className="px-3 py-1.5 text-[12.5px] font-medium"
           >
             {glossaryLocked ? '术语表锁定 ✓' : '术语表未锁定'}
           </FocusButton>
-          <span className="font-mono text-[11px]" style={{ color: 'var(--text-muted, #66625D)' }}>
+        </div>
+      }
+      toolbar={
+        <div className="flex w-full items-center justify-between gap-2 text-[12.5px] text-[var(--text-muted)]">
+          <span>双栏原版对照 · 划词支持词源拆解与生词入库</span>
+          <span data-testid="book-status-message" className="truncate font-medium">
             {statusMessage}
           </span>
         </div>
       }
-      leftPane={
-        <BookShelfSidebar
-          books={books}
-          catalog={filteredCatalog}
-          selectedBookId={selectedBook?.id ?? ''}
-          leftTab={leftTab}
-          catalogQuery={catalogQuery}
-          activeFocusId={activeFocusId}
-          onFocus={emitFocus}
-          onTabChange={setLeftTab}
-          onCatalogQueryChange={setCatalogQuery}
-          onSelectBook={(book) => {
-            setSelectedBookId(book.id);
-            setStatusMessage(`已打开《${book.title}》`);
-          }}
-          onImportBook={handleImportCatalogBook}
-        />
-      }
       mainPane={
-        selectedBook && activeSpread ? (
-          <div className="flex flex-col gap-4 p-5">
+        <div className="flex flex-col">
+          {shelfOpen ? (
+            <BookShelfSidebar
+              books={books}
+              catalog={filteredCatalog}
+              selectedBookId={selectedBook?.id ?? ''}
+              leftTab={leftTab}
+              catalogQuery={catalogQuery}
+              activeFocusId={activeFocusId}
+              onFocus={emitFocus}
+              onTabChange={(tab) => {
+                setLeftTab(tab);
+                setShelfOpen(true);
+              }}
+              onCatalogQueryChange={setCatalogQuery}
+              onSelectBook={(book) => {
+                setSelectedBookId(book.id);
+                setStatusMessage(`已打开《${book.title}》`);
+              }}
+              onImportBook={handleImportCatalogBook}
+            />
+          ) : (
+            /* Compact Book Spine Strip: keeps 2:3 mini covers & Z-Lib tab reachable while maximizing the reading spread */
             <div
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3.5"
-              style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
+              className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-2.5"
+              style={{
+                borderColor: HAIRLINE_BORDER,
+                backgroundColor: 'color-mix(in srgb, var(--bg-surface) 60%, var(--bg-canvas))',
+              }}
             >
-              <div>
-                <div className="text-sm font-bold">{selectedBook.title}</div>
-                <div className="font-mono text-xs" style={{ color: 'var(--text-muted, #66625D)' }}>
-                  {activeSpread.chapterTitle} · {selectedBook.sourcePlugin}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <FocusButton
-                  focusId="book:nav:prev"
-                  activeFocusId={activeFocusId}
-                  onFocus={emitFocus}
-                  onActivate={() => handleTurnPage(-1)}
-                  surface="soft"
-                  className="px-2.5 py-1 text-xs font-medium"
-                >
-                  上一跨页
-                </FocusButton>
-                <span className="font-mono text-xs">
-                  p.{activeSpread.page} ({spreadIndex + 1}/{selectedBook.spreads.length})
-                </span>
-                <FocusButton
-                  focusId="book:nav:next"
-                  activeFocusId={activeFocusId}
-                  onFocus={emitFocus}
-                  onActivate={() => handleTurnPage(1)}
-                  surface="soft"
-                  className="px-2.5 py-1 text-xs font-medium"
-                >
-                  下一跨页
-                </FocusButton>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <section
-                className="flex flex-col gap-3 rounded-lg border p-4"
-                style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
-              >
-                <div
-                  className="border-b pb-2 font-mono text-xs font-semibold"
-                  style={{ borderColor: HAIRLINE_BORDER, color: 'var(--domain-book, #1E7244)' }}
-                >
-                  {activeSpread.leftTitle}
-                </div>
-                {activeSpread.leftParagraphs.map((para) => (
-                  <div key={para.id} className="flex flex-col gap-2">
-                    <p className="text-[13.5px] leading-relaxed">{para.text}</p>
-                    {para.keyTerms?.length ? (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="font-mono text-[10px]" style={{ color: 'var(--text-subtle, #8A847D)' }}>
-                          词元划查:
+              <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-0.5">
+                {books.map((book) => {
+                  const shelfId = `book:shelf:${book.id}`;
+                  const isSelected = selectedBook?.id === book.id;
+                  const isFocused = activeFocusId === shelfId;
+                  return (
+                    <button
+                      key={book.id}
+                      type="button"
+                      aria-pressed={isSelected}
+                      data-focused={isFocused ? 'true' : undefined}
+                      {...focusableProps(shelfId, activeFocusId, emitFocus, () => {
+                        setSelectedBookId(book.id);
+                        setStatusMessage(`已打开《${book.title}》`);
+                      })}
+                      className={focusClass(
+                        isFocused,
+                        'flex shrink-0 cursor-pointer items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--hover-fill)]',
+                      )}
+                      style={{
+                        backgroundColor: isSelected
+                          ? 'color-mix(in srgb, var(--domain-book) 11%, var(--bg-surface))'
+                          : 'transparent',
+                      }}
+                    >
+                      <span
+                        className="relative flex h-9 w-6 shrink-0 items-end justify-center overflow-hidden rounded-[4px] text-white"
+                        style={{
+                          background: book.coverGradient,
+                          boxShadow: 'inset 2px 0 0 rgba(255,255,255,0.28), var(--shadow-page)',
+                        }}
+                        aria-hidden="true"
+                      >
+                        {isSelected ? <BookOpen className="mb-1 h-2.5 w-2.5 opacity-90" /> : null}
+                      </span>
+                      <span className="min-w-0 max-w-[148px]">
+                        <span className="block truncate text-[12.5px] font-semibold text-[var(--text-primary)]">
+                          {book.title}
                         </span>
-                        {para.keyTerms.map((term) => (
-                          <FocusButton
-                            key={`${para.id}:${term}`}
-                            focusId={`book:term:${para.id}:${term}`}
-                            activeFocusId={activeFocusId}
-                            onFocus={emitFocus}
-                            onActivate={() => handleLookupTerm(term)}
-                            selected={activeVocab?.word.toLowerCase() === term.toLowerCase()}
-                            tone="book"
-                            surface="soft"
-                            className="px-2 py-0.5 font-mono text-[11px] font-medium"
-                          >
-                            {term}
-                          </FocusButton>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
-              </section>
+                        <span className="block font-mono text-[11.5px] text-[var(--text-muted)]">
+                          {book.format.toUpperCase()} · {book.progressPct}%
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
 
-              <section
-                className="flex flex-col gap-3 rounded-lg border p-4"
-                style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
-              >
-                <div
-                  className="border-b pb-2 font-mono text-xs font-semibold"
-                  style={{ borderColor: HAIRLINE_BORDER, color: 'var(--domain-book, #1E7244)' }}
+              <div className="flex shrink-0 items-center gap-1.5">
+                <FocusButton
+                  focusId="book:tab:shelf"
+                  activeFocusId={activeFocusId}
+                  onFocus={emitFocus}
+                  onActivate={() => {
+                    setLeftTab('shelf');
+                    setShelfOpen(true);
+                  }}
+                  surface="soft"
+                  className="px-2.5 py-1.5 text-[12px] font-medium"
                 >
-                  {activeSpread.rightTitle}
-                </div>
-                {activeSpread.rightParagraphs.map((para) => (
-                  <p key={para.id} className="text-[13.5px] leading-relaxed" style={{ color: 'var(--text-muted, #66625D)' }}>
-                    {para.text}
-                  </p>
-                ))}
-              </section>
+                  封面墙
+                </FocusButton>
+                <FocusButton
+                  focusId="book:tab:search"
+                  activeFocusId={activeFocusId}
+                  onFocus={emitFocus}
+                  onActivate={() => {
+                    setLeftTab('search');
+                    setShelfOpen(true);
+                  }}
+                  surface="soft"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-medium"
+                >
+                  <Search className="h-3 w-3" aria-hidden="true" />
+                  <span>Z-Lib 搜书</span>
+                </FocusButton>
+              </div>
             </div>
-          </div>
-        ) : null
+          )}
+
+          {selectedBook && activeSpread ? (
+            <BookSpreadReader
+              book={selectedBook}
+              spread={activeSpread}
+              spreadIndex={spreadIndex}
+              activeVocab={activeVocab}
+              activeFocusId={activeFocusId}
+              onFocus={emitFocus}
+              onTurnPage={handleTurnPage}
+              onLookupTerm={handleLookupTerm}
+              onSelectionAction={handleSelectionAction}
+            />
+          ) : (
+            <div className="p-8">
+              <StateView mode="empty" title="书架暂无可读卷册" description="可切换到 Z-Lib 搜书导入一本图书。" />
+            </div>
+          )}
+        </div>
       }
       rightPane={
-        activeVocab ? (
+        vocabOpen && activeVocab ? (
           <VocabSm2Panel
             vocabCards={vocabCards}
             activeVocab={activeVocab}
@@ -349,13 +517,7 @@ export const BookWorkbench: React.FC<WorkbenchViewProps> = ({
               onNavigateWorkbench?.('media', { clipWord: card.word });
             }}
           />
-        ) : null
-      }
-      footer={
-        <>
-          <span>焦点锚点: {activeFocusId || '未锁定'}</span>
-          <span>2:3 书架 · BabelDOC 双栏 · SM-2 + NAS 跳播</span>
-        </>
+        ) : undefined
       }
     />
   );

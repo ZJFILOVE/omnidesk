@@ -30,7 +30,7 @@ export interface MediaItem {
 }
 
 export type TextChannelId = 'all' | 'journal' | 'news' | 'reddit' | 'linuxdo' | 'zhihu';
-export interface ArticleBlock { id: string; kind: 'heading' | 'paragraph' | 'quote' | 'code' | 'formula'; original: string; translated?: string; language?: string; }
+export interface ArticleBlock { id: string; kind: 'heading' | 'paragraph' | 'quote' | 'code' | 'formula' | 'image'; original: string; translated?: string; language?: string; }
 export interface CommentNode { id: string; author: string; roleBadge?: string; timeAgo: string; score: number; original: string; translated?: string; children?: CommentNode[]; }
 
 export interface TextArticle {
@@ -52,6 +52,7 @@ export interface TextArticle {
   summaryZh: string;
   blocks: ArticleBlock[];
   comments: CommentNode[];
+  commentsError?: string | null;
 }
 
 export interface BookSpread {
@@ -125,6 +126,8 @@ export interface AiChatMessage {
   servedModel?: string;
   content: string;
   cards?: AiStructuredCard[];
+  isError?: boolean;
+  isDemo?: boolean;
 }
 
 export interface ConfigFieldSchema {
@@ -150,6 +153,9 @@ export interface PluginItem {
   healthOk: boolean;
   hotReloadMs: number;
   verifyStatus: 'passed' | 'idle' | 'failed';
+  runtimeState?: string;
+  runtimeError?: string;
+  reloadCount?: number;
   provides: string[];
   consumes: string[];
   permissions: string[];
@@ -370,8 +376,14 @@ export const TEXT_ARTICLES: TextArticle[] = [
     blocks: [
       { id: 'blk-j1', kind: 'heading', original: '1. Problem & Empirical Observation', translated: '一、问题与观测：固定滑动窗口为何在 64k 上下文后骤降' },
       { id: 'blk-j2', kind: 'paragraph', original: 'Standard sliding-window KV eviction preserves sink tokens and recent context, yet silently drops low-norm bridge tokens that encode variable bindings across reasoning hops.', translated: '常规滑动窗口策略虽保留了起始 sink token 与近期窗口，却会静默丢弃范数较低但承载跨跳变量绑定的“桥接词元”。' },
-      { id: 'blk-j3', kind: 'formula', original: 'L_evict(θ) = E_{x~p}[log q_θ(x)] - β · D_KL( H(α_t) || π_ref )', translated: '条件注意力熵约束下的 KL 正则化保留目标：当注意力分布熵低于阈值时优先保留对应键向量。' },
+      { id: 'blk-j3', kind: 'formula', original: 'L_{\\text{evict}}(\\theta) = \\mathbb{E}_{x \\sim p}[\\log q_\\theta(x)] - \\beta \\cdot D_{\\mathrm{KL}}(H(\\alpha_t) \\parallel \\pi_{\\text{ref}})', translated: '条件注意力熵约束下的 KL 正则化保留目标：当注意力分布熵 $H(\\alpha_t)$ 低于阈值时优先保留对应键向量。' },
       { id: 'blk-j4', kind: 'quote', original: 'Reviewer Synthesis: Strong theoretical framing on synthetic needle tasks; real multi-file coding traces remain sensitive to head-wise temperature calibration.', translated: '审稿级证据边界：合成多跳基准提升显著，但真实长程代码库轨迹仍依赖分头温度校准，外推至 MoE 模型尚缺直接消融。' },
+      {
+        id: 'blk-j5',
+        kind: 'paragraph',
+        original: 'Key takeaways across 64k–128k evaluation sweeps ([Nature MI Appendix](https://www.nature.com/natmachintell)):\n\n- Preserves low-entropy bridge tokens at $\\beta = 0.25$ with `< 1.8%` latency delta.\n\n| Method | 64k Needle Acc | KV Budget |\n| --- | --- | --- |\n| Sliding Window | 74.2% | 20% |\n| Entropy-Guided | **96.8%** | 20% |',
+        translated: '64k–128k 消融扫描核心结论（见 [Nature MI 附录](https://www.nature.com/natmachintell)）：\n\n- 在 $\\beta = 0.25$ 下保留低熵桥接词元，延迟增幅低于 `1.8%`。\n\n| 淘汰策略 | 64k 检索准确率 | KV 预算 |\n| --- | --- | --- |\n| 固定滑动窗口 | 74.2% | 20% |\n| 熵引导保留 | **96.8%** | 20% |',
+      },
     ],
     comments: [
       {
@@ -380,8 +392,13 @@ export const TEXT_ARTICLES: TextArticle[] = [
         translated: '如果在 FlashAttention epilogue 阶段顺带归约每个头的注意力熵，几乎不引入额外显存开销。',
         children: [{
           id: 'cmt-j1-1', author: 'k_sato_author', roleBadge: 'Author', timeAgo: '1h ago', score: 31,
-          original: 'Confirmed — we fused the running log-sum-exp entropy into our Triton kernel with < 1.8% latency delta.',
-          translated: '确实如此——我们将 running log-sum-exp 熵计算融合进 Triton kernel，端到端延迟增幅低于 1.8%。',
+          original: 'Confirmed — we fused the running log-sum-exp entropy into our Triton kernel with `< 1.8%` latency delta.',
+          translated: '确实如此——我们将 running log-sum-exp 熵计算融合进 Triton kernel，端到端延迟增幅低于 `1.8%`。',
+          children: [{
+            id: 'cmt-j1-1-1', author: 'triton_kernel_dev', roleBadge: 'Perf', timeAgo: '38m ago', score: 17,
+            original: 'Wait — did you keep the entropy accumulator in FP32 to avoid underflow on sharp heads?',
+            translated: '请教一下——熵累加器是否保持在 FP32 以免尖锐注意力头下溢？',
+          }],
         }],
       },
     ],

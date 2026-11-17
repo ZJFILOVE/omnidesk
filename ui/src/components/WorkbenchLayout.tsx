@@ -1,4 +1,6 @@
 import React, { useCallback, useState } from 'react';
+import type { BusEventEnvelope, RuntimeStatus } from '../api';
+import type { PluginHealthEntry } from '../hooks/useCoreEvents';
 
 export type WorkbenchDomain = 'media' | 'text' | 'book' | 'core';
 export type ToneKind = 'neutral' | 'media' | 'text' | 'book' | 'core' | 'ok' | 'warn' | 'err';
@@ -15,6 +17,12 @@ export interface WorkbenchEntityContext {
   extra?: Record<string, unknown>;
 }
 
+export interface VocabAddPayload {
+  word: string;
+  contextSentence?: string;
+  sourceTitle?: string;
+}
+
 export interface WorkbenchViewProps {
   focusId?: string;
   onFocus?: (id: string) => void;
@@ -22,9 +30,17 @@ export interface WorkbenchViewProps {
   theme?: 'paper' | 'graphite';
   focusedItemId?: string | null;
   searchTrigger?: number;
+  mediaToggleTrigger?: number;
+  tauriAvailable?: boolean;
+  coreOnline?: boolean;
+  runtimeStatus?: RuntimeStatus | null;
+  pluginHealthMap?: Record<string, PluginHealthEntry>;
+  lastBusEvent?: BusEventEnvelope | null;
   navigationPayload?: Record<string, unknown> | null;
   onContextChange?: (ctx: WorkbenchEntityContext | null) => void;
   onOpenDock?: (prompt?: string) => void;
+  onAddVocab?: (payload: VocabAddPayload) => void;
+  sharedVocab?: readonly VocabAddPayload[];
   onNavigateWorkbench?: (
     id: 'media' | 'text' | 'book' | 'ai' | 'store',
     payload?: Record<string, unknown>,
@@ -35,56 +51,56 @@ export const DOMAIN_META: Record<
   WorkbenchDomain,
   { label: string; colorVar: string; fallback: string }
 > = {
-  media: { label: 'Media', colorVar: 'var(--domain-media, #BA345A)', fallback: '#BA345A' },
-  text: { label: 'Text', colorVar: 'var(--domain-text, #2260AA)', fallback: '#2260AA' },
-  book: { label: 'Book', colorVar: 'var(--domain-book, #1E7244)', fallback: '#1E7244' },
-  core: { label: 'Core', colorVar: 'var(--domain-core, #AC5F0C)', fallback: '#AC5F0C' },
+  media: { label: 'Media', colorVar: 'var(--domain-media, #A41F48)', fallback: '#A41F48' },
+  text: { label: 'Text', colorVar: 'var(--domain-text, #185194)', fallback: '#185194' },
+  book: { label: 'Book', colorVar: 'var(--domain-book, #165E37)', fallback: '#165E37' },
+  core: { label: 'Core', colorVar: 'var(--domain-core, #8F4906)', fallback: '#8F4906' },
 };
 
 export const TONE_STYLES: Record<ToneKind, { bg: string; fg: string; border: string }> = {
   neutral: {
-    bg: 'var(--bg-soft, #F1EFEC)',
-    fg: 'var(--text-primary, #222120)',
-    border: 'var(--border-line, rgba(36, 33, 29, 0.12))',
+    bg: 'var(--bg-soft, #E6E2DA)',
+    fg: 'var(--text-primary, #1C1B19)',
+    border: 'var(--border-line, rgba(28, 27, 25, 0.09))',
   },
   media: {
-    bg: 'var(--bg-active, #F9E7ED)',
-    fg: 'var(--domain-media, #BA345A)',
-    border: 'var(--domain-media, #BA345A)',
+    bg: 'color-mix(in srgb, var(--domain-media, #A41F48) 12%, var(--bg-surface, #FCFBF9))',
+    fg: 'var(--domain-media, #A41F48)',
+    border: 'color-mix(in srgb, var(--domain-media, #A41F48) 28%, transparent)',
   },
   text: {
-    bg: 'var(--status-info-bg, #E8F2FD)',
-    fg: 'var(--domain-text, #2260AA)',
-    border: 'var(--domain-text, #2260AA)',
+    bg: 'color-mix(in srgb, var(--domain-text, #185194) 11%, var(--bg-surface, #FCFBF9))',
+    fg: 'var(--domain-text, #185194)',
+    border: 'color-mix(in srgb, var(--domain-text, #185194) 26%, transparent)',
   },
   book: {
-    bg: 'var(--status-ok-bg, #E7F5ED)',
-    fg: 'var(--domain-book, #1E7244)',
-    border: 'var(--domain-book, #1E7244)',
+    bg: 'color-mix(in srgb, var(--domain-book, #165E37) 11%, var(--bg-surface, #FCFBF9))',
+    fg: 'var(--domain-book, #165E37)',
+    border: 'color-mix(in srgb, var(--domain-book, #165E37) 26%, transparent)',
   },
   core: {
-    bg: 'var(--status-warn-bg, #FCF2DF)',
-    fg: 'var(--domain-core, #AC5F0C)',
-    border: 'var(--domain-core, #AC5F0C)',
+    bg: 'color-mix(in srgb, var(--domain-core, #8F4906) 12%, var(--bg-surface, #FCFBF9))',
+    fg: 'var(--domain-core, #8F4906)',
+    border: 'color-mix(in srgb, var(--domain-core, #8F4906) 28%, transparent)',
   },
   ok: {
-    bg: 'var(--status-ok-bg, #E7F5ED)',
-    fg: 'var(--status-ok-fg, #1E7244)',
-    border: 'var(--status-ok-fg, #1E7244)',
+    bg: 'var(--status-ok-bg, #E7F3EC)',
+    fg: 'var(--status-ok-fg, #165E37)',
+    border: 'color-mix(in srgb, var(--status-ok-fg, #165E37) 26%, transparent)',
   },
   warn: {
-    bg: 'var(--status-warn-bg, #FCF2DF)',
-    fg: 'var(--status-warn-fg, #AC5F0C)',
-    border: 'var(--status-warn-fg, #AC5F0C)',
+    bg: 'var(--status-warn-bg, #F9EFDA)',
+    fg: 'var(--status-warn-fg, #874605)',
+    border: 'color-mix(in srgb, var(--status-warn-fg, #874605) 26%, transparent)',
   },
   err: {
-    bg: 'var(--status-err-bg, #FCEAEE)',
-    fg: 'var(--status-err-fg, #B6263A)',
-    border: 'var(--status-err-fg, #B6263A)',
+    bg: 'var(--status-err-bg, #FCE9ED)',
+    fg: 'var(--status-err-fg, #AA1D33)',
+    border: 'color-mix(in srgb, var(--status-err-fg, #AA1D33) 26%, transparent)',
   },
 };
 
-export const HAIRLINE_BORDER = 'var(--border-line, rgba(36, 33, 29, 0.12))';
+export const HAIRLINE_BORDER = 'var(--border-subtle, rgba(28, 27, 25, 0.055))';
 
 export function focusClass(isFocused: boolean, baseClass = ''): string {
   const focusTokens = isFocused ? 'is-focused omni-focus-ring' : '';
@@ -194,19 +210,23 @@ export interface FocusButtonProps {
   onFocus?: (id: string) => void;
   onActivate?: () => void;
   selected?: boolean;
+  disabled?: boolean;
   tone?: ToneKind;
-  surface?: 'canvas' | 'surface' | 'soft';
+  surface?: 'canvas' | 'surface' | 'soft' | 'ghost';
   role?: React.AriaRole;
   ariaChecked?: boolean;
+  ariaLabel?: string;
+  ariaPressed?: boolean;
   className?: string;
   style?: React.CSSProperties;
   children: React.ReactNode;
 }
 
-const SURFACE_BG: Record<'canvas' | 'surface' | 'soft', string> = {
+const SURFACE_BG: Record<'canvas' | 'surface' | 'soft' | 'ghost', string> = {
   canvas: 'var(--bg-canvas, #F6F5F3)',
   surface: 'var(--bg-surface, #FCFBF9)',
-  soft: 'var(--bg-soft, #F1EFEC)',
+  soft: 'var(--bg-soft, #E6E2DA)',
+  ghost: 'transparent',
 };
 
 export const FocusButton: React.FC<FocusButtonProps> = ({
@@ -216,10 +236,13 @@ export const FocusButton: React.FC<FocusButtonProps> = ({
   onFocus,
   onActivate,
   selected = false,
+  disabled = false,
   tone = 'neutral',
-  surface = 'canvas',
+  surface = 'soft',
   role,
   ariaChecked,
+  ariaLabel,
+  ariaPressed,
   className = '',
   style,
   children,
@@ -231,15 +254,23 @@ export const FocusButton: React.FC<FocusButtonProps> = ({
     <button
       id={id}
       type="button"
+      disabled={disabled}
       role={role}
+      aria-label={ariaLabel}
       aria-checked={ariaChecked}
+      aria-pressed={ariaPressed ?? (role ? undefined : selected)}
       data-focused={isFocused ? 'true' : undefined}
-      {...focusableProps(focusId, activeFocusId, onFocus, onActivate)}
-      className={focusClass(isFocused, `cursor-pointer rounded-md border transition-colors ${className}`)}
+      {...focusableProps(focusId, activeFocusId, onFocus, disabled ? undefined : onActivate)}
+      className={focusClass(
+        isFocused,
+        `rounded-[8px] transition-colors ${
+          disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:brightness-[0.97]'
+        } ${className}`,
+      )}
       style={{
         backgroundColor: selected ? toneStyle.bg : SURFACE_BG[surface],
-        color: selected ? toneStyle.fg : 'var(--text-primary, #222120)',
-        borderColor: selected ? toneStyle.border : HAIRLINE_BORDER,
+        color: selected ? toneStyle.fg : 'var(--text-primary, #1C1B19)',
+        boxShadow: selected ? `inset 0 0 0 1px ${toneStyle.border}` : undefined,
         ...style,
       }}
     >
@@ -253,8 +284,8 @@ export const SectionLabel: React.FC<{ children: React.ReactNode; className?: str
   className = '',
 }) => (
   <div
-    className={`font-mono text-[11px] font-semibold tracking-wider uppercase ${className}`}
-    style={{ color: 'var(--text-muted, #66625D)' }}
+    className={`text-[12px] font-semibold tracking-[0.015em] ${className}`}
+    style={{ color: 'var(--text-muted, #59544D)' }}
   >
     {children}
   </div>
@@ -265,6 +296,7 @@ export interface WorkbenchLayoutProps {
   title: string;
   subtitle?: string;
   badge?: string;
+  editorialHeader?: boolean;
   headerActions?: React.ReactNode;
   toolbar?: React.ReactNode;
   leftPane?: React.ReactNode;
@@ -273,6 +305,7 @@ export interface WorkbenchLayoutProps {
   rightPane?: React.ReactNode;
   rightWidthClass?: string;
   footer?: React.ReactNode;
+  testId?: string;
   className?: string;
 }
 
@@ -281,84 +314,102 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
   title,
   subtitle,
   badge,
+  editorialHeader = false,
   headerActions,
   toolbar,
   leftPane,
-  leftWidthClass = 'lg:w-[272px]',
+  leftWidthClass = '@[860px]/workbench:w-[256px]',
   mainPane,
   rightPane,
-  rightWidthClass = 'lg:w-[388px]',
+  rightWidthClass = '@[860px]/workbench:w-[336px]',
   footer,
+  testId,
   className = '',
 }) => {
   const meta = DOMAIN_META[domain];
 
   return (
     <section
-      className={`omni-theme-surface flex h-full min-h-0 flex-col overflow-hidden ${className}`}
+      data-testid={testId}
+      className={`omni-theme-surface @container/workbench flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       style={{
         backgroundColor: 'var(--bg-canvas, #F6F5F3)',
-        color: 'var(--text-primary, #222120)',
+        color: 'var(--text-primary, #1C1B19)',
       }}
     >
-      <header
-        className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3"
-        style={{ backgroundColor: SURFACE_BG.surface, borderColor: HAIRLINE_BORDER }}
-      >
-        <div className="flex min-w-0 items-center gap-3">
-          <span
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold tracking-wide uppercase"
-            style={{
-              color: meta.colorVar,
-              borderColor: HAIRLINE_BORDER,
-              backgroundColor: SURFACE_BG.soft,
-            }}
-          >
-            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: meta.colorVar }} />
-            {badge ?? meta.label}
-          </span>
+      {/* Unified Quiet Workbench Header + Optional Integrated Toolbar */}
+      <div className="shrink-0 border-b" style={{ borderColor: HAIRLINE_BORDER }}>
+        <header className="flex flex-wrap items-center justify-between gap-4 px-6 pt-4 pb-3">
           <div className="min-w-0">
-            <h1 className="truncate text-[15px] font-semibold tracking-tight">{title}</h1>
+            <div className="flex items-center gap-2.5">
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: meta.colorVar }}
+                aria-hidden="true"
+              />
+              <h1
+                className={`truncate text-[20px] leading-snug font-bold tracking-tight ${
+                  editorialHeader ? 'omni-editorial-title text-[22px]' : ''
+                }`}
+              >
+                {title}
+              </h1>
+              {badge ? (
+                <span
+                  className="hidden sm:inline-flex shrink-0 items-center rounded-full px-2.5 py-0.5 font-mono text-[12px] font-medium"
+                  style={{
+                    backgroundColor: 'var(--bg-soft, #E6E2DA)',
+                    color: 'var(--text-muted, #59544D)',
+                  }}
+                >
+                  {badge}
+                </span>
+              ) : null}
+            </div>
             {subtitle ? (
-              <p className="truncate text-xs" style={{ color: 'var(--text-muted, #66625D)' }}>
+              <p
+                className="mt-0.5 truncate pl-4.5 text-[13px]"
+                style={{ color: 'var(--text-muted, #59544D)' }}
+              >
                 {subtitle}
               </p>
             ) : null}
           </div>
-        </div>
-        {headerActions ? <div className="flex flex-wrap items-center gap-2">{headerActions}</div> : null}
-      </header>
 
-      {toolbar ? (
-        <div
-          className="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-2"
-          style={{ backgroundColor: SURFACE_BG.soft, borderColor: HAIRLINE_BORDER }}
-        >
-          {toolbar}
-        </div>
-      ) : null}
+          {headerActions ? (
+            <div className="flex flex-wrap items-center gap-2">{headerActions}</div>
+          ) : null}
+        </header>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
+        {toolbar ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-6 pb-3">
+            {toolbar}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Responsive Split Stage: scrolls cleanly when stacked (<860px, e.g. F8 dock open at 1280x800) */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto @[860px]/workbench:flex-row @[860px]/workbench:overflow-hidden">
         {leftPane ? (
           <aside
-            className={`flex min-h-0 shrink-0 flex-col overflow-y-auto border-b lg:border-r lg:border-b-0 ${leftWidthClass}`}
-            style={{ backgroundColor: SURFACE_BG.surface, borderColor: HAIRLINE_BORDER }}
+            className={`flex w-full shrink-0 flex-col border-b @[860px]/workbench:min-h-0 @[860px]/workbench:overflow-y-auto @[860px]/workbench:border-r @[860px]/workbench:border-b-0 ${leftWidthClass}`}
+            style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
           >
             {leftPane}
           </aside>
         ) : null}
 
         <main
-          className="min-h-0 min-w-0 flex-1 overflow-y-auto"
-          style={{ backgroundColor: SURFACE_BG.canvas }}
+          className="flex min-h-[440px] min-w-0 shrink-0 flex-col @[860px]/workbench:min-h-0 @[860px]/workbench:flex-1 @[860px]/workbench:shrink @[860px]/workbench:overflow-y-auto"
+          style={{ backgroundColor: 'var(--bg-canvas, #F6F5F3)' }}
         >
           {mainPane}
         </main>
 
         {rightPane ? (
           <aside
-            className={`flex min-h-0 shrink-0 flex-col overflow-y-auto border-t lg:border-t-0 lg:border-l ${rightWidthClass}`}
-            style={{ backgroundColor: SURFACE_BG.surface, borderColor: HAIRLINE_BORDER }}
+            className={`flex w-full shrink-0 flex-col border-t @[860px]/workbench:min-h-0 @[860px]/workbench:overflow-y-auto @[860px]/workbench:border-t-0 @[860px]/workbench:border-l ${rightWidthClass}`}
+            style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
           >
             {rightPane}
           </aside>
@@ -367,11 +418,11 @@ export const WorkbenchLayout: React.FC<WorkbenchLayoutProps> = ({
 
       {footer ? (
         <footer
-          className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-1.5 font-mono text-[11px]"
+          className="flex flex-wrap items-center justify-between gap-2 border-t px-6 py-1.5 font-mono text-[12px]"
           style={{
-            backgroundColor: SURFACE_BG.surface,
+            backgroundColor: 'var(--bg-surface, #FCFBF9)',
             borderColor: HAIRLINE_BORDER,
-            color: 'var(--text-muted, #66625D)',
+            color: 'var(--text-muted, #59544D)',
           }}
         >
           {footer}

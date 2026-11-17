@@ -1,4 +1,4 @@
-"""Offline contract, safe-degradation, and parser tests for plugin-magpie-agent."""
+"""Offline contract, routing write-back, safety, and lifecycle tests for plugin-magpie-agent."""
 
 from __future__ import annotations
 
@@ -16,9 +16,6 @@ import pytest
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_DIR.parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
 from omnidesk_sdk import BasePlugin, PluginContext, invoke_lifecycle_hook  # noqa: E402
 
 
@@ -53,6 +50,8 @@ def test_manifest_matches_spec_and_schema() -> None:
         "llm.chat.v1",
         "llm.translate.v1",
     }
+    assert set(manifest["consumes"]) == {"recommend.feed.v1", "media.playlist.v1"}
+    assert set(manifest["permissions"]) == {"process:magpie", "network:loopback", "config:read", "config:write", "secret:vault"}
 
     allowed_top = set(schema["properties"].keys())
     assert set(manifest.keys()).issubset(allowed_top)
@@ -63,13 +62,24 @@ def test_manifest_matches_spec_and_schema() -> None:
     assert all(cap_re.match(cap) for cap in manifest["provides"])
 
     fields = {item["key"]: item for item in manifest["config_schema"]}
-    assert set(fields.keys()) == {"magpie_bin", "routing_strategy", "gateway_key"}
+    assert set(fields.keys()) == {
+        "magpie_bin",
+        "gateway_url",
+        "default_group",
+        "routing_strategy",
+        "stays_policy",
+        "request_timeout_ms",
+        "gateway_key",
+    }
     assert fields["magpie_bin"]["type"] == "string"
     assert fields["magpie_bin"]["default"] == "magpie"
+    assert fields["gateway_url"]["default"] == "http://127.0.0.1:3425"
+    assert fields["default_group"]["default"] == "omnidesk-active"
     assert fields["routing_strategy"]["type"] == "select"
     assert fields["routing_strategy"]["default"] == "order"
     assert fields["routing_strategy"]["options"] == ["manual", "order", "smart", "usage", "pace"]
     assert fields["gateway_key"]["type"] == "secret"
+    assert fields["gateway_key"]["default"] == ""
 
 
 @pytest.mark.asyncio
@@ -93,8 +103,8 @@ async def test_safe_degradation_when_magpie_missing_or_unconfigured(tmp_path: Pa
     health = await invoke_lifecycle_hook(plugin.on_health_check)
     assert health["ok"] is True
     assert health["magpie_bin_found"] is False
-    assert ctx.capabilities.has("llm.router.v1")
-    assert not ctx.capabilities.has("llm.chat.v1")
+    for cap in manifest["provides"]:
+        assert ctx.capabilities.has(cap)
 
     for action, list_key in (
         ("current_route", None),
@@ -119,7 +129,7 @@ async def test_safe_degradation_when_magpie_missing_or_unconfigured(tmp_path: Pa
 
     set_res = await ctx.capabilities.call("llm.router.v1", {"action": "set_route", "model_id": "a/b"})
     assert set_res.ok is False
-    assert set_res.data["error_code"] == "not_implemented"
+    assert set_res.data["error_code"] == "service_offline"
 
     bad_res = await ctx.capabilities.call("llm.router.v1", {"action": "unknown"})
     assert bad_res.ok is False
@@ -284,7 +294,6 @@ else:
         assert route_res.data["routing"] == "smart"
         assert route_res.data["stays"] == "session"
 
-        # Verify columnar `magpie group <id>` format ignores rules/classifier/self-header.
         col_output = "\n".join(
             [
                 "2026/11/16 23:53:30 plugin: log line ignored",

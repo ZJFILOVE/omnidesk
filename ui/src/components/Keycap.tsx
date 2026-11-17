@@ -14,9 +14,9 @@ export interface KeycapProps {
 }
 
 const SIZE_CLASSES: Record<NonNullable<KeycapProps['size']>, string> = {
-  xs: 'px-1 py-[1px] text-[10px] leading-none rounded-[4px] min-w-[16px] h-[17px]',
-  sm: 'px-1.5 py-[2px] text-[11px] leading-none rounded-[5px] min-w-[20px] h-[20px]',
-  md: 'px-2 py-1 text-xs leading-none rounded-[6px] min-w-[24px] h-[24px]',
+  xs: 'px-1.5 py-[2px] text-[11px] leading-none rounded-[5px] min-w-[19px] h-[19px]',
+  sm: 'px-1.5 py-[2px] text-[11.5px] leading-none rounded-[5px] min-w-[21px] h-[21px]',
+  md: 'px-2 py-1 text-[12px] leading-none rounded-[6px] min-w-[24px] h-[24px]',
 };
 
 export function Keycap({
@@ -35,9 +35,9 @@ export function Keycap({
   const toneStyle =
     tone === 'accent'
       ? {
-          borderColor: `color-mix(in srgb, ${accentColor} 55%, var(--keycap-border))`,
+          borderColor: `color-mix(in srgb, ${accentColor} 45%, var(--keycap-border))`,
           color: accentColor,
-          backgroundColor: `color-mix(in srgb, ${accentColor} 10%, var(--keycap-bg))`,
+          backgroundColor: `color-mix(in srgb, ${accentColor} 11%, var(--keycap-bg))`,
         }
       : undefined;
 

@@ -63,7 +63,6 @@ function assignHints(targets: HintOverlayTarget[]): AssignedHint[] {
   const allValidShort = normalizedLabels.every((lbl) => SHORT_CODE_RE.test(lbl));
   const uniqueShort = new Set(normalizedLabels).size === normalizedLabels.length;
 
-  // Check prefix-freeness when using caller-provided 1-2 char labels
   const prefixFree =
     allValidShort &&
     uniqueShort &&
@@ -195,7 +194,10 @@ export function HintOverlay({ open, targets, onPick, onClose }: HintOverlayProps
       }}
       className="fixed inset-0 z-40 bg-[var(--backdrop-scrim)]/45"
     >
-      <div className="pointer-events-none fixed top-3 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-[var(--bg-surface)] px-3.5 py-1.5 text-xs text-[var(--text-primary)] shadow-md">
+      <div
+        style={{ boxShadow: 'var(--shadow-elevated)' }}
+        className="pointer-events-none fixed top-3 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-4 py-1.5 text-[12.5px] text-[var(--text-primary)]"
+      >
         <Crosshair className="h-3.5 w-3.5 text-[var(--focus-ring)]" aria-hidden="true" />
         <span className="font-medium">字母闪跳</span>
         {typed ? (
@@ -208,17 +210,18 @@ export function HintOverlay({ open, targets, onPick, onClose }: HintOverlayProps
         <span className="text-[11px] text-[var(--text-subtle)]">
           {matchingCount}/{assigned.length}
         </span>
-        <button
-          type="button"
-          onClick={() => {
-            setTyped('');
-            onClose();
-          }}
-          aria-label="退出字母闪跳"
-          className="pointer-events-auto inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
-        >
-          <X className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
+          <button
+            type="button"
+            onClick={() => {
+              setTyped('');
+              onClose();
+            }}
+            aria-label="退出字母闪跳"
+            title="退出字母闪跳 (Esc)"
+            className="pointer-events-auto inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-full text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
       </div>
 
       {assigned.map(({ target, code, showLabel }) => {
@@ -240,20 +243,20 @@ export function HintOverlay({ open, targets, onPick, onClose }: HintOverlayProps
             }}
             style={{ left: `${target.x}px`, top: `${target.y}px` }}
             className={[
-              'fixed -translate-x-1/2 -translate-y-1/2 inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-xs shadow-sm transition-opacity',
+              'fixed -translate-x-1/2 -translate-y-1/2 inline-flex cursor-pointer items-center gap-1.5 rounded-[8px] border px-2 py-0.5 text-xs shadow-sm transition-opacity',
               isMatch
-                ? 'border-[var(--focus-ring)] bg-[var(--bg-surface)] text-[var(--text-primary)] ring-2 ring-[var(--focus-glow)]'
+                ? 'border-[var(--focus-ring)] bg-[var(--bg-elevated)] text-[var(--text-primary)] ring-2 ring-[var(--focus-glow)]'
                 : 'pointer-events-none border-[var(--border-line)] bg-[var(--bg-soft)] text-[var(--text-subtle)] opacity-25',
             ].join(' ')}
           >
-            <kbd className="rounded border border-[var(--keycap-border)] bg-[var(--keycap-bg)] px-1.5 py-0.5 font-mono text-[11px] font-bold text-[var(--keycap-fg)] shadow-[0_1px_0_var(--keycap-shadow)]">
+            <kbd className="omni-keycap rounded-[4px] px-1.5 py-0.5 text-[11px] font-bold">
               {matchedPrefix && (
                 <span className="text-[var(--focus-ring)]">{matchedPrefix}</span>
               )}
               <span>{remainingCode}</span>
             </kbd>
             {showLabel && (
-              <span className="max-w-[140px] truncate text-[11px] font-medium text-[var(--text-primary)]">
+              <span className="max-w-[148px] truncate text-[11.5px] font-medium text-[var(--text-primary)]">
                 {target.label}
               </span>
             )}

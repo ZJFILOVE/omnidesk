@@ -1,0 +1,20 @@
+{
+  "id": "scholar_blog",
+  "name": "学者个人博客 (RSS/Atom)",
+  "category": "blog",
+  "format": "xml",
+  "feed": {
+    "url": "https://lilianweng.github.io/index.xml",
+    "max_items": 20
+  },
+  "article": {
+    "url": "{{url}}",
+    "mode": "readability",
+    "body_selector": "article, .post-content, main",
+    "tags": [
+      "Blog",
+      "ML",
+      "Research"
+    ]
+  }
+}

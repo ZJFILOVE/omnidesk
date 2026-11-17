@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "id": "plugin-asr-funasr",
+  "name": "FunASR SenseVoiceSmall Offline",
+  "version": "0.1.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "provider",
+  "domain": "core",
+  "author": "OmniDesk",
+  "description": "Local Vulkan/CPU FunASR SenseVoiceSmall chunked offline speech recognition with checkpoint resume (speech.asr.v1).",
+  "provides": [
+    "speech.asr.v1"
+  ],
+  "consumes": [],
+  "permissions": [
+    "process:funasr",
+    "process:ffmpeg",
+    "gpu:vulkan",
+    "fs:user_mount",
+    "config:read",
+    "config:write"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "funasr_bin",
+      "label": "FunASR 可执行文件路径",
+      "type": "string",
+      "default": "llama-funasr-sensevoice",
+      "description": "Executable name on PATH or absolute path to llama-funasr-sensevoice"
+    },
+    {
+      "key": "model_dir",
+      "label": "SenseVoice 模型目录",
+      "type": "string",
+      "default": "",
+      "description": "User-configured directory containing SenseVoice GGUF model files (no hardcoded path)"
+    },
+    {
+      "key": "device",
+      "label": "推理后端设备",
+      "type": "select",
+      "default": "vulkan",
+      "options": [
+        "vulkan",
+        "cpu"
+      ],
+      "description": "Inference backend device passed to llama-funasr-sensevoice (--backend)"
+    },
+    {
+      "key": "ffmpeg_bin",
+      "label": "FFmpeg 路径",
+      "type": "string",
+      "default": "ffmpeg",
+      "description": "Executable name on PATH or absolute path to ffmpeg"
+    },
+    {
+      "key": "ffprobe_bin",
+      "label": "FFprobe 路径",
+      "type": "string",
+      "default": "ffprobe",
+      "description": "Executable name on PATH or absolute path to ffprobe"
+    },
+    {
+      "key": "chunk_seconds",
+      "label": "分块切片时长（秒）",
+      "type": "int",
+      "default": 300,
+      "description": "Chunk duration in seconds for checkpointed offline transcription (default 300)"
+    },
+    {
+      "key": "output_root",
+      "label": "字幕输出根目录（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional confinement root directory for output SRT files; defaults to media directory"
+    },
+    {
+      "key": "max_concurrency",
+      "label": "最大并发任务数",
+      "type": "int",
+      "default": 1,
+      "description": "Maximum number of concurrent ASR transcription jobs (1-16)"
+    }
+  ]
+}

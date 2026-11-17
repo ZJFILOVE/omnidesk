@@ -9,6 +9,7 @@ import stat
 import sys
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -17,7 +18,11 @@ from omnidesk_core import (
     FAULT_TOPIC,
     PLUGIN_STATE_CHANGED_TOPIC,
     BusEvent,
+    CapabilityConflictError,
+    CapabilityRegistration,
+    CapabilityRegistry,
     ErrorCode,
+    InvalidArgumentError,
     OmnideskPaths,
     PluginFaultError,
     PluginManager,
@@ -28,6 +33,7 @@ from omnidesk_core import (
     scaffold_plugin,
     validate_manifest,
 )
+from omnidesk_core.plugins import _CapabilityAdapter
 
 
 def _write_plugin(
@@ -551,3 +557,500 @@ async def test_verify_plugin_lifecycle_and_isolated_pytest(tmp_path: Path) -> No
     assert bad_res.ok is False
     assert bad_res.lifecycle_ok is True
     assert bad_res.tests_ok is False
+
+
+@pytest.mark.asyncio
+async def test_verify_plugin_isolated_staging_preserves_live_sys_modules_and_fails_honestly(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    plugins_root = tmp_path / "plugins"
+    live_dir = _write_plugin(
+        plugins_root,
+        "plugin-live-keep",
+        """
+from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext
+import helper_mod
+
+SENTINEL = object()
+
+class LiveKeepPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        ctx.register_capability("keep.ping.v1", lambda req: CapabilityResult.ok({"tag": helper_mod.TAG}))
+
+def create_plugin():
+    return LiveKeepPlugin()
+""",
+        manifest_overrides={"provides": ["keep.ping.v1"]},
+        extra_files={
+            "helper_mod.py": 'TAG = "live-ok"\n',
+            "tests/test_plugin.py": "def test_ok():\n    assert True\n",
+        },
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_root, paths=paths)
+    await mgr.load_plugin(live_dir)
+    mod_key = "_omnidesk_plugins.plugin_live_keep.plugin"
+    assert mod_key in sys.modules
+    live_mod_before = sys.modules[mod_key]
+    sentinel_before = live_mod_before.SENTINEL
+    helper_before = sys.modules.get("helper_mod")
+
+    # Verifying an already-loaded plugin MUST NOT purge its sys.modules or break the live instance
+    res = await mgr.verify_plugin("plugin-live-keep")
+    assert res.ok is True
+    assert res.lifecycle_ok is True
+    assert res.tests_ok is True
+    assert sys.modules.get(mod_key) is live_mod_before
+    assert sys.modules[mod_key].SENTINEL is sentinel_before
+    if helper_before is not None:
+        assert sys.modules.get("helper_mod") is helper_before
+    assert (await mgr.capabilities.call("keep.ping.v1", {})).data == {"tag": "live-ok"}
+
+    # Verification must fail honestly (never fake PASS) on bad health, crash, or sys.exit(0)
+    bad_health_dir = _write_plugin(
+        plugins_root,
+        "plugin-bad-health",
+        """
+from omnidesk_sdk import BasePlugin
+
+class BadHealth(BasePlugin):
+    async def on_health_check(self):
+        return {"ok": False, "reason": "broken"}
+
+def create_plugin():
+    return BadHealth()
+""",
+    )
+    bad_health_res = await mgr.verify_plugin(bad_health_dir, run_tests=False)
+    assert bad_health_res.ok is False
+    assert bad_health_res.lifecycle_ok is False
+
+    early_exit_dir = _write_plugin(
+        plugins_root,
+        "plugin-early-exit",
+        """
+import sys
+from omnidesk_sdk import BasePlugin
+
+class ExitPlugin(BasePlugin):
+    async def on_load(self, ctx):
+        sys.exit(0)
+
+def create_plugin():
+    return ExitPlugin()
+""",
+    )
+    early_exit_res = await mgr.verify_plugin(early_exit_dir, run_tests=False)
+    assert early_exit_res.ok is False
+    assert early_exit_res.lifecycle_ok is False
+
+    await mgr.unload_all()
+
+
+def test_plugin_context_default_data_dir_uses_paths_never_plugin_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnidesk_sdk import PluginContext
+
+    xdg_data = tmp_path / "xdg-data-root"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
+    plugin_src = tmp_path / "src" / "plugin-example"
+    plugin_src.mkdir(parents=True)
+
+    ctx = PluginContext("plugin-example", plugin_dir=plugin_src)
+    assert ctx.data_dir == xdg_data / "omnidesk" / "plugins" / "plugin-example"
+    assert ctx.data_dir != ctx.plugin_dir
+
+    explicit = tmp_path / "explicit-data"
+    ctx_explicit = PluginContext("plugin-example", plugin_dir=plugin_src, data_dir=explicit)
+    assert ctx_explicit.data_dir == explicit
+
+
+@pytest.mark.asyncio
+async def test_main_serve_passes_state_path_and_persists_state_on_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnidesk_core.__main__ import _serve_runtime
+    from omnidesk_core.control import ControlClient
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+
+    plugins_root = tmp_path / "plugins"
+    _write_plugin(
+        plugins_root,
+        "plugin-srv-state",
+        """
+from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext
+
+class StatePlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        ctx.register_capability("state.ping.v1", lambda req: CapabilityResult.ok({"alive": True}))
+
+def create_plugin():
+    return StatePlugin()
+""",
+        manifest_overrides={"provides": ["state.ping.v1"]},
+    )
+
+    paths = OmnideskPaths.from_env()
+    stop_evt = asyncio.Event()
+    serve_task = asyncio.create_task(_serve_runtime([plugins_root], None, stop_event=stop_evt))
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while not paths.control_socket_path.exists():
+        if asyncio.get_running_loop().time() >= deadline:
+            stop_evt.set()
+            await serve_task
+            pytest.fail("control.sock did not come up")
+        await asyncio.sleep(0.02)
+
+    client = ControlClient(paths=paths)
+    pong = await client.ping()
+    assert pong["ok"] is True
+    assert pong["data"]["plugins"] == 1
+
+    stop_evt.set()
+    rc = await asyncio.wait_for(serve_task, timeout=5.0)
+    assert rc == 0
+
+    state_file = paths.state_dir / "plugins.json"
+    assert state_file.is_file()
+    assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["disabled"] == []
+    assert "plugin-srv-state" in saved["plugins"]
+
+    # Disabled plugin recorded in state_path stays skipped on next serve startup and persists on exit
+    state_file.write_text(json.dumps({"disabled": ["plugin-srv-state"]}), encoding="utf-8")
+    stop_evt2 = asyncio.Event()
+    serve_task2 = asyncio.create_task(_serve_runtime([plugins_root], None, stop_event=stop_evt2))
+    deadline2 = asyncio.get_running_loop().time() + 5.0
+    while not paths.control_socket_path.exists():
+        if asyncio.get_running_loop().time() >= deadline2:
+            stop_evt2.set()
+            await serve_task2
+            pytest.fail("control.sock did not come up on second serve")
+        await asyncio.sleep(0.02)
+    pong2 = await client.ping()
+    assert pong2["ok"] is True
+    listed2 = await client.list_plugins()
+    assert listed2["data"]["plugins"][0]["enabled"] is False
+    assert listed2["data"]["plugins"][0]["state"] == "discovered"
+    stop_evt2.set()
+    assert await asyncio.wait_for(serve_task2, timeout=5.0) == 0
+    saved2 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved2["disabled"] == ["plugin-srv-state"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_manager_load_all_preserves_priority_metadata_and_streaming_resolution(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    plugins_root = tmp_path / "plugins"
+
+    # plugin-alpha-first loads before plugin-zeta-second alphabetically, but has lower priority
+    _write_plugin(
+        plugins_root,
+        "plugin-alpha-first",
+        """
+from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext
+
+class AlphaFirstPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        ctx.register_capability(
+            "shared.search.v1",
+            lambda req: CapabilityResult.ok({"provider": "alpha", **req}),
+            priority=50,
+            metadata={"tier": "fallback", "weights": [1, 2]},
+        )
+        ctx.register_streaming_capability(
+            "shared.stream.v1",
+            self.stream_alpha,
+            priority=50,
+            metadata={"mode": "slow"},
+        )
+        ctx.register_capability(
+            "shared.explicit.v1",
+            lambda req: CapabilityResult.ok({"provider": "alpha-explicit"}),
+            priority=175,
+        )
+
+    async def stream_alpha(self, req: dict, stream):
+        await stream.emit_delta("alpha-chunk")
+        return CapabilityResult.ok({"provider": "alpha-stream"})
+
+def create_plugin():
+    return AlphaFirstPlugin()
+""",
+        manifest_overrides={"provides": ["shared.search.v1", "shared.stream.v1", "shared.explicit.v1"]},
+    )
+
+    _write_plugin(
+        plugins_root,
+        "plugin-zeta-second",
+        """
+from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext
+
+class ZetaSecondPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        ctx.register_capability(
+            "shared.search.v1",
+            lambda req: CapabilityResult.ok({"provider": "zeta", **req}),
+            priority=200,
+            metadata={"tier": "primary", "nested": {"ok": True}},
+        )
+        ctx.register_streaming_capability(
+            "shared.stream.v1",
+            self.stream_zeta,
+            priority=200,
+            metadata={"mode": "fast"},
+        )
+
+    async def stream_zeta(self, req: dict, stream):
+        await stream.emit_delta("zeta-chunk")
+        return CapabilityResult.ok({"provider": "zeta-stream"})
+
+def create_plugin():
+    return ZetaSecondPlugin()
+""",
+        manifest_overrides={"provides": ["shared.search.v1", "shared.stream.v1"]},
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_root, paths=paths)
+    records = await mgr.load_all()
+    assert {r.plugin_id: r.state for r in records} == {
+        "plugin-alpha-first": PluginState.LOADED,
+        "plugin-zeta-second": PluginState.LOADED,
+    }
+
+    # Priority 200 provider wins resolve & invocation even though it loaded second
+    winning_unary = mgr.capabilities.resolve("shared.search.v1")
+    assert isinstance(winning_unary, CapabilityRegistration)
+    assert winning_unary.plugin_id == "plugin-zeta-second"
+    assert winning_unary.priority == 200
+    assert winning_unary.metadata == {"tier": "primary", "nested": {"ok": True}}
+
+    providers = mgr.capabilities.providers_for("shared.search.v1")
+    assert [(p.plugin_id, p.priority, p.metadata) for p in providers] == [
+        ("plugin-zeta-second", 200, {"tier": "primary", "nested": {"ok": True}}),
+        ("plugin-alpha-first", 50, {"tier": "fallback", "weights": [1, 2]}),
+    ]
+
+    unary_res = await mgr.capabilities.call("shared.search.v1", {"q": "hello"})
+    assert unary_res.ok is True
+    assert unary_res.provider_plugin_id == "plugin-zeta-second"
+    assert unary_res.data == {"provider": "zeta", "q": "hello"}
+
+    # Streaming provider also forwards priority & metadata and resolves to priority 200
+    winning_stream = mgr.capabilities.resolve("shared.stream.v1")
+    assert winning_stream.plugin_id == "plugin-zeta-second"
+    assert winning_stream.streaming is True
+    assert winning_stream.priority == 200
+    assert winning_stream.metadata == {"mode": "fast"}
+
+    stream_chunks = [c async for c in mgr.capabilities.stream("shared.stream.v1", {})]
+    assert [c.event for c in stream_chunks] == ["delta", "result"]
+    assert stream_chunks[0].data == "zeta-chunk"
+    assert stream_chunks[-1].result is not None
+    assert stream_chunks[-1].result.provider_plugin_id == "plugin-zeta-second"
+    assert stream_chunks[-1].result.data == {"provider": "zeta-stream"}
+
+    # Explicit non-default priority from load_all() is preserved
+    explicit_reg = mgr.capabilities.resolve("shared.explicit.v1")
+    assert explicit_reg.priority == 175
+
+    # Unloading priority 200 plugin falls back cleanly to priority 50 provider
+    await mgr.unload_plugin("plugin-zeta-second")
+    assert mgr.capabilities.resolve("shared.search.v1").plugin_id == "plugin-alpha-first"
+    assert mgr.capabilities.resolve("shared.stream.v1").plugin_id == "plugin-alpha-first"
+    fallback_res = await mgr.capabilities.call("shared.search.v1", {})
+    assert fallback_res.provider_plugin_id == "plugin-alpha-first"
+    fallback_chunks = [c async for c in mgr.capabilities.stream("shared.stream.v1", {})]
+    assert fallback_chunks[0].data == "alpha-chunk"
+
+    await mgr.unload_all()
+
+
+@pytest.mark.asyncio
+async def test_capability_adapter_forwards_description_metadata_replace_and_fails_closed() -> None:
+    reg = CapabilityRegistry()
+    adapter = _CapabilityAdapter(reg)
+
+    async def stream_cb(req: dict[str, Any], stream: Any) -> dict[str, Any]:
+        await stream.emit_delta("ok")
+        return {"ok": True}
+
+    reg_a = adapter.register_capability(
+        "demo.meta.v1",
+        lambda req: {"v": 1, **req},
+        plugin_id="plugin-a",
+        priority=150,
+        metadata=MappingProxyType({"source": "proxy", "nested": MappingProxyType({"k": 1})}),
+        description="Alpha capability",
+    )
+    assert isinstance(reg_a, CapabilityRegistration)
+    assert reg_a.priority == 150
+    assert reg_a.description == "Alpha capability"
+    assert reg_a.metadata == {"source": "proxy", "nested": {"k": 1}}
+    assert reg_a.streaming is False
+
+    reg_s = adapter.register_streaming_capability(
+        "demo.stream.v1",
+        stream_cb,
+        plugin_id="plugin-a",
+        priority=220,
+        metadata={"channel": "live"},
+        description="Live stream",
+    )
+    assert reg_s.priority == 220
+    assert reg_s.description == "Live stream"
+    assert reg_s.metadata == {"channel": "live"}
+    assert reg_s.streaming is True
+
+    # Adding another provider keeps both, and same-plugin replace=True only replaces itself
+    adapter.register_capability(
+        "demo.meta.v1",
+        lambda req: {"v": 99},
+        plugin_id="plugin-b",
+        priority=100,
+        description="Beta capability",
+    )
+    adapter.register_capability(
+        "demo.meta.v1",
+        lambda req: {"v": 2, **req},
+        plugin_id="plugin-a",
+        priority=300,
+        metadata={"source": "updated"},
+        description="Updated alpha",
+    )
+    providers = reg.providers_for("demo.meta.v1")
+    assert [(p.plugin_id, p.priority, p.description, p.metadata) for p in providers] == [
+        ("plugin-a", 300, "Updated alpha", {"source": "updated"}),
+        ("plugin-b", 100, "Beta capability", {}),
+    ]
+    assert (await reg.call("demo.meta.v1", {"x": 7})).data == {"v": 2, "x": 7}
+
+    # Explicit replace=False conflicts on duplicate registration from the same plugin
+    with pytest.raises(CapabilityConflictError):
+        adapter.register_capability(
+            "demo.meta.v1",
+            lambda req: {"v": 3},
+            plugin_id="plugin-a",
+            replace=False,
+        )
+
+    # Unknown kwargs are rejected rather than silently swallowed
+    for fn in (adapter.register_capability, adapter.register_streaming_capability, adapter.register):
+        with pytest.raises(TypeError):
+            fn("demo.badkw.v1", lambda req: {}, plugin_id="plugin-a", unknown_kw=123)  # type: ignore[call-arg]
+
+    # Invalid priority (bool, float, str, None) fails closed without registering default 100
+    for bad_priority in (True, False, 1.5, "200", None):
+        with pytest.raises(InvalidArgumentError):
+            adapter.register_capability(
+                "demo.invalid.v1",
+                lambda req: {},
+                plugin_id="plugin-a",
+                priority=bad_priority,  # type: ignore[arg-type]
+            )
+        with pytest.raises(InvalidArgumentError):
+            adapter.register_streaming_capability(
+                "demo.invalid.v1",
+                stream_cb,
+                plugin_id="plugin-a",
+                priority=bad_priority,  # type: ignore[arg-type]
+            )
+
+    # Invalid metadata (non-Mapping, non-JSON-serializable, NaN/Inf, circular) fails closed
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    for bad_metadata in (
+        "not-a-mapping",
+        [1, 2],
+        123,
+        {"obj": object()},
+        {"set": {1, 2}},
+        {"nan": float("nan")},
+        {"inf": float("inf")},
+        circular,
+    ):
+        with pytest.raises(InvalidArgumentError):
+            adapter.register_capability(
+                "demo.invalid.v1",
+                lambda req: {},
+                plugin_id="plugin-a",
+                metadata=bad_metadata,  # type: ignore[arg-type]
+            )
+
+    # Invalid description or non-callable handler fails closed
+    with pytest.raises(InvalidArgumentError):
+        adapter.register_capability("demo.invalid.v1", lambda req: {}, plugin_id="plugin-a", description=None)  # type: ignore[arg-type]
+    with pytest.raises(InvalidArgumentError):
+        adapter.register_capability("demo.invalid.v1", "not-callable", plugin_id="plugin-a")  # type: ignore[arg-type]
+
+    assert not reg.has("demo.invalid.v1")
+    assert not reg.has("demo.badkw.v1")
+
+
+@pytest.mark.asyncio
+async def test_plugin_manager_fails_closed_on_invalid_priority_or_metadata(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env({"XDG_CONFIG_HOME": str(tmp_path / "cfg"), "XDG_DATA_HOME": str(tmp_path / "data")})
+    plugins_root = tmp_path / "plugins"
+
+    _write_plugin(
+        plugins_root,
+        "plugin-bad-priority",
+        """
+from omnidesk_sdk import BasePlugin, PluginContext
+
+class BadPriorityPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        ctx.register_capability("ok.before.v1", lambda req: {"ok": True})
+        ctx.register_capability("bad.prio.v1", lambda req: {"ok": True}, priority=True)
+
+def create_plugin():
+    return BadPriorityPlugin()
+""",
+    )
+    _write_plugin(
+        plugins_root,
+        "plugin-bad-metadata",
+        """
+from omnidesk_sdk import BasePlugin, PluginContext
+
+class BadMetaPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        ctx.register_capability("bad.meta.v1", lambda req: {"ok": True}, metadata={"bad": object()})
+
+def create_plugin():
+    return BadMetaPlugin()
+""",
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_root, paths=paths)
+    with pytest.raises(PluginFaultError) as prio_exc:
+        await mgr.load_plugin("plugin-bad-priority", isolate_errors=False)
+    assert isinstance(prio_exc.value.cause, InvalidArgumentError)
+    assert not mgr.capabilities.has("ok.before.v1")
+    assert not mgr.capabilities.has("bad.prio.v1")
+
+    records = await mgr.load_all()
+    by_id = {r.plugin_id: r for r in records}
+    assert by_id["plugin-bad-priority"].state == PluginState.FAULTED
+    assert by_id["plugin-bad-metadata"].state == PluginState.FAULTED
+    assert not mgr.capabilities.has("bad.prio.v1")
+    assert not mgr.capabilities.has("bad.meta.v1")

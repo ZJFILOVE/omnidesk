@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "id": "plugin-bilibili",
+  "name": "Bilibili Media Workspace",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "media",
+  "author": "OmniDesk",
+  "description": "Bilibili 推荐/动态/追番/直播/搜索媒体源、yt-dlp/playurl 真实流解析、扫码鉴权与弹幕/双语字幕联动。",
+  "provides": [
+    "media.source.v1"
+  ],
+  "consumes": [
+    "web.cookies.v1",
+    "speech.asr.v1",
+    "llm.translate.v1",
+    "player.timeline.v1"
+  ],
+  "permissions": [
+    "network:wan",
+    "process:yt-dlp",
+    "config:read",
+    "config:write",
+    "secret:vault"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "cookie_header",
+      "label": "Bilibili Cookie (SESSDATA 等)",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault; never logged or written to plain config."
+    },
+    {
+      "key": "quality",
+      "label": "默认首选清晰度",
+      "type": "select",
+      "default": "1080p",
+      "options": [
+        "auto",
+        "4k",
+        "1080p60",
+        "1080p+",
+        "1080p",
+        "720p",
+        "480p",
+        "360p"
+      ],
+      "description": "Preferred stream quality; returns quality_unavailable when requested tier (e.g. 4K/VIP) is unavailable."
+    },
+    {
+      "key": "api_base",
+      "label": "Bilibili API Base URL",
+      "type": "string",
+      "default": "https://api.bilibili.com",
+      "description": "Official Bilibili API base URL (only bilibili.com/b23.tv or explicit loopback test endpoint allowed)."
+    },
+    {
+      "key": "ytdlp_bin",
+      "label": "yt-dlp 可执行文件路径",
+      "type": "string",
+      "default": "yt-dlp",
+      "description": "Executable name on PATH or absolute path to yt-dlp for stream resolution."
+    },
+    {
+      "key": "proxy",
+      "label": "代理地址（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional explicit HTTP/HTTPS/SOCKS proxy URL; when empty, HTTP(S)_PROXY / ALL_PROXY / NO_PROXY environment variables are honored for WAN requests while loopback API bases stay direct."
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "网络请求超时（秒）",
+      "type": "int",
+      "default": 10,
+      "description": "Finite HTTP and subprocess timeout in seconds."
+    },
+    {
+      "key": "max_retries",
+      "label": "有限重试次数",
+      "type": "int",
+      "default": 2,
+      "description": "Bounded retry count for transient HTTP failures."
+    }
+  ]
+}

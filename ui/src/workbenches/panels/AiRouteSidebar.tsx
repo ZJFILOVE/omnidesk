@@ -1,5 +1,7 @@
 import React from 'react';
-import { FocusButton, HAIRLINE_BORDER, SectionLabel } from '../../components/WorkbenchLayout';
+import { RefreshCw } from 'lucide-react';
+import { FocusButton, HAIRLINE_BORDER } from '../../components/WorkbenchLayout';
+import { PanelSectionHeading } from '../../components/WorkbenchPrimitives';
 import { AI_ARCHIVE_SNAPSHOT, type MagpieRouteState } from '../../data/mock';
 
 const EFFORT_OPTIONS: MagpieRouteState['effort'][] = ['low', 'medium', 'high', 'xhigh'];
@@ -26,9 +28,9 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
   onSelectStrategy,
   onRehydrate,
 }) => (
-  <div className="flex flex-col gap-4 p-4">
-    <div className="flex flex-col gap-2">
-      <SectionLabel>Magpie 模型路由控制</SectionLabel>
+  <div className="flex flex-col gap-5 p-4.5">
+    <div className="flex flex-col gap-2.5">
+      <PanelSectionHeading title="Magpie 模型路由" meta={route.activeGroup} />
       <div className="flex flex-col gap-1">
         {route.availableModels.map((model) => {
           const selected = route.primaryModel === model;
@@ -41,7 +43,8 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
               onActivate={() => onSelectModel(model)}
               selected={selected}
               tone="core"
-              className="px-2.5 py-1.5 text-left font-mono text-[11px]"
+              surface={selected ? 'canvas' : 'ghost'}
+              className="omni-focus-row px-3 py-2 text-left font-mono text-[12px]"
             >
               {selected ? '● ' : '○ '}
               {model}
@@ -51,13 +54,10 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
       </div>
 
       <div className="mt-1">
-        <div
-          className="mb-1 font-mono text-[10px] uppercase"
-          style={{ color: 'var(--text-muted, #66625D)' }}
-        >
+        <div className="mb-1.5 text-[12px] font-medium text-[var(--text-muted)]">
           推理强度 (Effort)
         </div>
-        <div className="grid grid-cols-4 gap-1">
+        <div className="grid grid-cols-4 gap-1.5">
           {EFFORT_OPTIONS.map((effort) => (
             <FocusButton
               key={effort}
@@ -67,7 +67,8 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
               onActivate={() => onSelectEffort(effort)}
               selected={route.effort === effort}
               tone="core"
-              className="py-1 font-mono text-[10px]"
+              surface="canvas"
+              className="py-1.5 font-mono text-[12px]"
             >
               {effort}
             </FocusButton>
@@ -76,13 +77,10 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
       </div>
 
       <div className="mt-1">
-        <div
-          className="mb-1 font-mono text-[10px] uppercase"
-          style={{ color: 'var(--text-muted, #66625D)' }}
-        >
+        <div className="mb-1.5 text-[12px] font-medium text-[var(--text-muted)]">
           调度策略 (Strategy)
         </div>
-        <div className="grid grid-cols-4 gap-1">
+        <div className="grid grid-cols-4 gap-1.5">
           {STRATEGY_OPTIONS.map((strategy) => (
             <FocusButton
               key={strategy}
@@ -92,7 +90,8 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
               onActivate={() => onSelectStrategy(strategy)}
               selected={route.strategy === strategy}
               tone="core"
-              className="py-1 font-mono text-[10px]"
+              surface="canvas"
+              className="py-1.5 font-mono text-[12px]"
             >
               {strategy}
             </FocusButton>
@@ -101,11 +100,11 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
       </div>
     </div>
 
-    <div className="flex flex-col gap-2 border-t pt-3" style={{ borderColor: HAIRLINE_BORDER }}>
-      <SectionLabel>实时订阅额度</SectionLabel>
+    <div className="flex flex-col gap-2.5 border-t pt-4" style={{ borderColor: HAIRLINE_BORDER }}>
+      <PanelSectionHeading title="实时订阅额度" />
       {route.quotas.map((q) => (
-        <div key={q.model} className="text-xs">
-          <div className="flex justify-between font-mono text-[10px]">
+        <div key={q.model} className="text-[12px]">
+          <div className="flex justify-between font-mono text-[12px] text-[var(--text-secondary)]">
             <span>
               {q.provider} · {q.model}
             </span>
@@ -114,12 +113,12 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
             </span>
           </div>
           <div
-            className="mt-1 h-1.5 overflow-hidden rounded-full"
-            style={{ backgroundColor: 'var(--bg-soft, #F1EFEC)' }}
+            className="mt-1.5 h-1.5 overflow-hidden rounded-full"
+            style={{ backgroundColor: 'var(--bg-soft)' }}
           >
             <div
               className="h-full rounded-full"
-              style={{ width: `${q.usedPct}%`, backgroundColor: 'var(--domain-core, #AC5F0C)' }}
+              style={{ width: `${q.usedPct}%`, backgroundColor: 'var(--domain-core)' }}
             />
           </div>
         </div>
@@ -127,21 +126,23 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
     </div>
 
     <div
-      className="flex flex-col gap-2 rounded-lg border p-3 text-xs"
-      style={{ backgroundColor: 'var(--bg-soft, #F1EFEC)', borderColor: HAIRLINE_BORDER }}
+      className="flex flex-col gap-2.5 rounded-[14px] p-4 text-[12.5px]"
+      style={{ backgroundColor: 'var(--bg-canvas)' }}
     >
-      <div className="flex items-center justify-between font-semibold">
+      <div className="flex items-center justify-between font-semibold text-[var(--text-primary)]">
         <span>双仓历史回灌镜像</span>
-        <span className="font-mono text-[10px]">{AI_ARCHIVE_SNAPSHOT.branchStatus}</span>
+        <span className="font-mono text-[12px] text-[var(--text-muted)]">
+          {AI_ARCHIVE_SNAPSHOT.branchStatus}
+        </span>
       </div>
-      <div className="font-mono text-[10px]" style={{ color: 'var(--text-muted, #66625D)' }}>
+      <div className="space-y-0.5 font-mono text-[12px] text-[var(--text-muted)]">
         <div>{AI_ARCHIVE_SNAPSHOT.obsidianRepo}</div>
         <div>{AI_ARCHIVE_SNAPSHOT.musicRepo}</div>
         <div>
           自 {AI_ARCHIVE_SNAPSHOT.sinceDate} · 同步于 {archiveSyncTime}
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-1 font-mono text-[10px]">
+      <div className="grid grid-cols-2 gap-1 font-mono text-[12px] text-[var(--text-secondary)]">
         <span>Music: {AI_ARCHIVE_SNAPSHOT.counts.musicDaily}</span>
         <span>YouTube: {AI_ARCHIVE_SNAPSHOT.counts.youtubeDaily}</span>
         <span>Journal: {AI_ARCHIVE_SNAPSHOT.counts.journalDaily}</span>
@@ -152,10 +153,11 @@ export const AiRouteSidebar: React.FC<AiRouteSidebarProps> = ({
         activeFocusId={activeFocusId}
         onFocus={onFocus}
         onActivate={onRehydrate}
-        surface="surface"
-        className="px-2.5 py-1 text-[11px] font-medium"
+        surface="soft"
+        className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
       >
-        增量快进同步双仓 (ff-only)
+        <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+        <span>增量快进同步双仓 (ff-only)</span>
       </FocusButton>
     </div>
   </div>

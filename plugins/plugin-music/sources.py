@@ -1,0 +1,386 @@
+"""MediaSource implementation backed by real Daily 5 archives and qwen-translator lyrics."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
+
+from omnidesk_sdk import LyricLine, MediaItem, MediaSource
+
+if __package__:
+    from .state_store import (
+        is_valid_iso_date,
+        read_private_json,
+        resolve_data_root,
+        resolve_interactive_store_path,
+        resolve_repo_dir,
+    )
+    from .qwen_bridge import (
+        QwenModules,
+        fetch_adam_lrc,
+        load_qwen_modules,
+        parse_lrc_to_lyric_lines,
+        read_cached_lyrics,
+    )
+else:
+    from state_store import (
+        is_valid_iso_date,
+        read_private_json,
+        resolve_data_root,
+        resolve_interactive_store_path,
+        resolve_repo_dir,
+    )
+    from qwen_bridge import (
+        QwenModules,
+        fetch_adam_lrc,
+        load_qwen_modules,
+        parse_lrc_to_lyric_lines,
+        read_cached_lyrics,
+    )
+
+_CATEGORIES = ["每日 5 首·最新", "每日 5 首·往期", "每日 5 首·全量", "交互灵感歌单"]
+_PAGE_SIZE = 50
+_NOTES_RE = re.compile(r"<!--\s*AUTO:END\s*-->\s*(.*)$", re.DOTALL)
+_AM_PREFIX_RE = re.compile(r"^(?:am-[a-z]{2}-|ix-am-)(.+)$")
+_URL_SONG_RE = re.compile(r"https?://music\.apple\.com/[a-z]{2}/song/(?:[^/]+/)?([0-9]+)")
+
+
+def normalize_song_id(raw_id: str) -> str:
+    cleaned = (raw_id or "").strip()
+    if cleaned.isdigit():
+        return cleaned
+    if m_pref := _AM_PREFIX_RE.match(cleaned):
+        tail = m_pref.group(1)
+        if tail.isdigit():
+            return tail
+        if "-" in tail and tail.rsplit("-", 1)[-1].isdigit():
+            return tail.rsplit("-", 1)[-1]
+    if m_url := _URL_SONG_RE.search(cleaned):
+        return m_url.group(1)
+    return cleaned
+
+
+def _extract_handwritten_notes(md_path: Path) -> str:
+    if not md_path.is_file() or md_path.is_symlink():
+        return ""
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    match = _NOTES_RE.search(text)
+    return match.group(1).strip() if match else ""
+
+
+class AppleMusicMediaSource(MediaSource):
+    """Domain 1 MediaSource serving verified Daily 5 archives and bilingual lyrics."""
+
+    source_id: str = "plugin-music"
+    display_name: str = "Apple Music · Daily 5 & 双语歌词"
+
+    def __init__(
+        self,
+        *,
+        get_config: Callable[[], Mapping[str, Any]],
+        get_data_dir: Callable[[], Path],
+        get_qwen: Callable[[], QwenModules] | None = None,
+    ) -> None:
+        self._get_config = get_config
+        self._get_data_dir = get_data_dir
+        self._get_qwen = get_qwen
+
+    def categories(self) -> list[str]:
+        return list(_CATEGORIES)
+
+    def _qwen(self) -> QwenModules:
+        if self._get_qwen is not None:
+            return self._get_qwen()
+        cfg = self._get_config()
+        return load_qwen_modules(str(cfg.get("qwen_translator_dir") or ""))
+
+    def _lyrics_dir(self) -> Path:
+        return self._get_data_dir().expanduser().resolve() / "lyrics"
+
+    def _catalog_cache(self) -> dict[str, dict[str, Any]]:
+        path = self._get_data_dir().expanduser().resolve() / "catalog_cache.json"
+        if not path.is_file() or path.is_symlink():
+            return {}
+        try:
+            raw = read_private_json(path)
+        except Exception:
+            return {}
+        tracks = raw.get("tracks")
+        return dict(tracks) if isinstance(tracks, Mapping) else {}
+
+    def _has_cached_lyrics(self, song_id: str) -> bool:
+        ldir = self._lyrics_dir()
+        return any((ldir / f"{song_id}{ext}").is_file() for ext in (".bilingual.lrc", ".lrc", ".txt"))
+
+    def _load_daily_records(self) -> list[tuple[str, list[dict[str, Any]]]]:
+        cfg = self._get_config()
+        data_dir = self._get_data_dir()
+        music_repo = resolve_repo_dir(str(cfg.get("music_daily_dir") or ""), data_dir, "music-daily")
+        vault_repo = resolve_repo_dir(str(cfg.get("obsidian_vault_dir") or ""), data_dir, "obsidian-vault")
+
+        by_date: dict[str, list[dict[str, Any]]] = {}
+        manifest_paths: list[Path] = []
+        if music_repo is not None and (music_repo / "recommendations").is_dir():
+            manifest_paths.extend(sorted((music_repo / "recommendations").glob("*/*/*.json")))
+        elif vault_repo is not None and (vault_repo / "Music" / "Daily" / "manifests").is_dir():
+            manifest_paths.extend(sorted((vault_repo / "Music" / "Daily" / "manifests").glob("*.json")))
+
+        for path in manifest_paths:
+            if path.is_symlink() or not path.is_file() or not is_valid_iso_date(path.stem):
+                continue
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(doc, Mapping) or doc.get("date") != path.stem:
+                continue
+            tracks = doc.get("tracks")
+            if not isinstance(tracks, list):
+                continue
+            notes = (
+                _extract_handwritten_notes(vault_repo / "Music" / "Daily" / f"{path.stem}.md")
+                if vault_repo is not None
+                else ""
+            )
+            cleaned: list[dict[str, Any]] = []
+            for item in tracks:
+                if not isinstance(item, Mapping):
+                    continue
+                am = item.get("apple_music") if isinstance(item.get("apple_music"), Mapping) else {}
+                sid = str(am.get("song_id") or "")
+                title = str(item.get("title") or "").strip()
+                if not sid.isdigit() or not title:
+                    continue
+                cleaned.append({**dict(item), "_notes": notes})
+            if cleaned:
+                cleaned.sort(key=lambda t: int(t.get("position") or 0))
+                by_date[path.stem] = cleaned
+
+        # Merge rehydrated local daily cache if present and not already loaded from git repos.
+        rehydrated_root = resolve_data_root(data_dir) / "curation" / "daily"
+        if rehydrated_root.is_dir():
+            for day_dir in sorted(rehydrated_root.iterdir()):
+                if not day_dir.is_dir() or not is_valid_iso_date(day_dir.name) or day_dir.name in by_date:
+                    continue
+                music_file = day_dir / "music.json"
+                if not music_file.is_file() or music_file.is_symlink():
+                    continue
+                try:
+                    raw = json.loads(music_file.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                items = raw.get("tracks") if isinstance(raw, Mapping) else (raw if isinstance(raw, list) else [])
+                if isinstance(items, list) and items:
+                    by_date[day_dir.name] = [dict(x) for x in items if isinstance(x, Mapping)]
+
+        return sorted(by_date.items(), key=lambda pair: pair[0], reverse=True)
+
+    def _build_daily_media_item(
+        self, day: str, raw: Mapping[str, Any], catalog_cache: Mapping[str, Mapping[str, Any]]
+    ) -> MediaItem | None:
+        am = raw.get("apple_music") if isinstance(raw.get("apple_music"), Mapping) else {}
+        song_id = str(am.get("song_id") or raw.get("song_id") or "").strip()
+        title = str(raw.get("title") or "").strip()
+        if not song_id or not title:
+            return None
+        artist = str(raw.get("artist") or "").strip()
+        album = str(raw.get("album") or "").strip()
+        storefront = str(am.get("storefront") or "cn").strip().lower() or "cn"
+        play_url = str(am.get("url") or f"https://music.apple.com/{storefront}/song/{song_id}")
+        canonical_id = str(raw.get("canonical_id") or (f"{artist}::{title}" if artist else title))
+        analysis_summary = str(raw.get("analysis_summary") or "")
+        listening_cue = str(raw.get("listening_cue") or "")
+        position = raw.get("position")
+        cached = catalog_cache.get(song_id, {})
+        subtitle = f"{artist} · {album}" if artist and album else (artist or album)
+        return MediaItem(
+            id=f"am-{storefront}-{song_id}",
+            source_id=self.source_id,
+            title=title,
+            subtitle=subtitle,
+            creator=artist,
+            kind="music",
+            source_badge=f"每日 5 首 · {day}",
+            cover_url=str(cached.get("cover_url") or ""),
+            play_url=play_url,
+            quality_label=str(cached.get("quality_label") or "Apple Music CN · ALAC"),
+            duration_sec=float(cached.get("duration_sec") or 0.0),
+            has_bilingual_sub=self._has_cached_lyrics(song_id),
+            aspect="1:1",
+            summary=analysis_summary,
+            listening_cue=listening_cue,
+            curation_mode="daily_immutable",
+            business_date=day,
+            extra={
+                "canonical_id": canonical_id,
+                "apple_music": {"song_id": song_id, "storefront": storefront, "url": play_url},
+                "apple_music_song_id": song_id,
+                "song_id": song_id,
+                "album": album,
+                "position": position,
+                "storefront": storefront,
+                "business_date": day,
+                "curation_mode": "daily_immutable",
+                "listening_cue": listening_cue,
+                "analysis_summary": analysis_summary,
+                "handwritten_notes": str(raw.get("_notes") or ""),
+            },
+        )
+
+    def _load_interactive_items(self, catalog_cache: Mapping[str, Mapping[str, Any]]) -> list[MediaItem]:
+        store_path = resolve_interactive_store_path(self._get_data_dir())
+        try:
+            store = read_private_json(store_path)
+        except Exception:
+            return []
+        items: list[MediaItem] = []
+        for playlist in store.get("playlists", []) if isinstance(store.get("playlists"), list) else []:
+            if not isinstance(playlist, Mapping):
+                continue
+            pname = str(playlist.get("name") or "OmniDesk AI 灵感电台")
+            for sid in playlist.get("track_ids", []) if isinstance(playlist.get("track_ids"), list) else []:
+                song_id = str(sid).strip()
+                if not song_id.isdigit():
+                    continue
+                cached = catalog_cache.get(song_id, {})
+                title = str(cached.get("title") or "").strip()
+                if not title:
+                    continue
+                artist = str(cached.get("artist") or "")
+                album = str(cached.get("album") or "")
+                items.append(
+                    MediaItem(
+                        id=f"ix-am-{song_id}",
+                        source_id=self.source_id,
+                        title=title,
+                        subtitle=f"{artist} · {album}" if artist and album else artist,
+                        creator=artist,
+                        kind="music",
+                        source_badge=pname,
+                        cover_url=str(cached.get("cover_url") or ""),
+                        play_url=str(cached.get("url") or f"https://music.apple.com/cn/song/{song_id}"),
+                        quality_label=str(cached.get("quality_label") or "Apple Music CN · ALAC"),
+                        duration_sec=float(cached.get("duration_sec") or 0.0),
+                        has_bilingual_sub=self._has_cached_lyrics(song_id),
+                        aspect="1:1",
+                        curation_mode="interactive_ephemeral",
+                        extra={
+                            "canonical_id": f"{artist}::{title}" if artist else title,
+                            "apple_music_song_id": song_id,
+                            "song_id": song_id,
+                            "playlist_name": pname,
+                            "curation_mode": "interactive_ephemeral",
+                            "storefront": "cn",
+                        },
+                    )
+                )
+        return items
+
+    async def fetch_items(
+        self,
+        category: str = "",
+        query: str = "",
+        page: int = 1,
+        *,
+        force_refresh: bool = False,
+    ) -> list[MediaItem]:
+        if page < 1:
+            return []
+        cat = (category or "").strip()
+        catalog_cache = self._catalog_cache()
+        items: list[MediaItem] = []
+
+        if cat in {"交互灵感歌单", "interactive", "interactive_ephemeral"}:
+            items = self._load_interactive_items(catalog_cache)
+        else:
+            daily_days = self._load_daily_records()
+            if not daily_days:
+                return []
+            latest_date = daily_days[0][0]
+            if cat in {"", "每日 5 首·最新", "latest", "daily_latest"}:
+                selected_days = [daily_days[0]]
+            elif cat in {"每日 5 首·往期", "past", "archive", "daily_past"}:
+                selected_days = [(d, ts) for d, ts in daily_days if d != latest_date]
+            elif cat in {"每日 5 首·全量", "all", "music", "daily_all"}:
+                selected_days = daily_days
+            elif is_valid_iso_date(cat):
+                selected_days = [(d, ts) for d, ts in daily_days if d == cat]
+            else:
+                return []
+
+            for day, tracks in selected_days:
+                for tr in tracks:
+                    if built := self._build_daily_media_item(day, tr, catalog_cache):
+                        items.append(built)
+
+        q = (query or "").strip().casefold()
+        if q:
+            items = [
+                item
+                for item in items
+                if q in " ".join(
+                    [
+                        item.id,
+                        item.title,
+                        item.subtitle,
+                        item.creator,
+                        item.business_date or "",
+                        str(item.extra.get("canonical_id") or ""),
+                        str(item.extra.get("apple_music_song_id") or ""),
+                        str(item.extra.get("analysis_summary") or ""),
+                        str(item.extra.get("listening_cue") or ""),
+                    ]
+                ).casefold()
+            ]
+        start = (page - 1) * _PAGE_SIZE
+        return items[start : start + _PAGE_SIZE]
+
+    async def fetch_lyrics(self, item_id: str) -> list[LyricLine]:
+        song_id = normalize_song_id(item_id)
+        if not song_id:
+            return []
+        qwen = self._qwen()
+        if not qwen.available:
+            return []
+
+        title, artist, album, duration_sec = "", "", "", 0.0
+        for _, tracks in self._load_daily_records():
+            for tr in tracks:
+                am = tr.get("apple_music") if isinstance(tr.get("apple_music"), Mapping) else {}
+                if str(am.get("song_id") or "") == song_id:
+                    title = str(tr.get("title") or "")
+                    artist = str(tr.get("artist") or "")
+                    album = str(tr.get("album") or "")
+                    break
+            if title:
+                break
+
+        cached = self._catalog_cache().get(song_id, {})
+        title = title or str(cached.get("title") or "")
+        artist = artist or str(cached.get("artist") or "")
+        album = album or str(cached.get("album") or "")
+        duration_sec = float(cached.get("duration_sec") or 0.0)
+
+        lines = read_cached_lyrics(
+            song_id=song_id,
+            title=title,
+            artist=artist,
+            album=album,
+            duration_sec=duration_sec,
+            lyrics_cache_dir=self._lyrics_dir(),
+            qwen=qwen,
+        )
+        if lines:
+            return lines
+
+        if song_id.isdigit():
+            raw_lrc = fetch_adam_lrc(song_id, str(self._get_config().get("storefront") or "cn"), qwen)
+            if raw_lrc:
+                return parse_lrc_to_lyric_lines(raw_lrc, qwen)
+        return []

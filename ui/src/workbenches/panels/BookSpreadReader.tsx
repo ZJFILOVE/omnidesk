@@ -1,0 +1,163 @@
+import React, { useRef } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import MarkdownRenderer from '../../components/MarkdownRenderer';
+import SelectionBubble, { type SelectionActionEvent } from '../../components/SelectionBubble';
+import { FocusButton, HAIRLINE_BORDER } from '../../components/WorkbenchLayout';
+import type { BookItem, BookSpread, VocabCard } from '../../data/mock';
+
+export interface BookSpreadReaderProps {
+  book: BookItem;
+  spread: BookSpread;
+  spreadIndex: number;
+  activeVocab?: VocabCard;
+  activeFocusId: string;
+  onFocus: (id: string) => void;
+  onTurnPage: (delta: number) => void;
+  onLookupTerm: (term: string) => void;
+  onLookupEtymology?: (text: string, contextSentence: string) => void;
+  onParseClause?: (text: string, contextSentence: string) => void;
+  onAddToVocab?: (text: string, contextSentence: string) => void;
+  onSendToCompanion?: (text: string, contextSentence: string) => void;
+  onCopySelection?: (text: string) => void;
+  onSelectionAction?: (event: SelectionActionEvent) => void;
+}
+
+export const BookSpreadReader: React.FC<BookSpreadReaderProps> = ({
+  book,
+  spread,
+  spreadIndex,
+  activeVocab,
+  activeFocusId,
+  onFocus,
+  onTurnPage,
+  onLookupTerm,
+  onLookupEtymology,
+  onParseClause,
+  onAddToVocab,
+  onSendToCompanion,
+  onCopySelection,
+  onSelectionAction,
+}) => {
+  const originalColumnRef = useRef<HTMLElement | null>(null);
+
+  return (
+    <div className="flex flex-1 flex-col gap-5 p-6">
+      {/* Quiet Book Folio Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="omni-editorial-title truncate text-[21px] font-bold text-[var(--text-primary)]">
+            {book.title}
+          </h2>
+          <div className="mt-0.5 text-[13px] text-[var(--text-muted)]">
+            {spread.chapterTitle} · {book.author}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <FocusButton
+            focusId="book:nav:prev"
+            activeFocusId={activeFocusId}
+            onFocus={onFocus}
+            onActivate={() => onTurnPage(-1)}
+            surface="surface"
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-[12.5px] font-medium"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>上一跨页</span>
+          </FocusButton>
+          <span className="px-2 font-mono text-[12.5px] text-[var(--text-muted)]">
+            p.{spread.page} ({spreadIndex + 1}/{book.spreads.length})
+          </span>
+          <FocusButton
+            focusId="book:nav:next"
+            activeFocusId={activeFocusId}
+            onFocus={onFocus}
+            onActivate={() => onTurnPage(1)}
+            surface="surface"
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-[12.5px] font-medium"
+          >
+            <span>下一跨页</span>
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </FocusButton>
+        </div>
+      </div>
+
+      {/* Maximized Open-Book Dual-Page Folio Stage */}
+      <div className="grid flex-1 grid-cols-1 gap-4 @[620px]/workbench:grid-cols-2">
+        <section
+          ref={originalColumnRef}
+          data-testid="book-original-column"
+          data-selection-source="original"
+          className="omni-book-gutter-left flex flex-col gap-5 rounded-[16px] p-6 sm:p-8"
+          style={{ backgroundColor: 'var(--bg-surface)' }}
+        >
+          <div
+            className="flex items-center justify-between border-b pb-3 text-[12.5px] font-semibold"
+            style={{ borderColor: HAIRLINE_BORDER, color: 'var(--domain-book)' }}
+          >
+            <span>{spread.leftTitle}</span>
+            <span className="font-mono text-[12px] text-[var(--text-subtle)]">ORIGINAL</span>
+          </div>
+          {spread.leftParagraphs.map((para) => (
+            <div key={para.id} className="flex flex-col gap-3">
+              <MarkdownRenderer content={para.text} />
+              {para.keyTerms?.length ? (
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <span className="text-[12px] text-[var(--text-subtle)]">词元划查：</span>
+                  {para.keyTerms.map((term) => (
+                    <FocusButton
+                      key={`${para.id}:${term}`}
+                      focusId={`book:term:${para.id}:${term}`}
+                      activeFocusId={activeFocusId}
+                      onFocus={onFocus}
+                      onActivate={() => onLookupTerm(term)}
+                      selected={activeVocab?.word.toLowerCase() === term.toLowerCase()}
+                      tone="book"
+                      surface="soft"
+                      className="px-2.5 py-0.5 font-mono text-[12px] font-medium"
+                    >
+                      {term}
+                    </FocusButton>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </section>
+
+        <section
+          data-testid="book-translation-column"
+          data-selection-source="translation"
+          className="flex flex-col gap-5 rounded-[16px] p-6 sm:p-8"
+          style={{
+            backgroundColor: 'var(--bg-surface)',
+            boxShadow: 'var(--shadow-page)',
+          }}
+        >
+          <div
+            className="flex items-center justify-between border-b pb-3 text-[12.5px] font-semibold"
+            style={{ borderColor: HAIRLINE_BORDER, color: 'var(--domain-book)' }}
+          >
+            <span>{spread.rightTitle}</span>
+            <span className="font-mono text-[12px] text-[var(--text-subtle)]">译文对照</span>
+          </div>
+          {spread.rightParagraphs.map((para) => (
+            <MarkdownRenderer key={para.id} content={para.text} muted />
+          ))}
+        </section>
+      </div>
+
+      <SelectionBubble
+        containerRef={originalColumnRef}
+        onLookupEtymology={onLookupEtymology}
+        onParseClause={onParseClause}
+        onAddToVocab={onAddToVocab}
+        onSendToCompanion={onSendToCompanion}
+        onCopy={onCopySelection}
+        onAction={onSelectionAction}
+      />
+    </div>
+  );
+};
+
+export default BookSpreadReader;

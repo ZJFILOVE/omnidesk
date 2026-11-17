@@ -82,6 +82,11 @@ plugins/plugin-<slug>/
 - `gpu:vulkan`：允许推理子进程访问本机 Vulkan GPU 设备
 - `fs:user_mount`：按用户显式配置的路径读写本地目录或 NAS 挂载点
 
+#### 公网代理（`network:wan`）
+- `omnidesk_sdk.SafeHttpClient` 默认读取 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 与 `NO_PROXY`（大小写均支持），并可用 `proxy_url=` 显式覆盖；仅支持 `http://` CONNECT 代理。
+- Tauri 启动 Python 内核时会将上述代理变量加入环境白名单；从 GUI 启动时需确保会话环境中存在这些变量。
+- 代理只作用于公网请求；`network:lan` 插件必须继续使用 `trust_env=False`，避免把 NAS / Radarr / Sonarr 流量送进公网代理。
+
 #### `config_schema` 单项结构
 - `type = "string" | "bool" | "int" | "select"`：持久化至 `0600` 权限的 `ConfigStore`（`~/.config/omnidesk/plugins/<plugin_id>.json`）；当 `type == "select"` 时，`options` 数组必须非空。
 - `type = "secret"`：**绝不写入普通配置文件、前端明文状态或日志**，直接存入 `0600` 权限的 `SecretVault`（`ctx.get_secret(key)` / `ctx.set_secret(key, val)`）。

@@ -106,7 +106,7 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--backdrop-scrim)]"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--backdrop-scrim)] p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) {
           onClose();
@@ -118,25 +118,26 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
         aria-modal="true"
         aria-label="快捷键帮助"
         data-testid="keyboard-help-dialog"
-        className="omni-theme-surface flex max-h-[84vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
+        style={{ boxShadow: 'var(--shadow-elevated)' }}
+        className="omni-theme-surface omni-drawer-motion flex max-h-[84vh] w-full max-w-3xl flex-col overflow-hidden rounded-[18px] bg-[var(--bg-elevated)] text-[var(--text-primary)]"
       >
-        <header className="flex items-center justify-between gap-3 border-b border-[var(--border-line)] bg-[var(--bg-canvas)] px-5 py-3.5">
-          <div className="flex items-center gap-2.5">
+        <header className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-6 py-4">
+          <div className="flex items-center gap-3">
             <Keyboard className="h-4 w-4 text-[var(--focus-ring)]" aria-hidden="true" />
             <div>
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+              <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
                 全键盘操作与快捷键总览
               </h2>
-              <p className="text-xs text-[var(--text-muted)]">
+              <p className="text-[12.5px] text-[var(--text-muted)]">
                 {activeMeta
                   ? `当前工作台：${activeMeta.label} (${activeMeta.shortcut})`
-                  : 'Paper & Graphite 桌面端 · 键盘控制一切'}
+                  : 'Paper & Graphite 桌面端 · 全键盘优先'}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1 rounded border border-[var(--border-line)] bg-[var(--status-ok-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--status-ok-fg)]">
+          <div className="flex items-center gap-2.5">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--status-ok-bg)] px-2.5 py-0.5 text-[12px] font-medium text-[var(--status-ok-fg)]">
               <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
               IME 自动避让
             </span>
@@ -144,42 +145,43 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
               type="button"
               onClick={onClose}
               aria-label="关闭快捷键帮助"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[var(--text-muted)] hover:border-[var(--border-line)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
+              title="关闭快捷键帮助 (Esc / ?)"
+              className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[8px] text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
             >
               <X className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
         </header>
 
-        <div className="grid grid-cols-1 gap-3 overflow-y-auto p-5 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 overflow-y-auto p-6 md:grid-cols-2">
           {SHORTCUT_GROUPS.map((group) => (
             <section
               key={group.id}
-              className="rounded-lg border border-[var(--border-line)] bg-[var(--bg-canvas)] p-3.5"
+              className="rounded-[14px] bg-[var(--bg-canvas)] p-4.5"
             >
-              <div className="mb-2.5 flex items-center gap-2 border-b border-[var(--border-line)] pb-2">
+              <div className="mb-3 flex items-center gap-2 pb-1">
                 <span
                   aria-hidden="true"
                   className="h-2 w-2 rounded-full"
                   style={{ backgroundColor: DOMAIN_CSS_VARS[group.domain] }}
                 />
-                <h3 className="text-xs font-semibold tracking-wide text-[var(--text-primary)]">
+                <h3 className="text-[13.5px] font-semibold text-[var(--text-primary)]">
                   {group.title}
                 </h3>
               </div>
 
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 {group.items.map((item) => (
                   <li
                     key={`${group.id}-${item.keys.join('+')}`}
-                    className="flex items-center justify-between gap-3 text-xs"
+                    className="flex items-center justify-between gap-3 text-[13px]"
                   >
                     <span className="text-[var(--text-muted)]">{item.description}</span>
                     <span className="flex shrink-0 items-center gap-1">
                       {item.keys.map((keyLabel) => (
                         <kbd
                           key={keyLabel}
-                          className="rounded border border-[var(--keycap-border)] bg-[var(--keycap-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--keycap-fg)] shadow-[0_1px_0_var(--keycap-shadow)]"
+                          className="omni-keycap rounded-[5px] px-1.5 py-0.5 text-[12px]"
                         >
                           {keyLabel}
                         </kbd>
@@ -192,8 +194,8 @@ export function KeyboardHelp({ open, onClose, activeWorkbench }: KeyboardHelpPro
           ))}
         </div>
 
-        <footer className="flex items-center justify-between border-t border-[var(--border-line)] bg-[var(--bg-soft)] px-5 py-2.5 text-[11px] text-[var(--text-muted)]">
-          <span>所有焦点始终绑定于稳定 itemId，异步数据刷新绝不丢失当前光标。</span>
+        <footer className="flex items-center justify-between border-t border-[var(--border-subtle)] bg-[var(--bg-sunken)]/55 px-6 py-2.5 text-[12px] text-[var(--text-muted)]">
+          <span>所有焦点始终绑定于稳定节点 ID，异步刷新不丢失当前位置。</span>
           <span>按 Esc 或 ? 关闭</span>
         </footer>
       </div>

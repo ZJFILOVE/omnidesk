@@ -8,7 +8,7 @@
   "kind": "provider",
   "domain": "core",
   "author": "OmniDesk",
-  "description": "Reads local magpie harnesses/models/quotas and routes requests through group/omnidesk-active.",
+  "description": "Reads local magpie harnesses/models/quotas, routes requests through group/omnidesk-active, and drives chat, translation, companion agent, and AI curation.",
   "provides": [
     "llm.router.v1",
     "ai.agent.v1",
@@ -16,7 +16,10 @@
     "llm.chat.v1",
     "llm.translate.v1"
   ],
-  "consumes": [],
+  "consumes": [
+    "recommend.feed.v1",
+    "media.playlist.v1"
+  ],
   "permissions": [
     "process:magpie",
     "network:loopback",
@@ -34,6 +37,20 @@
       "description": "Executable name on PATH or absolute path to magpie"
     },
     {
+      "key": "gateway_url",
+      "label": "Magpie 网关地址（仅限回环）",
+      "type": "string",
+      "default": "http://127.0.0.1:3425",
+      "description": "Loopback-only base URL for Magpie OpenAI-compatible gateway (e.g. http://127.0.0.1:3425)"
+    },
+    {
+      "key": "default_group",
+      "label": "OmniDesk 专属路由组",
+      "type": "string",
+      "default": "omnidesk-active",
+      "description": "Dedicated Magpie group ID managed by OmniDesk (group/omnidesk-active)"
+    },
+    {
       "key": "routing_strategy",
       "label": "路由调度策略",
       "type": "select",
@@ -46,6 +63,27 @@
         "pace"
       ],
       "description": "Magpie group routing policy for group/omnidesk-active"
+    },
+    {
+      "key": "stays_policy",
+      "label": "会话粘性策略",
+      "type": "select",
+      "default": "turn",
+      "options": [
+        "auto",
+        "session",
+        "turn",
+        "off",
+        "strict"
+      ],
+      "description": "Magpie group stays policy for group/omnidesk-active"
+    },
+    {
+      "key": "request_timeout_ms",
+      "label": "推理超时（毫秒）",
+      "type": "int",
+      "default": 60000,
+      "description": "HTTP timeout in milliseconds for Magpie /v1/chat/completions calls"
     },
     {
       "key": "gateway_key",

@@ -1,0 +1,80 @@
+{
+  "schema_version": 2,
+  "id": "plugin-ebook",
+  "name": "Ebook & SM-2 Vocabulary Studio",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "book",
+  "author": "OmniDesk",
+  "description": "Local EPUB/MOBI/AZW3/TXT bilingual paginated companion reader, term etymology & sentence breakdown, and SM-2 spaced-repetition vocabulary studio.",
+  "provides": [
+    "book.source.v1",
+    "vocab.sm2.v1"
+  ],
+  "consumes": [
+    "llm.chat.v1",
+    "llm.translate.v1",
+    "media.clip_jump.v1",
+    "book.sync.v1"
+  ],
+  "permissions": [
+    "fs:user_mount",
+    "config:read",
+    "config:write",
+    "process:calibre"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "library_roots",
+      "label": "电子书库目录",
+      "type": "string",
+      "default": "",
+      "description": "User-configured ebook root directories (comma, newline, or pathsep separated, or JSON array string). No hardcoded paths."
+    },
+    {
+      "key": "calibre_bin",
+      "label": "Calibre ebook-convert 路径",
+      "type": "string",
+      "default": "",
+      "description": "Executable name or path to Calibre ebook-convert for MOBI/AZW3 conversion; leave empty to fail closed."
+    },
+    {
+      "key": "target_language",
+      "label": "目标译文语言",
+      "type": "string",
+      "default": "zh-CN",
+      "description": "Target language code for bilingual blocks, term lookup, and sentence breakdown."
+    },
+    {
+      "key": "sync_enabled",
+      "label": "启用跨设备进度与生词同步",
+      "type": "bool",
+      "default": true,
+      "description": "Invoke optional book.sync.v1 when available to sync reading progress and vocabulary cards."
+    },
+    {
+      "key": "daily_review_limit",
+      "label": "每日 SM-2 复习上限",
+      "type": "int",
+      "default": 40,
+      "description": "Default daily limit displayed in the SM-2 review queue."
+    },
+    {
+      "key": "auto_jump_nas",
+      "label": "查词自动联动台词切片",
+      "type": "bool",
+      "default": true,
+      "description": "Query optional media.clip_jump.v1 during term lookup when available."
+    },
+    {
+      "key": "page_char_budget",
+      "label": "分页字符预算",
+      "type": "int",
+      "default": 1800,
+      "description": "Approximate character budget per paginated BookSpread page."
+    }
+  ]
+}

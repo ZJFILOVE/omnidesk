@@ -6,13 +6,14 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import PathSafetyError
 
 _PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\Z")
+_SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 def validate_plugin_id(plugin_id: str) -> str:
@@ -26,6 +27,19 @@ def validate_plugin_id(plugin_id: str) -> str:
             f"Invalid plugin ID {plugin_id!r}: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,95}}$"
         )
     return plugin_id
+
+
+def validate_snapshot_id(snapshot_id: str) -> str:
+    """Validate a backup snapshot identifier against traversal and separator rules."""
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise PathSafetyError("Snapshot ID must be a non-empty string")
+    if "/" in snapshot_id or "\\" in snapshot_id or ".." in snapshot_id or "\x00" in snapshot_id:
+        raise PathSafetyError(f"Unsafe snapshot ID {snapshot_id!r}: path traversal characters forbidden")
+    if not _SNAPSHOT_ID_RE.match(snapshot_id):
+        raise PathSafetyError(
+            f"Invalid snapshot ID {snapshot_id!r}: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}$"
+        )
+    return snapshot_id
 
 
 def safe_child_path(base_dir: Path, *parts: str) -> Path:
@@ -47,6 +61,64 @@ def safe_child_path(base_dir: Path, *parts: str) -> Path:
     return resolved
 
 
+def ensure_safe_dir(path: Path, *, mode: int = 0o700) -> Path:
+    """Create a private directory and verify it is non-symlinked and owned by the current user."""
+    if path.is_symlink():
+        raise PathSafetyError(f"Refusing to use symlinked directory: {path}")
+    path.mkdir(parents=True, exist_ok=True, mode=mode)
+    st = path.lstat()
+    if not stat.S_ISDIR(st.st_mode):
+        raise PathSafetyError(f"Path is not a directory: {path}")
+    if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+        raise PathSafetyError(f"Directory {path} is not owned by the current user")
+    os.chmod(path, mode)
+    return path
+
+
+def validate_safe_tree(
+    root_dir: Path,
+    *,
+    ignore_names: AbstractSet[str] = frozenset(),
+) -> Path:
+    """Verify root_dir contains only regular files/dirs with no symlinks or containment escapes."""
+    if root_dir.is_symlink():
+        raise PathSafetyError(f"Refusing symlinked plugin directory: {root_dir}")
+    try:
+        root_stat = root_dir.lstat()
+    except OSError as exc:
+        raise PathSafetyError(f"Cannot inspect plugin directory {root_dir}: {exc}") from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise PathSafetyError(f"Plugin path is not a directory: {root_dir}")
+
+    resolved_root = root_dir.resolve()
+
+    def _scan(current: Path) -> None:
+        with os.scandir(current) as it:
+            for entry in it:
+                if entry.name in ignore_names:
+                    continue
+                entry_path = Path(entry.path)
+                if entry.is_symlink():
+                    raise PathSafetyError(f"Symlink rejected in plugin tree: {entry_path}")
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    try:
+                        entry_path.resolve().relative_to(resolved_root)
+                    except ValueError as exc:
+                        raise PathSafetyError(f"Directory escapes plugin root: {entry_path}") from exc
+                    _scan(entry_path)
+                elif stat.S_ISREG(st.st_mode):
+                    try:
+                        entry_path.resolve().relative_to(resolved_root)
+                    except ValueError as exc:
+                        raise PathSafetyError(f"File escapes plugin root: {entry_path}") from exc
+                else:
+                    raise PathSafetyError(f"Unsupported special file rejected in plugin tree: {entry_path}")
+
+    _scan(root_dir)
+    return resolved_root
+
+
 def _resolve_xdg_base(
     env: Mapping[str, str],
     var_name: str,
@@ -60,6 +132,25 @@ def _resolve_xdg_base(
     if not expanded.is_absolute():
         return fallback
     return expanded
+
+
+def _resolve_staging_dir(env: Mapping[str, str], app_name: str) -> Path:
+    raw = env.get("OMNIDESK_STAGING_DIR", "").strip()
+    if not raw:
+        tmpdir = env.get("TMPDIR", "").strip()
+        if tmpdir:
+            if "\x00" in tmpdir or "\n" in tmpdir or "\r" in tmpdir:
+                raise PathSafetyError("Unsafe TMPDIR value")
+            tmp_cand = Path(tmpdir).expanduser()
+            if tmp_cand.is_absolute() and ".." not in tmp_cand.parts:
+                return tmp_cand / f"{app_name}-staging"
+        return Path(tempfile.gettempdir()) / f"{app_name}-staging"
+    if "\x00" in raw or "\n" in raw or "\r" in raw:
+        raise PathSafetyError("Unsafe OMNIDESK_STAGING_DIR value")
+    candidate = Path(raw).expanduser()
+    if ".." in candidate.parts or not candidate.is_absolute():
+        raise PathSafetyError(f"OMNIDESK_STAGING_DIR must be an absolute path without '..': {raw!r}")
+    return candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +209,7 @@ class OmnideskPaths:
         else:
             runtime_dir = data_dir / "run"
 
-        staging_dir = Path(tempfile.gettempdir()) / f"{app_name}-staging"
+        staging_dir = _resolve_staging_dir(environ, app_name)
         return cls(
             app_name=app_name,
             config_dir=config_dir,
@@ -150,8 +241,20 @@ class OmnideskPaths:
         return self.data_dir / "upstreams.lock.json"
 
     @property
+    def install_lock_path(self) -> Path:
+        return self.data_dir / ".installer.lock"
+
+    @property
     def backups_dir(self) -> Path:
         return self.data_dir / "backups"
+
+    @property
+    def plugins_state_path(self) -> Path:
+        return self.state_dir / "plugins.json"
+
+    @property
+    def diagnostics_dir(self) -> Path:
+        return self.state_dir / "diagnostics"
 
     @property
     def curation_dir(self) -> Path:
@@ -181,6 +284,10 @@ class OmnideskPaths:
     def control_socket_path(self) -> Path:
         return self.runtime_dir / "control.sock"
 
+    def plugin_dir(self, plugin_id: str) -> Path:
+        pid = validate_plugin_id(plugin_id)
+        return self.plugins_dir / pid
+
     def plugin_config_path(self, plugin_id: str) -> Path:
         pid = validate_plugin_id(plugin_id)
         return self.plugins_config_dir / f"{pid}.json"
@@ -192,6 +299,9 @@ class OmnideskPaths:
     def plugin_backup_dir(self, plugin_id: str) -> Path:
         pid = validate_plugin_id(plugin_id)
         return self.backups_dir / pid
+
+    def plugin_backup_snapshot_dir(self, plugin_id: str, snapshot_id: str) -> Path:
+        return safe_child_path(self.plugin_backup_dir(plugin_id), validate_snapshot_id(snapshot_id))
 
     def ensure_dirs(self, *, mode: int = 0o700) -> OmnideskPaths:
         """Create core XDG directories with private directory permissions."""
@@ -210,15 +320,7 @@ class OmnideskPaths:
             self.cache_dir,
             self.runtime_dir,
         ):
-            if directory.is_symlink():
-                raise PathSafetyError(f"Refusing to use symlinked XDG directory: {directory}")
-            directory.mkdir(parents=True, exist_ok=True, mode=mode)
-            st = directory.lstat()
-            if not stat.S_ISDIR(st.st_mode):
-                raise PathSafetyError(f"XDG path is not a directory: {directory}")
-            if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
-                raise PathSafetyError(f"XDG directory {directory} is not owned by the current user")
-            os.chmod(directory, mode)
+            ensure_safe_dir(directory, mode=mode)
         return self
 
 

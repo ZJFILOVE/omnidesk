@@ -1,0 +1,131 @@
+{
+  "schema_version": 2,
+  "id": "plugin-music",
+  "name": "Apple Music (Daily 5 & 双语歌词)",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "media",
+  "author": "OmniDesk",
+  "description": "Reuses qwen-translator Apple Music/Adam/bilingual lyrics modules with CN catalog preflight, gated ChatGPT Daily 5 sync, and MediaSource archive playback.",
+  "provides": [
+    "media.playlist.v1",
+    "media.source.v1"
+  ],
+  "consumes": [
+    "llm.translate.v1",
+    "llm.chat.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "network:wan",
+    "network:loopback",
+    "fs:user_mount",
+    "process:git",
+    "process:mpv"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "obsidian_vault_dir",
+      "label": "Obsidian Vault 本地仓库目录",
+      "type": "string",
+      "default": "",
+      "description": "Path to local ZJFILOVE/obsidian-vault checkout (optional; falls back to XDG curation repos when unset)"
+    },
+    {
+      "key": "music_daily_dir",
+      "label": "Music Daily 本地仓库目录",
+      "type": "string",
+      "default": "",
+      "description": "Path to local ZJFILOVE/music-daily checkout (optional; falls back to XDG curation repos when unset)"
+    },
+    {
+      "key": "daily_playlist_id",
+      "label": "每日精选累计歌单 ID",
+      "type": "string",
+      "default": "p.YJXV7dEIeb3GzZX",
+      "description": "Protected cumulative ChatGPT Daily 5 playlist ID (missing-only append under daily_immutable)"
+    },
+    {
+      "key": "storefront",
+      "label": "Apple Music 曲库地区码",
+      "type": "string",
+      "default": "cn",
+      "description": "Two-letter Apple Music catalog storefront (Daily 5 & CN preflight strictly enforce cn)"
+    },
+    {
+      "key": "apple_music_api_base",
+      "label": "Apple Music API 基址",
+      "type": "string",
+      "default": "https://amp-api.music.apple.com",
+      "description": "Apple Music API base URL (https://amp-api.music.apple.com or https://api.music.apple.com; loopback allowed for local tests)"
+    },
+    {
+      "key": "qwen_translator_dir",
+      "label": "qwen-translator 同源目录",
+      "type": "string",
+      "default": "/home/zhu/Projects/qwen-translator",
+      "description": "Sibling qwen-translator directory providing music_adam, music_lyrics, music_service, and music_playback"
+    },
+    {
+      "key": "daily_checkpoint_path",
+      "label": "每日歌单检查点路径 (可选)",
+      "type": "string",
+      "default": "",
+      "description": "Optional explicit path for 0600 daily checkpoint; defaults to XDG_STATE_HOME/daily5/apple-music-playlist.json"
+    },
+    {
+      "key": "mpv_bin",
+      "label": "libmpv / mpv 可执行路径",
+      "type": "string",
+      "default": "mpv",
+      "description": "Executable name or path for mpv playback integration"
+    },
+    {
+      "key": "proxy",
+      "label": "公网 API 代理 (可选)",
+      "type": "string",
+      "default": "",
+      "description": "Optional HTTP/HTTPS proxy for public Apple Music API calls (loopback always bypasses proxy)"
+    },
+    {
+      "key": "enable_lrclib",
+      "label": "启用 LRCLIB 在线歌词回退",
+      "type": "bool",
+      "default": true,
+      "description": "Allow qwen-translator LyricsRepository to query LRCLIB when local/Adam lyrics are absent"
+    },
+    {
+      "key": "auto_translate_lyrics",
+      "label": "自动翻译外语歌词",
+      "type": "bool",
+      "default": true,
+      "description": "Allow translating missing Chinese lyric lines when LLM translation capability is available"
+    },
+    {
+      "key": "apple_music_developer_token",
+      "label": "Apple Music Developer Token",
+      "type": "secret",
+      "default": "",
+      "description": "Apple Music Bearer developer JWT stored exclusively in 0600 SecretVault"
+    },
+    {
+      "key": "apple_music_user_token",
+      "label": "Apple Music Music-User-Token",
+      "type": "secret",
+      "default": "",
+      "description": "Apple Music Music-User-Token stored exclusively in 0600 SecretVault"
+    },
+    {
+      "key": "apple_music_cookie",
+      "label": "Apple Music 会话 Cookie (可选)",
+      "type": "secret",
+      "default": "",
+      "description": "Optional Apple Music Cookie header stored exclusively in 0600 SecretVault"
+    }
+  ]
+}

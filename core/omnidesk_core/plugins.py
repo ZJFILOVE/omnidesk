@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import inspect
 import json
+import math
 import os
 import re
 import shlex
@@ -32,11 +33,12 @@ from omnidesk_sdk import (
 )
 
 from .bus import EntityBus
-from .config import ConfigStore, atomic_write_json
+from .config import ConfigStore, DEFAULT_SECRET_KEYS, atomic_write_json
 from .domain import DomainKind, DomainRegistry
 from .errors import (
     CapabilityNotFoundError,
     ErrorCode,
+    InvalidArgumentError,
     InvalidCapabilityIdError,
     PluginFaultError,
     PluginManifestError,
@@ -70,7 +72,12 @@ class _StreamBridge:
 
     def __init__(self, core_stream: Any) -> None:
         self._stream = core_stream
-        self.is_cancelled = False
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Dynamically proxy the underlying core stream cancellation state."""
+        val = getattr(self._stream, "is_cancelled", False)
+        return bool(val() if callable(val) else val)
 
     async def emit_delta(
         self,
@@ -128,6 +135,43 @@ def _takes_no_pos_args(fn: Callable[..., Any]) -> bool:
         return False
 
 
+def _normalize_capability_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Validate and normalize capability metadata into a JSON-serializable dict."""
+    if metadata is None:
+        return None
+    if not isinstance(metadata, Mapping):
+        raise InvalidArgumentError("Capability metadata must be a mapping")
+
+    def _convert(value: Any, seen: set[int]) -> Any:
+        if isinstance(value, Mapping):
+            obj_id = id(value)
+            if obj_id in seen:
+                raise InvalidArgumentError("Capability metadata must not contain circular references")
+            seen.add(obj_id)
+            try:
+                return {k: _convert(v, seen) for k, v in value.items()}
+            finally:
+                seen.remove(obj_id)
+        if isinstance(value, (list, tuple)):
+            obj_id = id(value)
+            if obj_id in seen:
+                raise InvalidArgumentError("Capability metadata must not contain circular references")
+            seen.add(obj_id)
+            try:
+                converted = [_convert(item, seen) for item in value]
+                return tuple(converted) if isinstance(value, tuple) else converted
+            finally:
+                seen.remove(obj_id)
+        return value
+
+    normalized = _convert(metadata, set())
+    try:
+        json.dumps(normalized, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise InvalidArgumentError(f"Capability metadata must be JSON-serializable: {exc}") from None
+    return normalized
+
+
 class _CapabilityAdapter:
     """Adapts PluginContext capability APIs onto core CapabilityRegistry."""
 
@@ -135,14 +179,48 @@ class _CapabilityAdapter:
         self._core = core
 
     def register_capability(
-        self, cap_id: str, handler: Callable[..., Any], *, plugin_id: str = "core", **_: Any
+        self,
+        cap_id: str,
+        handler: Callable[..., Any],
+        *,
+        plugin_id: str = "core",
+        priority: int = 100,
+        metadata: Mapping[str, Any] | None = None,
+        description: str = "",
+        replace: bool = True,
     ) -> Any:
-        return self.register(cap_id, handler, plugin_id=plugin_id, streaming=False)
+        return self.register(
+            cap_id,
+            handler,
+            plugin_id=plugin_id,
+            streaming=False,
+            replace=replace,
+            description=description,
+            priority=priority,
+            metadata=metadata,
+        )
 
     def register_streaming_capability(
-        self, cap_id: str, handler: Callable[..., Any], *, plugin_id: str = "core", **_: Any
+        self,
+        cap_id: str,
+        handler: Callable[..., Any],
+        *,
+        plugin_id: str = "core",
+        priority: int = 100,
+        metadata: Mapping[str, Any] | None = None,
+        description: str = "",
+        replace: bool = True,
     ) -> Any:
-        return self.register(cap_id, handler, plugin_id=plugin_id, streaming=True)
+        return self.register(
+            cap_id,
+            handler,
+            plugin_id=plugin_id,
+            streaming=True,
+            replace=replace,
+            description=description,
+            priority=priority,
+            metadata=metadata,
+        )
 
     def register(
         self,
@@ -153,8 +231,16 @@ class _CapabilityAdapter:
         streaming: bool = False,
         replace: bool = True,
         description: str = "",
-        **_: Any,
+        priority: int = 100,
+        metadata: Mapping[str, Any] | None = None,
     ) -> Any:
+        if not callable(handler):
+            raise InvalidArgumentError("Capability handler must be callable")
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            raise InvalidArgumentError("priority must be an integer")
+        if not isinstance(description, str):
+            raise InvalidArgumentError("description must be a string")
+        normalized_metadata = _normalize_capability_metadata(metadata)
         if streaming and (inspect.isasyncgenfunction(handler) or inspect.isgeneratorfunction(handler)):
             wrapped: Callable[..., Any] = handler
         elif streaming:
@@ -177,6 +263,8 @@ class _CapabilityAdapter:
             streaming=streaming,
             replace=replace,
             description=description,
+            priority=priority,
+            metadata=normalized_metadata,
         )
 
     def unregister(self, cap_id: str, *, plugin_id: str | None = None) -> bool:
@@ -470,6 +558,44 @@ def _import_plugin_instance(manifest: PluginManifest, plugin_dir: Path) -> tuple
     return factory, owned
 
 
+_VALID_SNAPSHOT_DOMAINS = frozenset({"core", "media", "text", "book"})
+
+
+def _to_json_safe(value: Any, *, extra_secrets: Iterable[str] = ()) -> Any:
+    """Convert domain snapshot payloads to JSON-safe values while scrubbing secrets and callables."""
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return redact_secrets(value, extra_secrets)
+    if isinstance(value, Path):
+        return str(value)
+    if callable(value):
+        return None
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json")
+        except TypeError:
+            dumped = model_dump()
+        return _to_json_safe(dumped, extra_secrets=extra_secrets)
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            key_str = str(k)
+            if callable(v):
+                continue
+            if key_str.lower() in DEFAULT_SECRET_KEYS and v is not None:
+                out[key_str] = "[REDACTED]"
+            else:
+                out[key_str] = _to_json_safe(v, extra_secrets=extra_secrets)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(item, extra_secrets=extra_secrets) for item in value if not callable(item)]
+    return redact_secrets(str(value), extra_secrets)
+
+
 class PluginManager:
     """Manages discovery, importlib loading, hot-reload, fault isolation, and resource revocation."""
 
@@ -501,14 +627,14 @@ class PluginManager:
         self._domain_adapter = _DomainAdapter(self.domains)
         self._isolate_errors = isolate_errors
         self._state_path = Path(state_path).expanduser() if state_path is not None else None
+        self._records: dict[str, PluginRecord] = {}
+        self._loaded: dict[str, _LoadedEntry] = {}
         self._disabled: set[str] = self._load_disabled_state()
 
         dirs = ([Path(plugins_dir).expanduser()] if plugins_dir is not None else []) + (
             [Path(d).expanduser() for d in plugin_dirs] if plugin_dirs is not None else []
         )
         self._plugin_dirs: list[Path] = dirs or [self.paths.plugins_dir]
-        self._records: dict[str, PluginRecord] = {}
-        self._loaded: dict[str, _LoadedEntry] = {}
         self._lock = asyncio.Lock()
 
     def workspace_tabs(self, domain: str | None = None) -> list[WorkspaceTabSpec]:
@@ -517,8 +643,59 @@ class PluginManager:
     def dock_widgets(self, domain: str | None = None) -> list[DockWidgetSpec]:
         return self._domain_adapter.dock_widgets(domain=domain)
 
+    def domain_snapshot(
+        self,
+        *,
+        domain: str | None = None,
+        plugin_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a JSON-serializable snapshot of DomainRegistry sources, workspace tabs, and dock widgets."""
+        norm_domain: str | None = None
+        if domain is not None:
+            if not isinstance(domain, str):
+                raise InvalidArgumentError("domain must be a string")
+            norm_domain = domain.strip().lower()
+            if norm_domain not in _VALID_SNAPSHOT_DOMAINS:
+                raise InvalidArgumentError(
+                    f"Unsupported domain {domain!r}; expected one of 'core', 'media', 'text', 'book'"
+                )
+        pid = validate_plugin_id(plugin_id) if plugin_id is not None else None
+        try:
+            extra_secrets = self.secret_vault.secret_values()
+        except Exception:
+            extra_secrets = ()
+
+        media_entries = (
+            self.domains.list_media_sources(plugin_id=pid) if norm_domain in (None, "media") else []
+        )
+        text_entries = (
+            self.domains.list_text_sources(plugin_id=pid) if norm_domain in (None, "text") else []
+        )
+        book_entries = (
+            self.domains.list_book_sources(plugin_id=pid) if norm_domain in (None, "book") else []
+        )
+        tabs = self.workspace_tabs(domain=norm_domain)
+        widgets = self.dock_widgets(domain=norm_domain)
+        if pid is not None:
+            tabs = [t for t in tabs if t.plugin_id == pid]
+            widgets = [w for w in widgets if w.plugin_id == pid]
+
+        def _dump_spec(spec: WorkspaceTabSpec | DockWidgetSpec) -> dict[str, Any]:
+            raw = spec.model_dump(mode="json")
+            raw.pop("render", None)
+            raw.pop("on_action", None)
+            return dict(_to_json_safe(raw, extra_secrets=extra_secrets))
+
+        return {
+            "media_sources": [_to_json_safe(e.to_dict(), extra_secrets=extra_secrets) for e in media_entries],
+            "text_sources": [_to_json_safe(e.to_dict(), extra_secrets=extra_secrets) for e in text_entries],
+            "book_sources": [_to_json_safe(e.to_dict(), extra_secrets=extra_secrets) for e in book_entries],
+            "workspace_tabs": [_dump_spec(t) for t in tabs],
+            "dock_widgets": [_dump_spec(w) for w in widgets],
+        }
+
     def _load_disabled_state(self) -> set[str]:
-        if self._state_path is None or not self._state_path.is_file():
+        if self._state_path is None or self._state_path.is_symlink() or not self._state_path.is_file():
             return set()
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
@@ -526,13 +703,30 @@ class PluginManager:
         except (OSError, json.JSONDecodeError):
             return set()
 
+    def save_state(self) -> Path | None:
+        """Persist plugin enablement and lifecycle status atomically to `state_path`."""
+        if self._state_path is None:
+            return None
+        payload = {
+            "disabled": sorted(self._disabled),
+            "plugins": {
+                pid: {
+                    "enabled": rec.enabled,
+                    "state": str(rec.state),
+                    "reload_count": rec.reload_count,
+                }
+                for pid, rec in sorted(self._records.items())
+            },
+        }
+        atomic_write_json(self._state_path, payload, file_mode=0o600)
+        return self._state_path
+
     def _set_enabled(self, plugin_id: str, enabled: bool) -> None:
         pid = validate_plugin_id(plugin_id)
         (self._disabled.discard if enabled else self._disabled.add)(pid)
-        if self._state_path is not None:
-            atomic_write_json(self._state_path, {"disabled": sorted(self._disabled)}, file_mode=0o600)
         if pid in self._records:
             self._records[pid].enabled = enabled
+        self.save_state()
 
     def enable_plugin(self, plugin_id: str) -> None:
         self._set_enabled(plugin_id, True)
@@ -759,8 +953,11 @@ class PluginManager:
     async def unload_all(self) -> int:
         async with self._lock:
             ids = list(self._loaded)
-            for pid in ids:
-                await self._unload_unlocked(pid, emit_event=True)
+            try:
+                for pid in ids:
+                    await self._unload_unlocked(pid, emit_event=True)
+            finally:
+                self.save_state()
             return len(ids)
 
     async def reload_plugin(self, plugin_id: str, *, isolate_errors: bool | None = None) -> PluginRecord:
@@ -802,7 +999,7 @@ class PluginManager:
     async def verify_plugin(
         self, plugin_id_or_path: str | Path, *, run_tests: bool = True, require_tests: bool = False
     ) -> PluginVerifyResult:
-        """Verify manifest v2, isolated on_load->on_health_check->on_unload lifecycle, and offline tests."""
+        """Verify manifest v2, isolated staged-subprocess lifecycle, and offline tests without touching sys.modules."""
         plugin_dir = self._resolve_target_dir(plugin_id_or_path)
         errors: list[str] = []
         try:
@@ -813,44 +1010,37 @@ class PluginManager:
             )
 
         lifecycle_ok, health = False, {}
-        with tempfile.TemporaryDirectory(prefix="omnidesk-verify-") as tmp:
-            tmp_paths = OmnideskPaths.from_env(
-                {"XDG_CONFIG_HOME": f"{tmp}/cfg", "XDG_DATA_HOME": f"{tmp}/data", "XDG_RUNTIME_DIR": f"{tmp}/run"}
-            )
-            sandbox = PluginManager(plugins_dir=plugin_dir.parent, paths=tmp_paths, isolate_errors=False)
-            faults: list[str] = []
-            sandbox.bus.subscribe(
-                "plugin.fault", lambda evt: faults.append(str(evt.payload.get("error", ""))), plugin_id="core"
-            )
-            try:
-                await sandbox.load_plugin(plugin_dir)
-                health = await sandbox.health_check(manifest.id)
-                if not health.get("ok", True):
-                    errors.append(f"Health check returned non-ok: {health}")
-                await sandbox.unload_plugin(manifest.id)
-                if sandbox.capabilities.list_capabilities(plugin_id=manifest.id) or sandbox.domains.list_sources(
-                    plugin_id=manifest.id
-                ):
-                    errors.append("Plugin resources remained registered after unload")
-                elif faults:
-                    errors.extend(faults)
-                else:
-                    lifecycle_ok = not errors
-            except Exception as exc:
-                errors.append(self._redact(str(exc)))
-
         tests_ok, tests_skipped = True, False
-        if run_tests:
-            if not ((plugin_dir / "tests").is_dir() or any(plugin_dir.glob("test_*.py"))):
-                tests_skipped = True
-                if require_tests:
-                    tests_ok = False
-                    errors.append("No tests directory or test_*.py files found")
+        with tempfile.TemporaryDirectory(prefix="omnidesk-verify-") as tmp:
+            tmp_root = Path(tmp)
+            staged_dir = tmp_root / "staging" / manifest.id
+            try:
+                shutil.copytree(
+                    plugin_dir,
+                    staged_dir,
+                    symlinks=True,
+                    ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
+                )
+            except (OSError, shutil.Error) as exc:
+                errors.append(self._redact(f"Failed to stage plugin for verification: {exc}"))
             else:
-                ok, err_msg = await _run_verify_cmd(plugin_dir, manifest.verify_cmd)
-                if not ok:
-                    tests_ok = False
-                    errors.append(err_msg)
+                lc_ok, lc_health, lc_errors = await _run_lifecycle_in_subprocess(staged_dir, tmp_root)
+                lifecycle_ok = lc_ok
+                health = lc_health
+                errors.extend(self._redact(e) for e in lc_errors)
+
+            if run_tests:
+                if not ((plugin_dir / "tests").is_dir() or any(plugin_dir.glob("test_*.py"))):
+                    tests_skipped = True
+                    if require_tests:
+                        tests_ok = False
+                        errors.append("No tests directory or test_*.py files found")
+                else:
+                    ok, err_msg = await _run_verify_cmd(plugin_dir, manifest.verify_cmd, xdg_root=tmp_root / "test-xdg")
+                    if not ok:
+                        tests_ok = False
+                        errors.append(self._redact(err_msg))
+
         return PluginVerifyResult(
             not errors and lifecycle_ok and tests_ok,
             manifest.id,
@@ -864,7 +1054,134 @@ class PluginManager:
         )
 
 
-async def _run_verify_cmd(plugin_dir: Path, verify_cmd: str) -> tuple[bool, str]:
+_VERIFY_LIFECYCLE_SCRIPT = """
+import asyncio, json, os, sys
+from pathlib import Path
+from omnidesk_core.errors import redact_secrets
+from omnidesk_core.manifest import load_manifest
+from omnidesk_core.paths import OmnideskPaths
+from omnidesk_core.plugins import PluginManager
+
+async def _main() -> int:
+    plugin_dir = Path(sys.argv[1])
+    out_path = Path(sys.argv[2])
+    tmp_root = Path(sys.argv[3])
+    paths = OmnideskPaths.from_env({
+        **os.environ,
+        "XDG_CONFIG_HOME": str(tmp_root / "cfg"),
+        "XDG_DATA_HOME": str(tmp_root / "data"),
+        "XDG_STATE_HOME": str(tmp_root / "state"),
+        "XDG_CACHE_HOME": str(tmp_root / "cache"),
+        "XDG_RUNTIME_DIR": str(tmp_root / "run"),
+    })
+    paths.ensure_dirs()
+    manifest = load_manifest(plugin_dir)
+    sandbox = PluginManager(plugins_dir=plugin_dir.parent, paths=paths, isolate_errors=False)
+    faults: list[str] = []
+    sandbox.bus.subscribe(
+        "plugin.fault",
+        lambda evt: faults.append(str(evt.payload.get("error", ""))),
+        plugin_id="core",
+    )
+    errors: list[str] = []
+    health: dict = {}
+    lifecycle_ok = False
+    try:
+        await sandbox.load_plugin(plugin_dir)
+        health = await sandbox.health_check(manifest.id)
+        if not isinstance(health, dict):
+            health = {"ok": bool(health)}
+        if not health.get("ok", True):
+            errors.append(f"Health check returned non-ok: {health}")
+        await sandbox.unload_plugin(manifest.id)
+        if (
+            sandbox.capabilities.list_capabilities(plugin_id=manifest.id)
+            or sandbox.domains.list_sources(plugin_id=manifest.id)
+            or sandbox.workspace_tabs()
+            or sandbox.dock_widgets()
+            or sandbox.bus.subscription_count(plugin_id=manifest.id)
+        ):
+            errors.append("Plugin resources remained registered after unload")
+        if faults:
+            errors.extend(faults)
+        lifecycle_ok = not errors
+    except BaseException as exc:
+        errors.append(redact_secrets(str(exc) or type(exc).__name__, sandbox.secret_vault.secret_values()))
+    out_path.write_text(
+        json.dumps({"lifecycle_ok": lifecycle_ok, "health": health, "errors": errors}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return 0 if lifecycle_ok else 1
+
+raise SystemExit(asyncio.run(_main()))
+"""
+
+
+def _subprocess_python_env(extra_dirs: Sequence[Path], *, xdg_root: Path | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    repo_root = Path(__file__).resolve().parents[2]
+    extra_py = [*(str(p) for p in extra_dirs), str(repo_root / "core"), str(repo_root)]
+    env["PYTHONPATH"] = os.pathsep.join([*extra_py, env["PYTHONPATH"]] if env.get("PYTHONPATH") else extra_py)
+    if xdg_root is not None:
+        for name, sub in (
+            ("XDG_CONFIG_HOME", "cfg"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_STATE_HOME", "state"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_RUNTIME_DIR", "run"),
+        ):
+            target = xdg_root / sub
+            target.mkdir(parents=True, exist_ok=True)
+            env[name] = str(target)
+    return env
+
+
+async def _run_lifecycle_in_subprocess(
+    staged_dir: Path, tmp_root: Path, *, timeout: float = 30.0
+) -> tuple[bool, dict[str, Any], list[str]]:
+    result_path = tmp_root / "lifecycle_result.json"
+    env = _subprocess_python_env((staged_dir,), xdg_root=tmp_root / "lc-xdg")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        _VERIFY_LIFECYCLE_SCRIPT,
+        str(staged_dir),
+        str(result_path),
+        str(tmp_root / "lc-xdg"),
+        cwd=str(staged_dir),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, {}, [f"Lifecycle verification timed out after {timeout:.0f}s"]
+
+    if result_path.is_file():
+        try:
+            report = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(report, dict):
+                lc_ok = bool(report.get("lifecycle_ok")) and proc.returncode == 0
+                health = dict(report.get("health") or {}) if isinstance(report.get("health"), dict) else {}
+                errs = [str(e) for e in report.get("errors", []) if str(e)]
+                if not lc_ok and not errs:
+                    errs.append(f"Lifecycle verification exited with code {proc.returncode}")
+                return lc_ok, health, errs
+        except (OSError, json.JSONDecodeError) as exc:
+            return False, {}, [f"Invalid lifecycle verification report: {exc}"]
+
+    output = (stdout_b.decode("utf-8", errors="replace") + "\n" + stderr_b.decode("utf-8", errors="replace")).strip()
+    detail = output[-400:] if output else f"rc={proc.returncode}"
+    return False, {}, [f"Lifecycle verification subprocess failed without report ({detail})"]
+
+
+async def _run_verify_cmd(
+    plugin_dir: Path, verify_cmd: str, *, xdg_root: Path | None = None, timeout: float = 60.0
+) -> tuple[bool, str]:
     tokens = shlex.split(verify_cmd)
     if not tokens:
         return False, "Empty verify_cmd"
@@ -879,15 +1196,16 @@ async def _run_verify_cmd(plugin_dir: Path, verify_cmd: str) -> tuple[bool, str]
     else:
         argv = tokens
 
-    env = dict(os.environ)
-    repo_root = Path(__file__).resolve().parents[2]
-    extra_py = [str(plugin_dir), str(repo_root / "core"), str(repo_root)]
-    env["PYTHONPATH"] = os.pathsep.join([*extra_py, env["PYTHONPATH"]] if env.get("PYTHONPATH") else extra_py)
-
+    env = _subprocess_python_env((plugin_dir,), xdg_root=xdg_root)
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(plugin_dir), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    stdout_b, stderr_b = await proc.communicate()
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, f"verify_cmd timed out after {timeout:.0f}s"
     if proc.returncode == 0:
         return True, ""
     output = (stdout_b.decode("utf-8", errors="replace") + "\n" + stderr_b.decode("utf-8", errors="replace")).strip()

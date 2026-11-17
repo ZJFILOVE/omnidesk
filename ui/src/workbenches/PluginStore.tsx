@@ -1,22 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { RefreshCw } from 'lucide-react';
+import StateView from '../components/StateView';
+import { StatusBanner } from '../components/StatusBanner';
 import WorkbenchLayout, {
   FocusButton,
-  HAIRLINE_BORDER,
-  SectionLabel,
-  focusClass,
-  focusableInputProps,
   useWorkbenchFocus,
   type WorkbenchViewProps,
 } from '../components/WorkbenchLayout';
 import {
-  INITIAL_PLUGINS,
-  type DomainKind,
-  type PluginItem,
-} from '../data/mock';
+  PanelSectionHeading,
+  SearchInput,
+  SegmentedPills,
+  SelectableRow,
+  TagChip,
+} from '../components/WorkbenchPrimitives';
+import { INITIAL_PLUGINS } from '../data/mock';
 import PluginConfigPanel from './panels/PluginConfigPanel';
 import PluginDetailPane from './panels/PluginDetailPane';
-
-type DomainFilter = 'all' | DomainKind;
+import { usePluginStoreController, type DomainFilter } from './usePluginStoreController';
 
 const DOMAIN_TABS: { id: DomainFilter; label: string }[] = [
   { id: 'all', label: '全部插件' },
@@ -31,6 +32,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
   onFocus,
   focusedItemId,
   searchTrigger,
+  pluginHealthMap,
   onContextChange,
 }) => {
   const [activeFocusId, emitFocus] = useWorkbenchFocus(
@@ -39,18 +41,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
     onFocus,
     focusedItemId,
   );
-  const [plugins, setPlugins] = useState<PluginItem[]>(INITIAL_PLUGINS);
-  const [domainFilter, setDomainFilter] = useState<DomainFilter>('all');
-  const [query, setQuery] = useState<string>('');
-  const [selectedId, setSelectedId] = useState<string>(INITIAL_PLUGINS[0]?.id ?? '');
-  const [configsByPlugin, setConfigsByPlugin] = useState<
-    Record<string, Record<string, string | boolean | number>>
-  >(() => Object.fromEntries(INITIAL_PLUGINS.map((p) => [p.id, { ...p.initialConfig }])));
-  const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({});
-  const [formMessage, setFormMessage] = useState<{ tone: 'ok' | 'err' | 'info'; text: string }>({
-    tone: 'info',
-    text: '0600 ConfigStore & SecretVault 就绪',
-  });
+  const ctrl = usePluginStoreController(pluginHealthMap);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -59,25 +50,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
     }
   }, [searchTrigger]);
 
-  const filteredPlugins = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return plugins.filter((p) => {
-      if (domainFilter !== 'all' && p.domain !== domainFilter) return false;
-      if (!q) return true;
-      return (
-        p.name.toLowerCase().includes(q) ||
-        p.id.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        p.provides.some((cap) => cap.toLowerCase().includes(q))
-      );
-    });
-  }, [plugins, domainFilter, query]);
-
-  const selectedPlugin = useMemo(
-    () => plugins.find((p) => p.id === selectedId) ?? filteredPlugins[0] ?? plugins[0],
-    [plugins, selectedId, filteredPlugins],
-  );
-
+  const { selectedPlugin } = ctrl;
   useEffect(() => {
     if (!onContextChange) return;
     if (!selectedPlugin) {
@@ -95,255 +68,199 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
     });
   }, [onContextChange, selectedPlugin]);
 
-  const currentConfig = selectedPlugin
-    ? configsByPlugin[selectedPlugin.id] ?? selectedPlugin.initialConfig
-    : {};
-
-  const updatePlugin = (pluginId: string, updater: (p: PluginItem) => PluginItem) => {
-    setPlugins((prev) => prev.map((p) => (p.id === pluginId ? updater(p) : p)));
-  };
-
-  const validateRequiredFields = (plugin: PluginItem): string | null => {
-    const cfg = configsByPlugin[plugin.id] ?? {};
-    for (const field of plugin.config_schema) {
-      if (field.required) {
-        const val = cfg[field.key];
-        if (val === undefined || String(val).trim() === '') {
-          return `必填项「${field.label}」(${field.key}) 不能为空`;
-        }
-      }
-    }
-    return null;
-  };
-
-  const handleSaveConfig = () => {
-    if (!selectedPlugin) return;
-    const err = validateRequiredFields(selectedPlugin);
-    if (err) {
-      setFormMessage({ tone: 'err', text: err });
-      return;
-    }
-    const secretCount = selectedPlugin.config_schema.filter(
-      (f) => f.type === 'secret' && String(currentConfig[f.key] ?? '').trim() !== '',
-    ).length;
-    setFormMessage({
-      tone: 'ok',
-      text: `已保存 ${selectedPlugin.id} 配置（${secretCount} 个密钥隔离写入 0600 SecretVault）`,
-    });
-  };
-
-  const handleResetConfig = () => {
-    if (!selectedPlugin) return;
-    const defaults: Record<string, string | boolean | number> = {};
-    for (const field of selectedPlugin.config_schema) defaults[field.key] = field.default;
-    setConfigsByPlugin((prev) => ({ ...prev, [selectedPlugin.id]: defaults }));
-    setFormMessage({ tone: 'info', text: `已恢复 ${selectedPlugin.id} 的 Schema 默认配置` });
-  };
-
-  const handleToggleInstall = () => {
-    if (!selectedPlugin) return;
-    const installing = !selectedPlugin.installed;
-    updatePlugin(selectedPlugin.id, (p) => ({
-      ...p,
-      installed: installing,
-      enabled: installing,
-      hotReloadMs: installing ? 15 : 0,
-      verifyStatus: installing ? 'passed' : 'idle',
-    }));
-    setFormMessage({
-      tone: 'ok',
-      text: installing ? `已安装并激活纯 Python 插件 ${selectedPlugin.id}` : `已卸载插件 ${selectedPlugin.id}`,
-    });
-  };
-
-  const handleToggleEnabled = () => {
-    if (!selectedPlugin || !selectedPlugin.installed) return;
-    const nextEnabled = !selectedPlugin.enabled;
-    updatePlugin(selectedPlugin.id, (p) => ({
-      ...p,
-      enabled: nextEnabled,
-      hotReloadMs: nextEnabled ? Math.max(8, p.hotReloadMs || 12) : 0,
-    }));
-    setFormMessage({
-      tone: 'info',
-      text: `${selectedPlugin.id} 已${nextEnabled ? '启用' : '停用（依赖方自动优雅降级）'}`,
-    });
-  };
-
-  const handleHotReload = () => {
-    if (!selectedPlugin || !selectedPlugin.installed) return;
-    const nextMs = 8 + ((selectedPlugin.hotReloadMs + 5) % 19);
-    updatePlugin(selectedPlugin.id, (p) => ({ ...p, hotReloadMs: nextMs, healthOk: true }));
-    setFormMessage({ tone: 'ok', text: `importlib 命名空间热重载完成（${nextMs}ms，核心状态零丢失）` });
-  };
-
-  const handleVerifyContract = () => {
-    if (!selectedPlugin) return;
-    const err = validateRequiredFields(selectedPlugin);
-    if (err) {
-      updatePlugin(selectedPlugin.id, (p) => ({ ...p, verifyStatus: 'failed' }));
-      setFormMessage({ tone: 'err', text: `契约自检失败：${err}` });
-      return;
-    }
-    updatePlugin(selectedPlugin.id, (p) => ({ ...p, verifyStatus: 'passed', healthOk: true }));
-    setFormMessage({ tone: 'ok', text: `${selectedPlugin.id} Pydantic 契约与 Capability 注册自检通过` });
-  };
+  const enabledCount = ctrl.effectivePlugins.filter((p) => p.enabled).length;
 
   return (
     <WorkbenchLayout
       domain="core"
-      title="插件市场与 Schema 表单中心 · PluginStore"
+      testId="workbench-store"
+      title="插件中心"
       subtitle="零二进制 ABI 纯 Python 3.14 插件 · 秒级热重载 · 0600 SecretVault 隔离凭据"
-      badge="Plugins · Ctrl+5"
+      leftWidthClass="@[860px]/workbench:w-[296px]"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            ref={searchRef}
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索插件名、Capability ID..."
-            aria-label="搜索插件"
-            data-focused={activeFocusId === 'store:search' ? 'true' : undefined}
-            {...focusableInputProps('store:search', activeFocusId, emitFocus)}
-            className={focusClass(
-              activeFocusId === 'store:search',
-              'w-56 rounded-md border px-2.5 py-1 text-xs',
-            )}
-            style={{ backgroundColor: 'var(--bg-canvas, #F6F5F3)', borderColor: HAIRLINE_BORDER }}
+          <SearchInput
+            focusId="store:search"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            value={ctrl.query}
+            onChange={ctrl.setQuery}
+            placeholder="搜索插件、Capability..."
+            ariaLabel="搜索插件"
+            inputRef={searchRef}
+            widthClass="w-56"
           />
-          <span
-            className="rounded border px-2 py-1 font-mono text-[11px]"
-            style={{ backgroundColor: 'var(--bg-soft, #F1EFEC)', borderColor: HAIRLINE_BORDER }}
+          <FocusButton
+            focusId="store:action:refresh"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            onActivate={() => void ctrl.loadPluginList()}
+            surface="soft"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
           >
-            已启用 {plugins.filter((p) => p.enabled).length}/{plugins.length}
-          </span>
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>刷新列表</span>
+          </FocusButton>
+          <TagChip tone="neutral" mono>
+            已启用 {enabledCount}/{ctrl.effectivePlugins.length}
+          </TagChip>
         </div>
       }
       toolbar={
-        <div className="flex w-full flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap gap-1.5">
-            {DOMAIN_TABS.map((tab) => (
-              <FocusButton
-                key={tab.id}
-                focusId={`store:domain:${tab.id}`}
-                activeFocusId={activeFocusId}
-                onFocus={emitFocus}
-                onActivate={() => setDomainFilter(tab.id)}
-                selected={domainFilter === tab.id}
-                tone="core"
-                surface="surface"
-                className="px-2.5 py-1 text-xs font-medium"
-              >
-                {tab.label}
-              </FocusButton>
-            ))}
+        <div className="flex w-full flex-col gap-2">
+          {ctrl.offlineMode ? (
+            <StatusBanner
+              mode="offline"
+              compact
+              testId="store-offline-banner"
+              message="离线预览：数据为示例（未连接 Tauri，不可执行保存/热重载/自检）"
+            />
+          ) : ctrl.backendBannerError ? (
+            <StatusBanner
+              mode="error"
+              compact
+              testId="store-error-banner"
+              error={ctrl.backendBannerError}
+            />
+          ) : ctrl.degradedNotice ? (
+            <StatusBanner
+              mode="warn"
+              compact
+              testId="store-warn-banner"
+              message={ctrl.degradedNotice}
+            />
+          ) : null}
+
+          <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
+            <SegmentedPills
+              options={DOMAIN_TABS}
+              value={ctrl.domainFilter}
+              onChange={ctrl.setDomainFilter}
+              focusPrefix="store:domain:"
+              activeFocusId={activeFocusId}
+              onFocus={emitFocus}
+              tone="core"
+              ariaLabel="插件领域筛选"
+            />
+            <span
+              data-testid="store-status-message"
+              role={ctrl.formMessage.tone === 'err' ? 'alert' : 'status'}
+              className="text-[12.5px] font-medium"
+              style={{
+                color:
+                  ctrl.formMessage.tone === 'err'
+                    ? 'var(--status-err-fg, #AA1D33)'
+                    : ctrl.formMessage.tone === 'ok'
+                      ? 'var(--status-ok-fg, #165E37)'
+                      : 'var(--text-muted, #59544D)',
+              }}
+            >
+              {ctrl.formMessage.text}
+            </span>
           </div>
-          <span
-            className="font-mono text-[11px]"
-            style={{
-              color:
-                formMessage.tone === 'err'
-                  ? 'var(--status-err-fg, #B6263A)'
-                  : formMessage.tone === 'ok'
-                    ? 'var(--status-ok-fg, #1E7244)'
-                    : 'var(--text-muted, #66625D)',
-            }}
-          >
-            {formMessage.text}
-          </span>
         </div>
       }
       leftPane={
-        <div className="flex flex-col gap-2 p-3">
-          <SectionLabel className="px-1">插件目录 ({filteredPlugins.length})</SectionLabel>
-          {filteredPlugins.map((plugin) => (
-            <FocusButton
-              key={plugin.id}
-              focusId={`store:plugin:${plugin.id}`}
+        <div className="flex flex-col gap-3 p-4">
+          <PanelSectionHeading title="插件目录" meta={`${ctrl.filteredPlugins.length} 项`} />
+          {ctrl.filteredPlugins.length === 0 ? (
+            <StateView
+              mode="empty"
+              title="没有匹配的插件"
+              description="尝试清空搜索词或切换领域标签。"
               activeFocusId={activeFocusId}
               onFocus={emitFocus}
-              onActivate={() => {
-                setSelectedId(plugin.id);
-                setFormMessage({ tone: 'info', text: `已载入 ${plugin.id} 配置 Schema` });
+              action={{
+                label: '显示全部插件',
+                focusId: 'store:empty:reset',
+                onActivate: () => {
+                  ctrl.setQuery('');
+                  ctrl.setDomainFilter('all');
+                },
               }}
-              selected={selectedPlugin?.id === plugin.id}
-              tone="core"
-              className="flex flex-col gap-1 p-3 text-left"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-xs font-semibold">{plugin.name}</span>
-                <span
-                  className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] font-semibold"
-                  style={{
-                    backgroundColor: !plugin.installed
-                      ? 'var(--bg-soft, #F1EFEC)'
-                      : plugin.enabled
-                        ? 'var(--status-ok-bg, #E7F5ED)'
-                        : 'var(--status-warn-bg, #FCF2DF)',
-                    color: !plugin.installed
-                      ? 'var(--text-muted, #66625D)'
-                      : plugin.enabled
-                        ? 'var(--status-ok-fg, #1E7244)'
-                        : 'var(--status-warn-fg, #AC5F0C)',
-                  }}
-                >
-                  {!plugin.installed ? '未安装' : plugin.enabled ? '运行中' : '已停用'}
-                </span>
-              </div>
-              <div
-                className="flex items-center justify-between font-mono text-[10px]"
-                style={{ color: 'var(--text-muted, #66625D)' }}
-              >
-                <span>
-                  {plugin.domain} · {plugin.kind}
-                </span>
-                <span>v{plugin.version}</span>
-              </div>
-            </FocusButton>
-          ))}
+            />
+          ) : (
+            <div className="flex flex-col gap-1 px-1.5 py-1">
+              {ctrl.filteredPlugins.map((plugin) => {
+                const statusTone = !plugin.healthOk
+                  ? 'err'
+                  : !plugin.installed
+                    ? 'neutral'
+                    : plugin.enabled
+                      ? 'ok'
+                      : 'warn';
+                const statusLabel = !plugin.healthOk
+                  ? '异常'
+                  : !plugin.installed
+                    ? '未安装'
+                    : plugin.enabled
+                      ? '运行中'
+                      : '已停用';
+
+                return (
+                  <SelectableRow
+                    key={plugin.id}
+                    focusId={`store:plugin:${plugin.id}`}
+                    activeFocusId={activeFocusId}
+                    selected={selectedPlugin?.id === plugin.id}
+                    domain={plugin.domain}
+                    onFocus={emitFocus}
+                    onActivate={() => {
+                      ctrl.setSelectedId(plugin.id);
+                      ctrl.setFormMessage({ tone: 'info', text: `已载入 ${plugin.id} 配置 Schema` });
+                    }}
+                    title={plugin.name}
+                    trailing={<TagChip tone={statusTone}>{statusLabel}</TagChip>}
+                    meta={
+                      <span className="font-mono text-[12px]">
+                        {plugin.domain} · {plugin.kind} · v{plugin.version}
+                      </span>
+                    }
+                  />
+                );
+              })}
+            </div>
+          )}
         </div>
       }
       mainPane={
         selectedPlugin ? (
-          <PluginDetailPane
-            plugin={selectedPlugin}
-            activeFocusId={activeFocusId}
-            onFocus={emitFocus}
-            onToggleInstall={handleToggleInstall}
-            onToggleEnabled={handleToggleEnabled}
-            onHotReload={handleHotReload}
-            onVerify={handleVerifyContract}
-          />
-        ) : null
-      }
-      rightPane={
-        selectedPlugin ? (
-          <PluginConfigPanel
-            plugin={selectedPlugin}
-            configValues={currentConfig}
-            revealedSecrets={revealedSecrets}
-            activeFocusId={activeFocusId}
-            onFocus={emitFocus}
-            onUpdateField={(key, val) =>
-              setConfigsByPlugin((prev) => ({
-                ...prev,
-                [selectedPlugin.id]: { ...(prev[selectedPlugin.id] ?? {}), [key]: val },
-              }))
-            }
-            onToggleSecretReveal={(key) =>
-              setRevealedSecrets((prev) => ({ ...prev, [key]: !prev[key] }))
-            }
-            onSave={handleSaveConfig}
-            onReset={handleResetConfig}
-          />
-        ) : null
-      }
-      footer={
-        <>
-          <span>焦点锚点: {activeFocusId || '未锁定'}</span>
-          <span>CapabilityRegistry · ConfigStore (0600) · SecretVault</span>
-        </>
+          <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-6 sm:p-7">
+            <PluginDetailPane
+              plugin={selectedPlugin}
+              activeFocusId={activeFocusId}
+              busyAction={ctrl.busyAction}
+              onFocus={emitFocus}
+              onToggleInstall={ctrl.handleToggleInstall}
+              onToggleEnabled={ctrl.handleToggleEnabled}
+              onHotReload={() => void ctrl.handleHotReload()}
+              onVerify={() => void ctrl.handleVerifyContract()}
+            />
+
+            <PluginConfigPanel
+              plugin={selectedPlugin}
+              configValues={ctrl.currentConfig}
+              revealedSecrets={ctrl.revealedSecrets}
+              activeFocusId={activeFocusId}
+              onFocus={emitFocus}
+              onUpdateField={(key, val) =>
+                ctrl.setConfigsByPlugin((prev) => ({
+                  ...prev,
+                  [selectedPlugin.id]: { ...(prev[selectedPlugin.id] ?? {}), [key]: val },
+                }))
+              }
+              onToggleSecretReveal={(key) =>
+                ctrl.setRevealedSecrets((prev) => ({ ...prev, [key]: !prev[key] }))
+              }
+              onSave={() => void ctrl.handleSaveConfig()}
+              onReset={ctrl.handleResetConfig}
+            />
+          </div>
+        ) : (
+          <div className="mx-auto max-w-2xl p-8">
+            <StateView mode="empty" title="未选定插件" description="从左侧插件目录选择一项查看详情与配置。" />
+          </div>
+        )
       }
     />
   );

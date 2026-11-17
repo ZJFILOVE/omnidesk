@@ -1,0 +1,110 @@
+{
+  "schema_version": 2,
+  "id": "plugin-zlib",
+  "name": "Z-Library Book Search",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "book",
+  "author": "OmniDesk",
+  "description": "Searches Z-Library mirrors/EAPI, inspects book metadata, safely downloads verified ebooks, and forwards to BabelDOC, EPUB reader, or Feiniu NAS.",
+  "provides": [
+    "book.search.v1"
+  ],
+  "consumes": [
+    "book.bilingual_pdf.v1",
+    "book.source.v1",
+    "book.sync.v1",
+    "nas.connection.v1",
+    "web.cookies.v1",
+    "web.fetch.v1"
+  ],
+  "permissions": [
+    "network:wan",
+    "fs:user_mount",
+    "config:read",
+    "config:write",
+    "secret:vault"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "base_url",
+      "label": "Z-Library 主站点地址",
+      "type": "string",
+      "default": "https://z-library.sk",
+      "description": "Default public Z-Library endpoint (http/https only; no private hosts hardcoded)"
+    },
+    {
+      "key": "mirror_url",
+      "label": "自定义镜像 / API 地址（优先）",
+      "type": "string",
+      "default": "",
+      "description": "Optional user-configured Z-Library mirror or EAPI endpoint URL (takes priority over base_url)"
+    },
+    {
+      "key": "download_root",
+      "label": "本地下载根目录",
+      "type": "string",
+      "default": "",
+      "required": true,
+      "description": "Explicitly configured local directory where downloaded books are atomically saved"
+    },
+    {
+      "key": "max_download_mb",
+      "label": "单本下载大小上限 (MiB)",
+      "type": "int",
+      "default": 100,
+      "description": "Maximum allowed file size in MiB enforced before and during download"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "请求超时时间 (秒)",
+      "type": "int",
+      "default": 15,
+      "description": "HTTP timeout in seconds for search, detail, and download operations"
+    },
+    {
+      "key": "chrome_cookie_source",
+      "label": "会话 Cookie 来源",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "plugin-chrome-web",
+        "vault",
+        "disabled"
+      ],
+      "description": "Prefer web.cookies.v1 from plugin-chrome-web, then 0600 SecretVault credentials"
+    },
+    {
+      "key": "prefer_chrome_fetch",
+      "label": "优先使用 Chrome 同源代理 (web.fetch.v1)",
+      "type": "bool",
+      "default": false,
+      "description": "Route requests through web.fetch.v1 when available instead of direct HTTP"
+    },
+    {
+      "key": "api_key",
+      "label": "Z-Library Remix Key / API Key（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault (never written to plain config or logs)"
+    },
+    {
+      "key": "remix_userid",
+      "label": "Z-Library Remix User ID（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Optional Z-Library numeric user ID paired with Remix Key in 0600 SecretVault"
+    },
+    {
+      "key": "cookie_header",
+      "label": "会话 Cookie（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Fallback Cookie header stored exclusively in 0600 SecretVault"
+    }
+  ]
+}

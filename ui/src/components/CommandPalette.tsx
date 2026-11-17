@@ -46,12 +46,12 @@ const CATEGORY_LABELS: Record<CommandPaletteCategory, string> = {
 
 const CORE_COMMANDS: readonly CommandPaletteItem[] = [
   { id: 'dock:toggle', title: '开关 F8 无遮罩 AI 伴读栏', subtitle: '随宽高比 (>= 1.45) 在右侧与底部之间自适应停靠', category: 'dock', shortcut: 'F8', domain: 'core', keywords: ['companion', 'dock', 'ai', 'f8', '伴读'] },
-  { id: 'hints:open', title: '触发全屏字母闪跳 (Hint Overlay)', subtitle: '显示可聚焦卡片字母角标，按对应字母立即跳转', category: 'navigation', shortcut: 'f', domain: 'core', keywords: ['hint', 'jump', 'focus', '闪跳', '定位'] },
+  { id: 'hints:open', title: '触发全屏字母闪跳 (Hint Overlay)', subtitle: '显示可聚焦元素字母角标，按对应字母立即跳转', category: 'navigation', shortcut: 'f', domain: 'core', keywords: ['hint', 'jump', 'focus', '闪跳', '定位'] },
   { id: 'help:open', title: '查看键盘导航与快捷键帮助', subtitle: '包含工作台快捷键、2D 空间焦点与 IME 隔离说明', category: 'navigation', shortcut: '?', domain: 'core', keywords: ['help', 'keyboard', 'shortcuts', '帮助', '快捷键'] },
   { id: 'search:focus', title: '聚焦当前工作台搜索框', subtitle: '按标题、来源或关键词即时过滤当前列表', category: 'search', shortcut: '/', domain: 'core', keywords: ['search', 'filter', '搜索', '过滤'] },
   { id: 'focus:cycle-zone', title: '在主舞台与 F8 伴读栏间切换焦点区', subtitle: '切换主内容区域与伴读输入区域', category: 'navigation', shortcut: 'Ctrl+Tab', domain: 'core', keywords: ['zone', 'focus', 'tab', '焦点'] },
   { id: 'theme:toggle', title: '切换 Paper / Graphite 主题', subtitle: 'Paper #F6F5F3 纸感亮色 ↔ Graphite #181718 石墨深色', category: 'theme', shortcut: 't', domain: 'core', keywords: ['theme', 'paper', 'graphite', 'dark', 'light', '主题'] },
-  { id: 'theme:paper', title: '切换至 Paper 纸感亮色 (#F6F5F3)', subtitle: '暖纸底色与 1px 细线高对比阅读画布', category: 'theme', domain: 'core', keywords: ['paper', 'light', '亮色'] },
+  { id: 'theme:paper', title: '切换至 Paper 纸感亮色 (#F6F5F3)', subtitle: '暖纸底色与柔和层级的日光阅读画布', category: 'theme', domain: 'core', keywords: ['paper', 'light', '亮色'] },
   { id: 'theme:graphite', title: '切换至 Graphite 石墨深色 (#181718)', subtitle: '低眩光石墨深色护眼模式', category: 'theme', domain: 'core', keywords: ['graphite', 'dark', '深色'] },
   { id: 'curate:sync-archive', title: '同步 obsidian-vault & music-daily 历史归档', subtitle: '本地快进拉取双仓并回灌历史推荐记录', category: 'plugin', domain: 'core', keywords: ['obsidian', 'music-daily', 'rehydrate', '同步', '归档'] },
   { id: 'curate:run-daily', title: '执行今日不重复策展管线 (daily_immutable)', subtitle: '生成每日早报、科学期刊、每日 5 首与英语精读', category: 'plugin', domain: 'core', keywords: ['daily', 'curation', '策展', '精选'] },
@@ -194,7 +194,7 @@ export function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--backdrop-scrim)] px-4 pt-[12vh]"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--backdrop-scrim)] px-4 pt-[11vh]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) {
           onClose();
@@ -207,9 +207,10 @@ export function CommandPalette({
         aria-modal="true"
         aria-label="全局命令面板"
         data-testid="command-palette-dialog"
-        className="omni-theme-surface w-full max-w-2xl overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
+        style={{ boxShadow: 'var(--shadow-elevated)' }}
+        className="omni-theme-surface omni-drawer-motion w-full max-w-2xl overflow-hidden rounded-[18px] bg-[var(--bg-elevated)] text-[var(--text-primary)]"
       >
-        <div className="flex items-center gap-2.5 border-b border-[var(--border-line)] bg-[var(--bg-canvas)] px-4 py-3">
+        <div className="flex items-center gap-3 border-b border-[var(--border-subtle)] px-5 py-3.5">
           <Search className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
           <input
             ref={inputRef}
@@ -227,10 +228,10 @@ export function CommandPalette({
                 ? `omni-cmd-${filteredCommands[activeIndex].id}`
                 : undefined
             }
-            className="w-full bg-transparent text-sm text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
+            className="w-full bg-transparent text-[14.5px] text-[var(--text-primary)] placeholder:text-[var(--text-subtle)] focus:outline-none"
           />
           {ime.isComposing && (
-            <span className="shrink-0 rounded border border-[var(--border-line)] bg-[var(--status-info-bg)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--status-info-fg)]">
+            <span className="shrink-0 rounded-full bg-[var(--status-info-bg)] px-2.5 py-0.5 text-[12px] font-medium text-[var(--status-info-fg)]">
               IME
             </span>
           )}
@@ -238,14 +239,15 @@ export function CommandPalette({
             type="button"
             onClick={onClose}
             aria-label="关闭命令面板"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-[var(--text-muted)] hover:border-[var(--border-line)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
+            title="关闭命令面板 (Esc)"
+            className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[8px] text-[var(--text-muted)] hover:bg-[var(--hover-fill)] hover:text-[var(--text-primary)]"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
 
         {(activeWorkbench || theme || typeof dockOpen === 'boolean') && (
-          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-line)] bg-[var(--bg-soft)] px-4 py-1.5 text-[11px] text-[var(--text-muted)]">
+          <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-sunken)]/55 px-5 py-2 text-[12px] text-[var(--text-muted)]">
             {activeWorkbench && <span>当前工作台：{activeWorkbench}</span>}
             {theme && <span>主题：{theme}</span>}
             {typeof dockOpen === 'boolean' && (
@@ -254,9 +256,9 @@ export function CommandPalette({
           </div>
         )}
 
-        <div role="listbox" aria-label="可用命令列表" className="max-h-[54vh] overflow-y-auto p-1.5">
+        <div role="listbox" aria-label="可用命令列表" className="max-h-[54vh] overflow-y-auto p-2.5">
           {filteredCommands.length === 0 ? (
-            <div className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">
+            <div className="px-4 py-10 text-center text-[14px] text-[var(--text-muted)]">
               未找到匹配“{query}”的命令
             </div>
           ) : (
@@ -273,38 +275,38 @@ export function CommandPalette({
                   onMouseEnter={() => setActiveIndex(idx)}
                   onClick={() => executeCommand(cmd)}
                   className={[
-                    'flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
+                    'flex w-full cursor-pointer items-center justify-between gap-3 rounded-[10px] px-3.5 py-2.5 text-left transition-colors',
                     selected
-                      ? 'bg-[var(--bg-active)] ring-1 ring-inset ring-[var(--focus-ring)]'
+                      ? 'bg-[var(--focus-fill)] ring-2 ring-inset ring-[var(--focus-ring)]'
                       : 'hover:bg-[var(--hover-fill)]',
                   ].join(' ')}
                 >
-                  <div className="flex min-w-0 items-start gap-2.5">
+                  <div className="flex min-w-0 items-start gap-3">
                     <span
                       aria-hidden="true"
-                      className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+                      className="mt-2 h-2 w-2 shrink-0 rounded-full"
                       style={{ backgroundColor: domainColor }}
                     />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium text-[var(--text-primary)]">
+                        <span className="truncate text-[14px] font-medium text-[var(--text-primary)]">
                           {cmd.title}
                         </span>
-                        <span className="shrink-0 rounded border border-[var(--border-line)] bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                        <span className="shrink-0 rounded-full bg-[var(--bg-soft)] px-2.5 py-0.5 text-[12px] text-[var(--text-muted)]">
                           {CATEGORY_LABELS[cmd.category]}
                         </span>
                       </div>
                       {cmd.subtitle && (
-                        <p className="mt-0.5 truncate text-xs text-[var(--text-muted)]">
+                        <p className="mt-0.5 truncate text-[12.5px] text-[var(--text-muted)]">
                           {cmd.subtitle}
                         </p>
                       )}
                     </div>
                   </div>
 
-                  <div className="flex shrink-0 items-center gap-1.5">
+                  <div className="flex shrink-0 items-center gap-2">
                     {cmd.shortcut && (
-                      <kbd className="rounded border border-[var(--keycap-border)] bg-[var(--keycap-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--keycap-fg)] shadow-[0_1px_0_var(--keycap-shadow)]">
+                      <kbd className="omni-keycap rounded-[5px] px-1.5 py-0.5 text-[12px]">
                         {cmd.shortcut}
                       </kbd>
                     )}
@@ -318,9 +320,9 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-[var(--border-line)] bg-[var(--bg-soft)] px-4 py-2 text-[11px] text-[var(--text-muted)]">
-          <span className="inline-flex items-center gap-1">
-            <Command className="h-3 w-3" aria-hidden="true" />
+        <div className="flex items-center justify-between border-t border-[var(--border-subtle)] bg-[var(--bg-sunken)]/55 px-5 py-2 text-[12px] text-[var(--text-muted)]">
+          <span className="inline-flex items-center gap-1.5">
+            <Command className="h-3.5 w-3.5" aria-hidden="true" />
             <span>↑↓ 导航 · Enter 执行 · Esc 关闭</span>
           </span>
           <span>共 {filteredCommands.length} 项</span>

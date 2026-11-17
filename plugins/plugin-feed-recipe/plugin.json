@@ -1,0 +1,112 @@
+{
+  "schema_version": 2,
+  "id": "plugin-feed-recipe",
+  "name": "声明式源配方引擎",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "text",
+  "author": "OmniDesk Contributors",
+  "description": "20-line declarative JSON/Lua feed, article, and comment-tree recipe engine with Chrome login cookie reuse and bilingual parallel reading.",
+  "provides": [
+    "text.source.v1",
+    "text.comments.v1",
+    "feed.recipe.v1"
+  ],
+  "consumes": [
+    "web.cookies.v1",
+    "web.fetch.v1",
+    "web.embed.v1",
+    "web.extract.v1",
+    "llm.translate.v1",
+    "llm.chat.v1"
+  ],
+  "permissions": [
+    "network:wan",
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "fs:user_mount"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "recipes_dir",
+      "type": "string",
+      "default": "",
+      "label": "自定义配方目录",
+      "description": "存放 .json/.lua 声明式源配方的目录（留空则使用插件数据目录下的 recipes/，并自动加载内置起步配方）"
+    },
+    {
+      "key": "chrome_cookie_source",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "plugin-chrome-web",
+        "file",
+        "vault",
+        "disabled"
+      ],
+      "label": "登录 Cookie 来源",
+      "description": "auto 会依次尝试 plugin-chrome-web (web.cookies.v1 / web.embed.v1)、本地 Cookie 文件与 SecretVault"
+    },
+    {
+      "key": "cookie_file_path",
+      "type": "string",
+      "default": "",
+      "label": "备用 Cookie 文件路径",
+      "description": "可选：Chrome 导出的 cookies.json 或 Netscape cookies.txt 路径（按域名与路径安全匹配，仅作回退）"
+    },
+    {
+      "key": "custom_cookie_header",
+      "type": "secret",
+      "default": "",
+      "label": "备用 Cookie Header (Vault)",
+      "description": "可选：加密存储于 SecretVault 中的回退 Cookie Header，绝不输出到日志"
+    },
+    {
+      "key": "pinned_recipes",
+      "type": "string",
+      "default": "",
+      "label": "置顶板块 / 配方 ID",
+      "description": "可选：逗号分隔的置顶配方 ID，优先展示在栏目与信息流顶部"
+    },
+    {
+      "key": "auto_translate",
+      "type": "bool",
+      "default": true,
+      "label": "自动双语对照翻译",
+      "description": "接入 llm.translate.v1 / llm.chat.v1 自动生成双语对照（跳过代码块与公式并做 SHA-256 持久化缓存）"
+    },
+    {
+      "key": "target_lang",
+      "type": "string",
+      "default": "zh-CN",
+      "label": "目标翻译语言",
+      "description": "双语对照翻译的目标语言代码（例如 zh-CN、en）"
+    },
+    {
+      "key": "cache_ttl_sec",
+      "type": "int",
+      "default": 300,
+      "label": "Feed 缓存 TTL (秒)",
+      "description": "同一配方的列表抓取缓存有效期（秒）"
+    },
+    {
+      "key": "request_timeout_sec",
+      "type": "int",
+      "default": 15,
+      "label": "HTTP 超时 (秒)",
+      "description": "单次抓取请求的超时时间（秒）"
+    },
+    {
+      "key": "js_fallback",
+      "type": "bool",
+      "default": true,
+      "label": "挑战页回退 Chrome 抓取",
+      "description": "当 HTTP 抓取遇到 JS/Cloudflare 验证时尝试调用 plugin-chrome-web 的 web.extract.v1"
+    }
+  ]
+}

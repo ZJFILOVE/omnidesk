@@ -1,0 +1,118 @@
+{
+  "schema_version": 2,
+  "id": "plugin-journals",
+  "name": "arXiv / Nature / PubMed Journals",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "Scientific literature stream across arXiv, Nature RSS, bioRxiv, and PubMed with DOI citation lookup, bilingual abstract synthesis, and one-click PDF handoff.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-journals",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-journals.git",
+    "branch": "main"
+  },
+  "provides": [
+    "text.source.v1",
+    "text.citation.v1"
+  ],
+  "consumes": [
+    "llm.chat.v1",
+    "llm.translate.v1",
+    "book.bilingual_pdf.v1",
+    "web.embed.v1"
+  ],
+  "permissions": [
+    "network:wan",
+    "config:read",
+    "config:write",
+    "secret:vault"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "enabled_sources",
+      "label": "启用的学术数据源",
+      "type": "string",
+      "default": "arxiv,nature,biorxiv,pubmed",
+      "description": "Comma-separated journal sources to query: arxiv, nature, biorxiv, pubmed."
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "网络请求超时（秒）",
+      "type": "int",
+      "default": 15,
+      "description": "Timeout in seconds for arXiv, Nature RSS, bioRxiv, PubMed, and Crossref requests."
+    },
+    {
+      "key": "max_results",
+      "label": "单次最大返回条数",
+      "type": "int",
+      "default": 20,
+      "description": "Maximum number of papers returned per source/page query (1-100)."
+    },
+    {
+      "key": "prefer_bilingual_abstract",
+      "label": "优先合成双语摘要",
+      "type": "bool",
+      "default": true,
+      "description": "Automatically synthesize bilingual Chinese abstract/title via llm.translate.v1 or llm.chat.v1 when available."
+    },
+    {
+      "key": "arxiv_categories",
+      "label": "arXiv 默认学科分类",
+      "type": "string",
+      "default": "cs.AI,cs.CL,cs.LG,q-bio",
+      "description": "Comma-separated arXiv subject categories used when no search query is provided."
+    },
+    {
+      "key": "nature_feeds",
+      "label": "Nature RSS 订阅地址",
+      "type": "string",
+      "default": "https://www.nature.com/nature.rss,https://www.nature.com/natmachintell.rss",
+      "description": "Comma-separated HTTPS RSS/Atom feed URLs for Nature journals."
+    },
+    {
+      "key": "biorxiv_server",
+      "label": "bioRxiv / medRxiv 服务器",
+      "type": "select",
+      "default": "biorxiv",
+      "options": [
+        "biorxiv",
+        "medrxiv"
+      ],
+      "description": "Default Cold Spring Harbor preprint server for bioRxiv feed queries."
+    },
+    {
+      "key": "biorxiv_days",
+      "label": "bioRxiv 回溯天数",
+      "type": "int",
+      "default": 7,
+      "description": "Lookback window in days for recent bioRxiv/medRxiv preprint listings."
+    },
+    {
+      "key": "pubmed_query",
+      "label": "PubMed 默认检索式",
+      "type": "string",
+      "default": "machine learning[Title/Abstract] OR foundation model[Title/Abstract]",
+      "description": "Default PubMed ESearch query term when browsing the PubMed channel without search input."
+    },
+    {
+      "key": "crossref_mailto",
+      "label": "Crossref Polite Mailto（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional contact email included in User-Agent/mailto for polite Crossref DOI lookups."
+    },
+    {
+      "key": "ncbi_api_key",
+      "label": "NCBI PubMed API Key（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Optional NCBI E-utilities API key stored exclusively in 0600 SecretVault."
+    }
+  ]
+}

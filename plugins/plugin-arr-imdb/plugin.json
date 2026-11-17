@@ -1,0 +1,124 @@
+{
+  "schema_version": 2,
+  "id": "plugin-arr-imdb",
+  "name": "IMDb & Radarr / Sonarr",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "media",
+  "author": "OmniDesk",
+  "description": "IMDb/TMDB charts & metadata discovery, media.local_match.v1 check, and fail-closed dry-run-safe Radarr/Sonarr queue management.",
+  "provides": [
+    "media.source.v1"
+  ],
+  "consumes": [
+    "media.local_match.v1"
+  ],
+  "permissions": [
+    "network:wan",
+    "network:lan",
+    "config:read",
+    "config:write",
+    "secret:vault"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "imdb_api_base",
+      "label": "IMDb API Base URL",
+      "type": "string",
+      "default": "",
+      "description": "User-configured IMDb-compatible JSON API base URL (http/https only)"
+    },
+    {
+      "key": "tmdb_api_base",
+      "label": "TMDB API Base URL（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional user-configured TMDB v3 compatible base URL (http/https only)"
+    },
+    {
+      "key": "imdb_provider",
+      "label": "榜单数据源协议",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "imdb",
+        "tmdb"
+      ],
+      "description": "API path convention for charts/search/detail endpoints"
+    },
+    {
+      "key": "imdb_api_key",
+      "label": "IMDb API Key（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault (never written to plain config or logs)"
+    },
+    {
+      "key": "tmdb_api_key",
+      "label": "TMDB API Key（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault (never written to plain config or logs)"
+    },
+    {
+      "key": "radarr_url",
+      "label": "Radarr Base URL",
+      "type": "string",
+      "default": "",
+      "description": "Explicitly configured Radarr base URL (e.g. LAN http://...; trust_env=False)"
+    },
+    {
+      "key": "radarr_api_key",
+      "label": "Radarr API Key",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault"
+    },
+    {
+      "key": "sonarr_url",
+      "label": "Sonarr Base URL",
+      "type": "string",
+      "default": "",
+      "description": "Explicitly configured Sonarr base URL (e.g. LAN http://...; trust_env=False)"
+    },
+    {
+      "key": "sonarr_api_key",
+      "label": "Sonarr API Key",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault"
+    },
+    {
+      "key": "quality_profile",
+      "label": "默认清晰度配置（Quality Profile）",
+      "type": "string",
+      "default": "",
+      "description": "Radarr/Sonarr quality profile name or numeric ID"
+    },
+    {
+      "key": "root_folder_path",
+      "label": "默认入库根目录（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional Radarr/Sonarr root folder path (resolved from server if omitted)"
+    },
+    {
+      "key": "dry_run",
+      "label": "默认启用 Dry-Run 演练门禁",
+      "type": "bool",
+      "default": true,
+      "description": "Never submit downloads unless explicitly confirmed with confirm=true"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "请求超时（秒）",
+      "type": "int",
+      "default": 10,
+      "description": "HTTP timeout in seconds for IMDb/TMDB/Radarr/Sonarr requests"
+    }
+  ]
+}

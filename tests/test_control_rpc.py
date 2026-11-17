@@ -208,3 +208,252 @@ def create_plugin():
         await ControlServer(socket_path=sym_sock).start()
     with pytest.raises(PathSafetyError):
         await ControlClient(socket_path=sym_sock).ping()
+
+
+@pytest.mark.asyncio
+async def test_config_rpc_list_get_set_never_echoes_secret_plaintext(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    plugins_dir = tmp_path / "plugins"
+    pdir = plugins_dir / "plugin-cfg-rpc"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "plugin-cfg-rpc",
+                "name": "Config RPC",
+                "version": "0.1.0",
+                "kind": "provider",
+                "domain": "core",
+                "config_schema": [
+                    {"key": "endpoint", "label": "Endpoint", "type": "string", "default": "http://127.0.0.1:3425"},
+                    {"key": "gateway_key", "label": "Gateway Key", "type": "secret", "default": ""},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pdir / "plugin.py").write_text(
+        "from omnidesk_sdk import BasePlugin\n\nclass CfgPlugin(BasePlugin):\n    pass\n\ndef create_plugin():\n    return CfgPlugin()\n",
+        encoding="utf-8",
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_dir, paths=paths)
+    await mgr.load_plugin("plugin-cfg-rpc")
+    sock_path = paths.control_socket_path
+
+    async with ControlServer(socket_path=sock_path, paths=paths, plugins=mgr):
+        client = ControlClient(socket_path=sock_path, caller="ui-settings")
+
+        # Initial config.list shows schema default and unset secret status
+        listed0 = await client.config_list()
+        assert listed0["ok"] is True
+        entry0 = listed0["data"]["plugins"][0]
+        assert entry0["plugin_id"] == "plugin-cfg-rpc"
+        assert entry0["config"] == {"endpoint": "http://127.0.0.1:3425"}
+        assert entry0["secrets"] == {"gateway_key": {"set": False}}
+
+        # config.set plain + secret -> response must NOT echo secret plaintext
+        secret_val = "sk-super-secret-token-98765"
+        set_resp = await client.config_set(
+            "plugin-cfg-rpc",
+            values={"endpoint": "http://127.0.0.1:4444", "gateway_key": secret_val},
+        )
+        assert set_resp["ok"] is True
+        assert secret_val not in json.dumps(set_resp)
+        assert set_resp["data"]["updated_keys"] == ["endpoint"]
+        assert set_resp["data"]["secret_keys_updated"] == ["gateway_key"]
+        assert set_resp["data"]["config"] == {"endpoint": "http://127.0.0.1:4444"}
+        assert set_resp["data"]["secrets"] == {"gateway_key": {"set": True}}
+
+        # Verify SecretVault stored it cleanly while plain config JSON did not
+        assert mgr.secret_vault.get("plugin-cfg-rpc", "gateway_key") == secret_val
+        assert secret_val not in paths.plugin_config_path("plugin-cfg-rpc").read_text(encoding="utf-8")
+
+        # config.list and config.get (full) never expose plaintext secret
+        listed1 = await client.config_list(plugin_id="plugin-cfg-rpc")
+        assert secret_val not in json.dumps(listed1)
+        assert listed1["data"]["plugins"][0]["secrets"] == {"gateway_key": {"set": True}}
+
+        got_all = await client.config_get("plugin-cfg-rpc")
+        assert got_all["ok"] is True
+        assert secret_val not in json.dumps(got_all)
+        assert got_all["data"]["config"]["endpoint"] == "http://127.0.0.1:4444"
+        assert got_all["data"]["secrets"]["gateway_key"] == {"set": True}
+
+        # config.get on plain key returns value
+        got_plain = await client.config_get("plugin-cfg-rpc", key="endpoint")
+        assert got_plain["ok"] is True
+        assert got_plain["data"]["value"] == "http://127.0.0.1:4444"
+        assert got_plain["data"]["is_secret"] is False
+
+        # config.get on secret key without status fails closed; status=True returns only boolean status
+        got_sec_denied = await client.config_get("plugin-cfg-rpc", key="gateway_key")
+        assert got_sec_denied["ok"] is False
+        assert got_sec_denied["error_code"] == ErrorCode.PERMISSION_DENIED
+        assert secret_val not in json.dumps(got_sec_denied)
+
+        got_sec_status = await client.config_get("plugin-cfg-rpc", key="gateway_key", status=True)
+        assert got_sec_status["ok"] is True
+        assert got_sec_status["data"] == {"plugin_id": "plugin-cfg-rpc", "key": "gateway_key", "is_secret": True, "set": True}
+        assert secret_val not in json.dumps(got_sec_status)
+
+        # Clear secret via key=..., value=None
+        cleared = await client.config_set("plugin-cfg-rpc", key="gateway_key", value=None, is_secret=True)
+        assert cleared["ok"] is True
+        assert cleared["data"]["secrets"]["gateway_key"] == {"set": False}
+        assert mgr.secret_vault.get("plugin-cfg-rpc", "gateway_key") is None
+
+        # Invalid inputs fail closed
+        for bad_req in [
+            {"id": "e1", "op": "config.get"},
+            {"id": "e2", "op": "config.get", "plugin_id": "../evil"},
+            {"id": "e3", "op": "config.set", "plugin_id": "plugin-cfg-rpc"},
+            {"id": "e4", "op": "config.set", "plugin_id": "plugin-cfg-rpc", "key": "endpoint", "value": "x", "is_secret": True},
+            {"id": "e5", "op": "config.set", "plugin_id": "plugin-cfg-rpc", "key": "gateway_key", "value": 123},
+            {"id": "e6", "op": "config.set", "plugin_id": "plugin-cfg-rpc", "values": {"nested": {"api_key": "leak"}}},
+        ]:
+            resp = await client.request(bad_req)
+            assert resp["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_domain_snapshot_empty_and_populated_over_unix_socket(tmp_path: Path) -> None:
+    paths = OmnideskPaths.from_env(
+        {
+            "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        }
+    )
+    plugins_dir = tmp_path / "plugins"
+    pdir = plugins_dir / "plugin-dom"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "plugin-dom",
+                "name": "Domain Plugin",
+                "version": "0.1.0",
+                "kind": "hybrid",
+                "domain": "media",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pdir / "plugin.py").write_text(
+        """
+from omnidesk_sdk import BasePlugin, BookSource, DockWidgetSpec, MediaSource, PluginContext, TextSource, WorkspaceTabSpec
+
+class DomMedia(MediaSource):
+    source_id = "dom-media"
+    display_name = "Dom Media"
+
+class DomText(TextSource):
+    source_id = "dom-text"
+    display_name = "Dom Text"
+    category = "blog"
+
+class DomBook(BookSource):
+    source_id = "dom-book"
+    display_name = "Dom Book"
+
+class DomPlugin(BasePlugin):
+    async def on_load(self, ctx: PluginContext) -> None:
+        await super().on_load(ctx)
+        ctx.register_media_source(DomMedia())
+        ctx.register_text_source(DomText())
+        ctx.register_book_source(DomBook())
+        ctx.register_workspace_tab(
+            WorkspaceTabSpec(
+                tab_id="dom-tab",
+                title="Domain Tab",
+                domain="media",
+                ui_schema={"type": "Section", "title": "Main"},
+                render=lambda: {"type": "Markdown", "text": "live"},
+                on_action=lambda action, state: {"ok": True},
+            )
+        )
+        ctx.register_dock_widget(
+            DockWidgetSpec(
+                widget_id="dom-dock",
+                title="Domain Dock",
+                supported_domains=["media", "text"],
+                ui_schema={"type": "KeyValue", "items": []},
+                render=lambda: {"type": "KeyValue"},
+                on_action=lambda action, state: {"ok": True},
+            )
+        )
+
+def create_plugin():
+    return DomPlugin()
+""",
+        encoding="utf-8",
+    )
+
+    mgr = PluginManager(plugins_dir=plugins_dir, paths=paths)
+    sock_path = paths.control_socket_path
+
+    async with ControlServer(socket_path=sock_path, paths=paths, plugins=mgr):
+        client = ControlClient(socket_path=sock_path)
+
+        # 1. Empty DomainRegistry returns empty arrays, never an error
+        empty_snap = await client.domain_snapshot()
+        assert empty_snap["ok"] is True
+        assert empty_snap["data"] == {
+            "media_sources": [],
+            "text_sources": [],
+            "book_sources": [],
+            "workspace_tabs": [],
+            "dock_widgets": [],
+        }
+
+        # 2. Load plugin -> snapshot exposes sources, tabs, and dock widgets as JSON without render/on_action
+        await mgr.load_plugin("plugin-dom")
+        snap = await client.domain_snapshot()
+        assert snap["ok"] is True
+        data = snap["data"]
+        assert [s["source_id"] for s in data["media_sources"]] == ["dom-media"]
+        assert [s["source_id"] for s in data["text_sources"]] == ["dom-text"]
+        assert [s["source_id"] for s in data["book_sources"]] == ["dom-book"]
+        assert len(data["workspace_tabs"]) == 1
+        assert len(data["dock_widgets"]) == 1
+        tab_wire = data["workspace_tabs"][0]
+        dock_wire = data["dock_widgets"][0]
+        assert tab_wire["tab_id"] == "dom-tab"
+        assert tab_wire["ui_schema"] == {"type": "Section", "title": "Main"}
+        assert "render" not in tab_wire and "on_action" not in tab_wire
+        assert dock_wire["widget_id"] == "dom-dock"
+        assert "render" not in dock_wire and "on_action" not in dock_wire
+        json.dumps(snap)  # must be strictly JSON-serializable
+
+        # 3. Domain filter & invalid filter fail closed
+        book_only = await client.domain_snapshot(domain="book")
+        assert book_only["ok"] is True
+        assert book_only["data"]["media_sources"] == []
+        assert len(book_only["data"]["book_sources"]) == 1
+        assert book_only["data"]["workspace_tabs"] == []
+        assert book_only["data"]["dock_widgets"] == []
+
+        bad_dom = await client.domain_snapshot(domain="invalid")
+        assert bad_dom["ok"] is False
+        assert bad_dom["error_code"] == ErrorCode.INVALID_ARGUMENT
+
+        # 4. Unload restores empty snapshot
+        await mgr.unload_plugin("plugin-dom")
+        after_unload = await client.domain_snapshot()
+        assert after_unload["ok"] is True
+        assert after_unload["data"] == {
+            "media_sources": [],
+            "text_sources": [],
+            "book_sources": [],
+            "workspace_tabs": [],
+            "dock_widgets": [],
+        }

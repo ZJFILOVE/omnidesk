@@ -1,0 +1,29 @@
+{
+  "id": "v2ex",
+  "name": "V2EX 技术",
+  "category": "blog",
+  "format": "html",
+  "use_chrome_cookies": true,
+  "feed": {
+    "url": "https://www.v2ex.com/?tab=tech",
+    "item_selector": "div.cell.item",
+    "fields": {
+      "id": "span.item_title a@href",
+      "title": "span.item_title a",
+      "url": "span.item_title a@href",
+      "author": "span.topic_info strong:first-child a",
+      "comment_count": "a.count_livid"
+    }
+  },
+  "article": {
+    "url": "{{url}}",
+    "body_selector": ".topic_content, .markdown_body",
+    "comments": {
+      "item_selector": "#Main .box .cell[id^=r_]",
+      "author": "strong a.dark",
+      "body": ".reply_content",
+      "score": ".small.fade",
+      "created_at": "span.ago"
+    }
+  }
+}

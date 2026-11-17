@@ -1,14 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import type { SelectionActionEvent } from '../components/SelectionBubble';
+import StateView from '../components/StateView';
 import WorkbenchLayout, {
   FocusButton,
   HAIRLINE_BORDER,
-  SectionLabel,
-  focusClass,
-  focusableInputProps,
-  focusableProps,
   useWorkbenchFocus,
   type WorkbenchViewProps,
 } from '../components/WorkbenchLayout';
+import {
+  PanelSectionHeading,
+  SearchInput,
+  SegmentedPills,
+  SelectableRow,
+} from '../components/WorkbenchPrimitives';
 import {
   TEXT_ARTICLES,
   TEXT_CHANNELS,
@@ -18,13 +23,20 @@ import {
 import CommentTreePanel, { type BilingualMode } from './panels/CommentTreePanel';
 import TextArticleReader from './panels/TextArticleReader';
 
-export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
+export interface TextWorkbenchProps extends WorkbenchViewProps {
+  onSelectionAction?: (event: SelectionActionEvent) => void;
+}
+
+export const TextWorkbench: React.FC<TextWorkbenchProps> = ({
   focusId,
   onFocus,
   focusedItemId,
   searchTrigger,
   onContextChange,
+  onOpenDock,
+  onAddVocab,
   onNavigateWorkbench,
+  onSelectionAction,
 }) => {
   const [activeFocusId, emitFocus] = useWorkbenchFocus(
     `text:article:${TEXT_ARTICLES[0]?.id ?? ''}`,
@@ -34,6 +46,8 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
   );
   const [activeChannel, setActiveChannel] = useState<TextChannelId>('all');
   const [dailyOnly, setDailyOnly] = useState<boolean>(false);
+  // Default false so 1280x800 opens as a serene 2-column 68-76ch reading sanctuary + margin notes
+  const [tocOpen, setTocOpen] = useState<boolean>(false);
   const [query, setQuery] = useState<string>('');
   const [selectedArticleId, setSelectedArticleId] = useState<string>(TEXT_ARTICLES[0]?.id ?? '');
   const [bilingualMode, setBilingualMode] = useState<BilingualMode>('bilingual');
@@ -45,7 +59,7 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
     ],
   });
   const [noteDraft, setNoteDraft] = useState<string>('');
-  const [actionBanner, setActionBanner] = useState<string>('双语排版引擎就绪');
+  const [actionBanner, setActionBanner] = useState<string>('双语精读排版就绪');
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -69,9 +83,8 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
 
   const selectedArticle: TextArticle | undefined = useMemo(
     () =>
-      TEXT_ARTICLES.find((a) => a.id === selectedArticleId) ??
-      filteredArticles[0] ??
-      TEXT_ARTICLES[0],
+      filteredArticles.find((a) => a.id === selectedArticleId) ??
+      filteredArticles[0],
     [selectedArticleId, filteredArticles],
   );
 
@@ -102,28 +115,75 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
     setActionBanner('已写入本地 ## Notes 区块（隔离于自动生成内容）');
   };
 
+  const handleSelectionAction = (event: SelectionActionEvent) => {
+    onSelectionAction?.(event);
+    const snippet = event.text.length > 26 ? `${event.text.slice(0, 26)}…` : event.text;
+    const title = selectedArticle?.titleZh ?? '当前文章';
+    if (event.action === 'etymology') {
+      onOpenDock?.(`请查词源与语境用法：「${event.text}」（语境：${event.contextSentence}）`);
+      setActionBanner(`已请求词源拆解：「${snippet}」`);
+    } else if (event.action === 'clause') {
+      onOpenDock?.(`请拆分长难句并标注从句层次：\n"${event.text}"`);
+      setActionBanner(`已送 F8 拆解长难句：「${snippet}」`);
+    } else if (event.action === 'vocab') {
+      onAddVocab?.({
+        word: event.text,
+        contextSentence: event.contextSentence,
+        sourceTitle: title,
+      });
+      setActionBanner(`已加入生词本：「${snippet}」`);
+    } else if (event.action === 'companion') {
+      onOpenDock?.(`请结合《${title}》解读选区：\n"${event.text}"`);
+      setActionBanner(`已送入 F8 伴读栏：「${snippet}」`);
+    } else if (event.action === 'copy') {
+      setActionBanner(`已复制选区：「${snippet}」`);
+    }
+  };
+
+  const resetFilters = () => {
+    setQuery('');
+    setActiveChannel('all');
+    setDailyOnly(false);
+  };
+
   return (
     <WorkbenchLayout
       domain="text"
-      title="文字社区与科学期刊工作台 · TextWorkbench"
-      subtitle="Journal 审稿级拆解、每日早报、Reddit/Linux.do 嵌套评论树与双语精读"
-      badge="Text · Ctrl+2"
+      testId="workbench-text"
+      title="文字与期刊"
+      subtitle="舒适长文精读 · 编辑部旁注评论 · 双语对照"
+      editorialHeader
+      leftWidthClass="@[860px]/workbench:w-[248px]"
+      rightWidthClass="@[860px]/workbench:w-[328px]"
       headerActions={
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            ref={searchRef}
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="过滤标题、摘要、标签..."
-            aria-label="搜索文章"
-            data-focused={activeFocusId === 'text:search' ? 'true' : undefined}
-            {...focusableInputProps('text:search', activeFocusId, emitFocus)}
-            className={focusClass(
-              activeFocusId === 'text:search',
-              'w-52 rounded-md border px-2.5 py-1 text-xs',
+          <FocusButton
+            focusId="text:toggle:toc"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            onActivate={() => setTocOpen((v) => !v)}
+            selected={tocOpen}
+            tone="text"
+            surface="soft"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] font-medium"
+          >
+            {tocOpen ? (
+              <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <PanelLeftOpen className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            style={{ backgroundColor: 'var(--bg-canvas, #F6F5F3)', borderColor: HAIRLINE_BORDER }}
+            <span>{tocOpen ? '收起目录' : `期刊目录 (${filteredArticles.length})`}</span>
+          </FocusButton>
+          <SearchInput
+            focusId="text:search"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            value={query}
+            onChange={setQuery}
+            placeholder="过滤标题、摘要、标签..."
+            ariaLabel="搜索文章"
+            inputRef={searchRef}
+            widthClass="w-56"
           />
           <FocusButton
             focusId="text:filter:daily"
@@ -133,110 +193,164 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
             selected={dailyOnly}
             tone="ok"
             surface="soft"
-            className="px-2.5 py-1 text-xs font-medium"
+            className="px-3 py-1.5 text-[12.5px] font-medium"
           >
-            {dailyOnly ? '仅显示每日精选 ✓' : '全部 / 每日精选'}
+            {dailyOnly ? '仅每日精选 ✓' : '每日精选'}
           </FocusButton>
         </div>
       }
       toolbar={
-        <div className="flex w-full flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {TEXT_CHANNELS.map((ch) => (
-              <FocusButton
-                key={ch.id}
-                focusId={`text:channel:${ch.id}`}
-                activeFocusId={activeFocusId}
-                onFocus={emitFocus}
-                onActivate={() => setActiveChannel(ch.id)}
-                selected={activeChannel === ch.id}
-                tone="text"
-                surface="surface"
-                className="px-2.5 py-1 text-xs font-medium"
-              >
-                {ch.label} ({ch.count})
-              </FocusButton>
-            ))}
-          </div>
-          <span className="font-mono text-[11px]" style={{ color: 'var(--text-muted, #66625D)' }}>
-            {actionBanner}
-          </span>
+        <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
+          <SegmentedPills
+            options={TEXT_CHANNELS}
+            value={activeChannel}
+            onChange={setActiveChannel}
+            focusPrefix="text:channel:"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            tone="text"
+            ariaLabel="文章频道筛选"
+          />
+          <span className="text-[12.5px] text-[var(--text-muted)]">{actionBanner}</span>
         </div>
       }
       leftPane={
-        <div className="flex flex-col gap-2 p-3">
-          <SectionLabel className="px-1">文章列表 ({filteredArticles.length})</SectionLabel>
-          {filteredArticles.map((article) => {
-            const artFocusId = `text:article:${article.id}`;
-            const isSelected = selectedArticle?.id === article.id;
-            const isFocused = activeFocusId === artFocusId;
-            return (
-              <article
-                key={article.id}
-                role="button"
-                aria-pressed={isSelected}
-                data-focused={isFocused ? 'true' : undefined}
-                {...focusableProps(artFocusId, activeFocusId, emitFocus, () => {
-                  setSelectedArticleId(article.id);
-                  setActionBanner(`已加载：${article.titleZh}`);
-                })}
-                className={focusClass(isFocused, 'cursor-pointer rounded-lg border p-3 text-left transition-colors')}
-                style={{
-                  backgroundColor: isSelected ? 'var(--status-info-bg, #E8F2FD)' : 'var(--bg-canvas, #F6F5F3)',
-                  borderColor: isSelected ? 'var(--domain-text, #2260AA)' : HAIRLINE_BORDER,
+        tocOpen ? (
+          <div className="flex flex-col gap-2.5 p-4">
+            <PanelSectionHeading title="期刊与社区目录" meta={`${filteredArticles.length} 篇`} />
+            {filteredArticles.length === 0 ? (
+              <StateView
+                mode="empty"
+                title="没有匹配的文章"
+                description="尝试清空关键词或切换频道。"
+                activeFocusId={activeFocusId}
+                onFocus={emitFocus}
+                action={{
+                  label: '查看全部文章',
+                  focusId: 'text:empty:reset',
+                  onActivate: resetFilters,
                 }}
-              >
-                <div className="mb-1 flex items-center justify-between gap-1.5">
-                  <span className="truncate font-mono text-[10px] font-medium" style={{ color: 'var(--domain-text, #2260AA)' }}>
-                    {article.sourceName}
-                  </span>
-                  {article.curationMode === 'daily_immutable' ? (
-                    <span
-                      className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold"
-                      style={{ backgroundColor: 'var(--status-ok-bg, #E7F5ED)', color: 'var(--status-ok-fg, #1E7244)' }}
-                    >
-                      每日精选
-                    </span>
-                  ) : article.previouslyRecommendedOn ? (
-                    <span
-                      className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold"
-                      style={{ backgroundColor: 'var(--status-warn-bg, #FCF2DF)', color: 'var(--status-warn-fg, #AC5F0C)' }}
-                    >
-                      经典重温
-                    </span>
-                  ) : null}
-                </div>
-                <h3 className="line-clamp-2 text-xs leading-snug font-semibold">{article.titleZh}</h3>
-                <p className="mt-0.5 line-clamp-1 font-mono text-[10px]" style={{ color: 'var(--text-muted, #66625D)' }}>
-                  {article.title}
-                </p>
-                <div className="mt-2 flex items-center justify-between font-mono text-[10px]" style={{ color: 'var(--text-subtle, #8A847D)' }}>
-                  <span>{article.readTime}</span>
-                  <span>{article.impactScore ?? article.publishedAt}</span>
-                </div>
-              </article>
-            );
-          })}
-        </div>
+              />
+            ) : (
+              <div className="flex flex-col gap-1 px-1 py-1">
+                {filteredArticles.map((article) => (
+                  <SelectableRow
+                    key={article.id}
+                    focusId={`text:article:${article.id}`}
+                    activeFocusId={activeFocusId}
+                    selected={selectedArticle?.id === article.id}
+                    domain="text"
+                    onFocus={emitFocus}
+                    onActivate={() => {
+                      setSelectedArticleId(article.id);
+                      setActionBanner(`已加载：${article.titleZh}`);
+                    }}
+                    title={article.titleZh}
+                    eyebrow={
+                      <>
+                        <span className="truncate font-medium" style={{ color: 'var(--domain-text)' }}>
+                          {article.sourceName}
+                        </span>
+                        {article.curationMode === 'daily_immutable' ? (
+                          <span className="shrink-0 font-medium" style={{ color: 'var(--status-ok-fg)' }}>
+                            精选
+                          </span>
+                        ) : article.previouslyRecommendedOn ? (
+                          <span className="shrink-0 font-medium" style={{ color: 'var(--status-warn-fg)' }}>
+                            重温
+                          </span>
+                        ) : null}
+                      </>
+                    }
+                    meta={
+                      <>
+                        <span>{article.readTime}</span>
+                        <span>·</span>
+                        <span>{article.impactScore ?? article.publishedAt}</span>
+                      </>
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : undefined
       }
       mainPane={
-        selectedArticle ? (
-          <TextArticleReader
-            article={selectedArticle}
-            bilingualMode={bilingualMode}
-            activeFocusId={activeFocusId}
-            onFocus={emitFocus}
-            onBilingualModeChange={setBilingualMode}
-            onSendToBabelDoc={() => {
-              setActionBanner(`已提交至 book.bilingual_pdf.v1：${selectedArticle.titleZh}`);
-              onNavigateWorkbench?.('book', { fromArticleId: selectedArticle.id });
-            }}
-            onOpenChromeApp={() => setActionBanner('已唤起托管 Chrome --app + MV3 双语扩展')}
-            onSelectBlock={(blockId) =>
-              setActionBanner(`已聚焦段落 ${blockId} · 可按 F8 送入伴读解释`)
-            }
-          />
-        ) : null
+        <div className="flex flex-col">
+          {/* Sleek Single-Row Issue Strip when vertical TOC drawer is collapsed */}
+          {!tocOpen && filteredArticles.length > 0 ? (
+            <nav
+              aria-label="本期文章快速切换"
+              className="border-b px-6 py-2"
+              style={{
+                borderColor: HAIRLINE_BORDER,
+                backgroundColor: 'color-mix(in srgb, var(--bg-surface) 55%, var(--bg-canvas))',
+              }}
+            >
+              <div className="omni-prose-measure mx-auto flex flex-nowrap items-center gap-1.5 overflow-x-auto px-1.5 py-2">
+                {filteredArticles.map((article) => {
+                  const isSelected = selectedArticle?.id === article.id;
+                  return (
+                    <FocusButton
+                      key={article.id}
+                      focusId={`text:article:${article.id}`}
+                      activeFocusId={activeFocusId}
+                      onFocus={emitFocus}
+                      onActivate={() => {
+                        setSelectedArticleId(article.id);
+                        setActionBanner(`已加载：${article.titleZh}`);
+                      }}
+                      selected={isSelected}
+                      tone="text"
+                      surface={isSelected ? 'surface' : 'ghost'}
+                      className="shrink-0 max-w-[220px] truncate px-2.5 py-1 text-left text-[12.5px] font-medium"
+                    >
+                      <span className="mr-1.5 font-mono text-[11.5px] opacity-75">
+                        {article.sourceName.split(' ')[0]}
+                      </span>
+                      <span>{article.titleZh}</span>
+                    </FocusButton>
+                  );
+                })}
+              </div>
+            </nav>
+          ) : null}
+
+          {selectedArticle ? (
+            <TextArticleReader
+              article={selectedArticle}
+              bilingualMode={bilingualMode}
+              activeFocusId={activeFocusId}
+              onFocus={emitFocus}
+              onBilingualModeChange={setBilingualMode}
+              onSendToBabelDoc={() => {
+                setActionBanner(`已提交至 book.bilingual_pdf.v1：${selectedArticle.titleZh}`);
+                onNavigateWorkbench?.('book', { fromArticleId: selectedArticle.id });
+              }}
+              onOpenChromeApp={() => setActionBanner('已唤起托管 Chrome --app + MV3 双语扩展')}
+              onSelectBlock={(blockId) =>
+                setActionBanner(`已聚焦段落 ${blockId} · 可按 F8 送入伴读解释`)
+              }
+              onSelectionAction={handleSelectionAction}
+            />
+          ) : (
+            <div className="omni-prose-measure mx-auto w-full p-8">
+              <StateView
+                mode="empty"
+                title="没有匹配的文章"
+                description="尝试清空搜索词或切换频道。"
+                activeFocusId={activeFocusId}
+                onFocus={emitFocus}
+                action={{
+                  label: '查看全部文章',
+                  focusId: 'text:empty:reset',
+                  onActivate: resetFilters,
+                }}
+              />
+            </div>
+          )}
+        </div>
       }
       rightPane={
         selectedArticle ? (
@@ -249,6 +363,7 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
             notes={notesByArticle[selectedArticle.id] ?? []}
             noteDraft={noteDraft}
             activeFocusId={activeFocusId}
+            error={selectedArticle.commentsError ?? null}
             onFocus={emitFocus}
             onToggleCollapse={(id) =>
               setCollapsedComments((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -257,13 +372,7 @@ export const TextWorkbench: React.FC<WorkbenchViewProps> = ({
             onNoteDraftChange={setNoteDraft}
             onAddNote={handleAddNote}
           />
-        ) : null
-      }
-      footer={
-        <>
-          <span>焦点锚点: {activeFocusId || '未锁定'}</span>
-          <span>双语排版 · KaTeX 公式 · 可折叠评论树</span>
-        </>
+        ) : undefined
       }
     />
   );

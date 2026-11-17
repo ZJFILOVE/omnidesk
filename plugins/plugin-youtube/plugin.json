@@ -1,0 +1,111 @@
+{
+  "schema_version": 2,
+  "id": "plugin-youtube",
+  "name": "YouTube Media & Bilingual Subtitles",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "media",
+  "author": "OmniDesk",
+  "description": "YouTube subscriptions, search, channels, playlists, yt-dlp stream resolution, SponsorBlock chapter merge, and bilingual subtitle pre-translation.",
+  "provides": [
+    "media.source.v1"
+  ],
+  "consumes": [
+    "llm.translate.v1",
+    "speech.asr.v1",
+    "player.timeline.v1"
+  ],
+  "permissions": [
+    "network:wan",
+    "process:yt-dlp",
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "fs:user_mount"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "api_key",
+      "label": "YouTube Data API Key（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Optional YouTube Data API v3 key stored exclusively in 0600 SecretVault."
+    },
+    {
+      "key": "oauth_token",
+      "label": "YouTube OAuth Token（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Optional OAuth 2.0 Bearer token for subscriptions, stored exclusively in 0600 SecretVault."
+    },
+    {
+      "key": "ytdlp_bin",
+      "label": "yt-dlp 可执行路径",
+      "type": "string",
+      "default": "yt-dlp",
+      "description": "Executable name on PATH or explicit path to yt-dlp."
+    },
+    {
+      "key": "region",
+      "label": "地区代码",
+      "type": "string",
+      "default": "US",
+      "description": "ISO 3166-1 alpha-2 region code for YouTube API and feeds (e.g. US, JP, TW)."
+    },
+    {
+      "key": "quality",
+      "label": "首选画质上限",
+      "type": "select",
+      "default": "1080p",
+      "options": [
+        "best",
+        "2160p",
+        "1440p",
+        "1080p",
+        "720p",
+        "480p",
+        "360p",
+        "audio"
+      ],
+      "description": "Preferred stream quality ceiling when resolving yt-dlp formats."
+    },
+    {
+      "key": "cache_dir",
+      "label": "字幕缓存目录（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional directory for cached bilingual subtitles; defaults to plugin data/cache directory."
+    },
+    {
+      "key": "channel_ids",
+      "label": "关注频道 ID 列表（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Comma-separated YouTube channel IDs or @handles used when OAuth is not configured."
+    },
+    {
+      "key": "playlist_ids",
+      "label": "播放列表 ID 列表（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Comma-separated YouTube playlist IDs (e.g. WL, PL...) for playlists and watch later."
+    },
+    {
+      "key": "target_lang",
+      "label": "双语字幕目标语言",
+      "type": "string",
+      "default": "zh-CN",
+      "description": "Target translation language passed to llm.translate.v1."
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "网络与工具超时（秒）",
+      "type": "int",
+      "default": 15,
+      "description": "Timeout in seconds for YouTube Data API, subtitle downloads, and yt-dlp calls."
+    }
+  ]
+}

@@ -1,16 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import ContentCard from '../components/ContentCard';
+import { isTauriAvailable, mpvEmbedSetActive } from '../api';
+import MpvCanvas from '../components/MpvCanvas';
+import StateView from '../components/StateView';
 import WorkbenchLayout, {
-  FocusButton,
   HAIRLINE_BORDER,
-  SectionLabel,
-  focusClass,
-  focusableInputProps,
   useWorkbenchFocus,
   type WorkbenchViewProps,
 } from '../components/WorkbenchLayout';
+import {
+  PanelSectionHeading,
+  SearchInput,
+  SegmentedPills,
+  SelectableRow,
+  TagChip,
+} from '../components/WorkbenchPrimitives';
 import { MEDIA_ITEMS, type ChapterSegment, type MediaItem } from '../data/mock';
+import { enqueueEphemeralTrack, runMediaInspectorCapability } from './mediaActions';
 import MediaInspector from './panels/MediaInspector';
+import { useMpvPlayback } from './useMpvPlayback';
 
 type MediaFilterId =
   | 'all'
@@ -20,13 +27,13 @@ type MediaFilterId =
   | 'daily_immutable'
   | 'interactive_ephemeral';
 
-const FILTER_TABS: { id: MediaFilterId; label: string; hint: string }[] = [
-  { id: 'all', label: '全部媒体', hint: 'Video · Music · NAS' },
-  { id: 'video', label: '视频精选', hint: 'YouTube & B站' },
-  { id: 'music', label: 'Apple Music', hint: '每日 5 首 & 双语词' },
-  { id: 'nas', label: '飞牛 NAS 原盘', hint: '4K DoVi & 台词切片' },
-  { id: 'daily_immutable', label: '每日账本', hint: 'daily_immutable' },
-  { id: 'interactive_ephemeral', label: '灵感重温', hint: 'interactive_ephemeral' },
+const FILTER_OPTIONS: { id: MediaFilterId; label: string }[] = [
+  { id: 'all', label: '全部' },
+  { id: 'video', label: '视频精选' },
+  { id: 'music', label: 'Apple Music' },
+  { id: 'nas', label: '飞牛 NAS' },
+  { id: 'daily_immutable', label: '每日账本' },
+  { id: 'interactive_ephemeral', label: '灵感重温' },
 ];
 
 export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
@@ -34,6 +41,9 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   onFocus,
   focusedItemId,
   searchTrigger,
+  mediaToggleTrigger,
+  runtimeStatus,
+  isActive = true,
   onContextChange,
 }) => {
   const [activeFocusId, emitFocus] = useWorkbenchFocus(
@@ -45,17 +55,81 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   const [activeFilter, setActiveFilter] = useState<MediaFilterId>('all');
   const [query, setQuery] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string>(MEDIA_ITEMS[0]?.id ?? '');
-  const [playing, setPlaying] = useState<boolean>(false);
-  const [currentSec, setCurrentSec] = useState<number>(64);
+  const [previewPlaying, setPreviewPlaying] = useState<boolean>(false);
+  const [previewSec, setPreviewSec] = useState<number>(64);
+  const [previewVolume, setPreviewVolume] = useState<number>(85);
+  const [volumeDraft, setVolumeDraft] = useState<number | null>(null);
   const [ephemeralQueue, setEphemeralQueue] = useState<string[]>(['media-music-daily-2']);
-  const [actionStatus, setActionStatus] = useState<string>('libmpv hwdec=auto-safe 就绪');
+  const [actionStatus, setActionStatus] = useState<string>(() =>
+    isTauriAvailable()
+      ? (runtimeStatus?.mpv?.detail ?? 'libmpv 硬解管线就绪')
+      : '离线预览：示例媒体与模拟时间轴',
+  );
+  const mpv = useMpvPlayback();
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const lastToggleRef = useRef<number>(mediaToggleTrigger ?? 0);
+  const mountedRef = useRef(true);
+  const volumeTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (volumeTimerRef.current !== null) {
+        window.clearTimeout(volumeTimerRef.current);
+        volumeTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (runtimeStatus?.mpv?.detail) {
+      setActionStatus(runtimeStatus.mpv.detail);
+    }
+  }, [runtimeStatus?.mpv?.detail]);
 
   useEffect(() => {
     if (searchTrigger && searchTrigger > 0) {
       searchRef.current?.focus();
     }
   }, [searchTrigger]);
+
+  useEffect(() => {
+    if (mediaToggleTrigger !== undefined && mediaToggleTrigger !== lastToggleRef.current) {
+      lastToggleRef.current = mediaToggleTrigger;
+      void handleTogglePlay();
+    }
+  }, [mediaToggleTrigger]);
+
+  useEffect(() => {
+    if (!mpv.enabled) return;
+    const activeItemId = mpv.state?.itemId;
+    if (!activeItemId || activeItemId === selectedId) return;
+    if (MEDIA_ITEMS.some((item) => item.id === activeItemId)) {
+      setSelectedId(activeItemId);
+    }
+  }, [mpv.enabled, mpv.state?.itemId, selectedId]);
+
+  useEffect(() => {
+    if (mpv.state?.lastError) {
+      setActionStatus(`mpv 错误：${mpv.state.lastError}`);
+    }
+  }, [mpv.state?.lastError]);
+
+  useEffect(() => {
+    if (mpv.embedded) {
+      setActionStatus(
+        mpv.embedDetail ? `libmpv 内嵌画布就绪 · ${mpv.embedDetail}` : 'libmpv 内嵌画布就绪',
+      );
+    } else if (mpv.embedDetail) {
+      setActionStatus(mpv.embedDetail);
+    }
+  }, [mpv.embedDetail, mpv.embedded]);
+
+  useEffect(() => {
+    if (mpv.state?.volume === undefined) return;
+    setVolumeDraft(null);
+  }, [mpv.state?.volume]);
 
   const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -90,6 +164,23 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     [selectedId, filteredItems],
   );
 
+  const currentSec = mpv.enabled ? mpv.positionSec : previewSec;
+  const effectiveDuration =
+    mpv.enabled && mpv.durationSec ? mpv.durationSec : (selectedItem?.durationSec ?? 0);
+  const playing = mpv.enabled ? mpv.playing : previewPlaying;
+  const volume = volumeDraft ?? (mpv.enabled ? mpv.volume : previewVolume);
+
+  useEffect(() => {
+    if (!mpv.embedded) return undefined;
+    const shouldRender = Boolean(isActive && selectedItem?.kind === 'video');
+    void mpvEmbedSetActive(shouldRender);
+    return () => {
+      if (shouldRender) {
+        void mpvEmbedSetActive(false);
+      }
+    };
+  }, [isActive, mpv.embedded, selectedItem?.kind]);
+
   useEffect(() => {
     if (!onContextChange) return;
     if (!selectedItem) {
@@ -109,12 +200,12 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   }, [onContextChange, selectedItem]);
 
   useEffect(() => {
-    if (!playing || !selectedItem) return undefined;
+    if (mpv.enabled || !previewPlaying || !selectedItem) return undefined;
     const timer = window.setInterval(() => {
-      setCurrentSec((prev) => (prev + 1 >= selectedItem.durationSec ? 0 : prev + 1));
+      setPreviewSec((prev) => (prev + 1 >= selectedItem.durationSec ? 0 : prev + 1));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [playing, selectedItem]);
+  }, [mpv.enabled, previewPlaying, selectedItem]);
 
   const activeLyricIndex = useMemo(() => {
     if (!selectedItem?.lyrics?.length) return -1;
@@ -134,215 +225,250 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     );
   }, [selectedItem, currentSec]);
 
-  const progressPct = selectedItem
-    ? Math.min(100, Math.round((currentSec / Math.max(1, selectedItem.durationSec)) * 100))
-    : 0;
-
-  const handleSelectMedia = (item: MediaItem) => {
+  const handleSelectMedia = async (item: MediaItem) => {
     setSelectedId(item.id);
-    setCurrentSec(0);
-    setPlaying(true);
-    setActionStatus(`已挂载至 libmpv 视口：${item.title}`);
+    if (!mpv.enabled) {
+      setPreviewSec(0);
+      setPreviewPlaying(true);
+      setActionStatus(`离线预览播放：${item.title}（示例模拟时间轴）`);
+      return;
+    }
+    const result = await mpv.open(item, { paused: false });
+    if (mountedRef.current) {
+      setActionStatus(result.message);
+    }
+  };
+
+  async function seekTo(seconds: number, successStatus?: string) {
+    if (!selectedItem) return;
+    const total = effectiveDuration > 0 ? effectiveDuration : seconds;
+    const target = Math.max(0, total > 0 ? Math.min(seconds, total) : seconds);
+    if (!mpv.enabled) {
+      setPreviewSec(target);
+      setPreviewPlaying(true);
+      setActionStatus(successStatus ?? `离线预览跳转至 ${Math.floor(target)}s`);
+      return;
+    }
+    const result = await mpv.seek(selectedItem, target);
+    if (mountedRef.current) {
+      setActionStatus(result.ok && successStatus ? successStatus : result.message);
+    }
+  }
+
+  async function handleTogglePlay() {
+    if (!selectedItem) return;
+    if (!mpv.enabled) {
+      setPreviewPlaying((prev) => {
+        const next = !prev;
+        setActionStatus(next ? '离线预览播放中（Space 控制）' : '离线预览已暂停（Space 控制）');
+        return next;
+      });
+      return;
+    }
+    const result = await mpv.toggle(selectedItem);
+    if (mountedRef.current) {
+      setActionStatus(result.message);
+    }
+  }
+
+  const handleSeek = (seconds: number) => {
+    void seekTo(seconds);
   };
 
   const handleSkipSponsor = (seg: ChapterSegment) => {
-    setCurrentSec(seg.endSec);
-    setActionStatus(`SponsorBlock 已跳过：${seg.label}`);
+    void seekTo(seg.endSec, `SponsorBlock 已跳过：${seg.label}`);
   };
 
-  const handleQueueEphemeral = (id: string) => {
-    setEphemeralQueue((prev) => (prev.includes(id) ? prev : [...prev, id]));
-    setActionStatus('已加入「OmniDesk AI 灵感电台」（未触碰每日歌单）');
+  const handleVolumeChange = (nextVolume: number) => {
+    setVolumeDraft(nextVolume);
+    if (!mpv.enabled) {
+      setPreviewVolume(nextVolume);
+      setActionStatus(`离线预览音量 ${nextVolume}%`);
+      return;
+    }
+    if (volumeTimerRef.current !== null) {
+      window.clearTimeout(volumeTimerRef.current);
+    }
+    volumeTimerRef.current = window.setTimeout(() => {
+      volumeTimerRef.current = null;
+      void mpv.setVolume(nextVolume).then((result) => {
+        if (!mountedRef.current) return;
+        if (!result.ok) setVolumeDraft(null);
+        setActionStatus(result.message);
+      });
+    }, 120);
+  };
+
+  const handleQueueEphemeral = async (id: string) => {
+    const result = await enqueueEphemeralTrack(selectedItem);
+    if (!mountedRef.current) return;
+    if (result.ok) {
+      setEphemeralQueue((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    }
+    setActionStatus(result.message);
+  };
+
+  const handleInspectorAction = async (statusMsg: string) => {
+    const msg = await runMediaInspectorCapability(statusMsg);
+    if (mountedRef.current) {
+      setActionStatus(msg);
+    }
   };
 
   return (
     <WorkbenchLayout
       domain="media"
-      title="影视与无损音乐工作台 · MediaWorkbench"
-      subtitle="YouTube / B站硬解、Apple Music 国区双语歌词与飞牛 fnOS 原盘"
-      badge="Media · Ctrl+1"
+      testId="workbench-media"
+      title="影视与音乐"
+      subtitle="16:9 精播舞台 · Apple Music 双语歌词 · 飞牛 NAS 原盘"
       headerActions={
-        <div className="flex items-center gap-2">
-          <input
-            ref={searchRef}
-            type="search"
+        <div className="flex flex-wrap items-center gap-2.5">
+          <SearchInput
+            focusId="media:search"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="检索片名、艺人、YouTube / NAS..."
-            aria-label="搜索媒体条目"
-            data-focused={activeFocusId === 'media:search' ? 'true' : undefined}
-            {...focusableInputProps('media:search', activeFocusId, emitFocus)}
-            className={focusClass(
-              activeFocusId === 'media:search',
-              'w-56 rounded-md border px-2.5 py-1 text-xs transition-colors',
-            )}
-            style={{
-              backgroundColor: 'var(--bg-canvas, #F6F5F3)',
-              borderColor: HAIRLINE_BORDER,
-              color: 'var(--text-primary, #222120)',
-            }}
+            onChange={setQuery}
+            placeholder="检索片名、艺人、来源..."
+            ariaLabel="搜索媒体条目"
+            inputRef={searchRef}
+            widthClass="w-56"
           />
-          <span
-            className="rounded border px-2 py-1 font-mono text-[11px]"
-            style={{
-              borderColor: HAIRLINE_BORDER,
-              backgroundColor: 'var(--bg-soft, #F1EFEC)',
-              color: 'var(--text-muted, #66625D)',
-            }}
-          >
-            灵感电台队列：{ephemeralQueue.length}
-          </span>
+          <TagChip tone="neutral">灵感电台 · {ephemeralQueue.length}</TagChip>
+          {mpv.embedded ? <TagChip tone="core">LIBMPV 内嵌</TagChip> : null}
         </div>
       }
-      leftPane={
-        <div className="flex flex-col gap-4 p-4">
-          <div>
-            <SectionLabel className="mb-2">媒体源与策展通道</SectionLabel>
-            <div className="flex flex-col gap-1">
-              {FILTER_TABS.map((tab) => (
-                <FocusButton
-                  key={tab.id}
-                  focusId={`media:filter:${tab.id}`}
-                  activeFocusId={activeFocusId}
-                  onFocus={emitFocus}
-                  onActivate={() => setActiveFilter(tab.id)}
-                  selected={activeFilter === tab.id}
-                  tone="media"
-                  className="w-full px-3 py-2 text-left"
-                >
-                  <div className="text-xs font-semibold">{tab.label}</div>
-                  <div className="font-mono text-[10px]" style={{ color: 'var(--text-muted, #66625D)' }}>
-                    {tab.hint}
-                  </div>
-                </FocusButton>
-              ))}
-            </div>
-          </div>
-
-          <div
-            className="rounded-lg border p-3 text-xs"
-            style={{ backgroundColor: 'var(--bg-soft, #F1EFEC)', borderColor: HAIRLINE_BORDER }}
-          >
-            <div className="mb-1 font-semibold">歌单反写隔离门禁</div>
-            <p className="leading-relaxed" style={{ color: 'var(--text-muted, #66625D)' }}>
-              <span className="font-mono">p.YJXV7dEIeb3GzZX</span>{' '}
-              仅接受每日不重复精选同步；即时点播与重温仅写入「OmniDesk AI 灵感电台」。
-            </p>
-          </div>
+      toolbar={
+        <div className="flex w-full flex-wrap items-center justify-between gap-2.5">
+          <SegmentedPills
+            options={FILTER_OPTIONS}
+            value={activeFilter}
+            onChange={setActiveFilter}
+            focusPrefix="media:filter:"
+            activeFocusId={activeFocusId}
+            onFocus={emitFocus}
+            tone="media"
+            ariaLabel="媒体源筛选"
+          />
+          <span className="text-[12.5px] text-[var(--text-muted)]">{actionStatus}</span>
         </div>
       }
       mainPane={
-        <div className="p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <span className="text-xs font-medium" style={{ color: 'var(--text-muted, #66625D)' }}>
-              共 {filteredItems.length} 项媒体内容 · 16:9 卡片视图
-            </span>
-            <span className="font-mono text-[11px]" style={{ color: 'var(--text-muted, #66625D)' }}>
-              {actionStatus}
-            </span>
+        <div className="flex flex-col gap-6 p-6 @[860px]/workbench:flex-row">
+          {/* Primary Cinema / Studio Stage */}
+          <div className="min-w-0 flex-1">
+            {selectedItem ? (
+              <MediaInspector
+                item={selectedItem}
+                playing={playing}
+                currentSec={currentSec}
+                durationSec={effectiveDuration}
+                volume={volume}
+                playbackBackend={mpv.embedded ? 'libmpv' : mpv.enabled ? 'mpv' : 'preview'}
+                videoSurface={
+                  selectedItem.kind === 'video' && mpv.embedded ? (
+                    <MpvCanvas active={mpv.embedded && isActive} />
+                  ) : undefined
+                }
+                activeLyricIndex={activeLyricIndex}
+                nextSponsorSegment={nextSponsorSegment}
+                inEphemeralQueue={ephemeralQueue.includes(selectedItem.id)}
+                activeFocusId={activeFocusId}
+                onFocus={emitFocus}
+                onTogglePlay={() => void handleTogglePlay()}
+                onSeek={handleSeek}
+                onVolumeChange={handleVolumeChange}
+                onSkipSponsor={handleSkipSponsor}
+                onQueueEphemeral={(id) => void handleQueueEphemeral(id)}
+                onStatusChange={(msg) => void handleInspectorAction(msg)}
+              />
+            ) : (
+              <StateView mode="empty" title="未选择播放条目" description="从右侧队列中选择一项以开始播放。" />
+            )}
           </div>
 
-          {filteredItems.length === 0 ? (
-            <div
-              className="rounded-lg border p-8 text-center text-sm"
-              style={{
-                backgroundColor: 'var(--bg-surface, #FCFBF9)',
-                borderColor: HAIRLINE_BORDER,
-                color: 'var(--text-muted, #66625D)',
-              }}
-            >
-              没有匹配的媒体条目，尝试清空搜索或切换左侧媒体源。
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {filteredItems.map((item) => {
-                const isSelected = selectedItem?.id === item.id;
-                const isEphemeral = item.curationMode === 'interactive_ephemeral';
-                const isDaily = item.curationMode === 'daily_immutable';
-                const inQueue = ephemeralQueue.includes(item.id);
-                return (
-                  <ContentCard
-                    key={item.id}
-                    focusId={`media:card:${item.id}`}
-                    activeFocusId={activeFocusId}
-                    selected={isSelected}
-                    onFocus={emitFocus}
-                    onActivate={() => handleSelectMedia(item)}
-                    aspect="16:9"
-                    coverGradient={item.thumbGradient}
-                    coverTag={item.thumbTag}
-                    meta={item.durationLabel}
-                    progressPct={isSelected ? progressPct : undefined}
-                    coverOverlay={
-                      <div className="flex items-center justify-between gap-2 text-[10px]">
-                        <span className="rounded bg-black/55 px-1.5 py-0.5 font-mono">
-                          {item.kind === 'music'
-                            ? 'ALAC · 1:1 封面舞台'
-                            : item.kind === 'nas'
-                              ? item.nasMeta?.resolution ?? '4K HDR'
-                              : '16:9 硬解流'}
-                        </span>
-                        {isSelected ? (
-                          <span className="rounded bg-white/90 px-1.5 py-0.5 font-mono font-semibold text-black">
-                            {playing ? 'PLAYING' : 'PAUSED'}
+          {/* Side Playback Queue */}
+          <aside
+            aria-label="播放队列"
+            className="flex shrink-0 flex-col gap-3.5 @[860px]/workbench:w-[316px] @[860px]/workbench:border-l @[860px]/workbench:pl-6"
+            style={{ borderColor: HAIRLINE_BORDER }}
+          >
+            <PanelSectionHeading title="播放队列" meta={`${filteredItems.length} 项`} />
+
+            {filteredItems.length === 0 ? (
+              <StateView
+                mode="empty"
+                title="没有匹配的媒体条目"
+                description="尝试清空搜索词或切换媒体源通道。"
+                activeFocusId={activeFocusId}
+                onFocus={emitFocus}
+                action={{
+                  label: '重置筛选条件',
+                  focusId: 'media:empty:reset',
+                  onActivate: () => {
+                    setQuery('');
+                    setActiveFilter('all');
+                  },
+                }}
+              />
+            ) : (
+              <div className="flex flex-col gap-1.5 px-1.5 py-1">
+                {filteredItems.map((item) => {
+                  const isSelected = selectedItem?.id === item.id;
+                  const inQueue = ephemeralQueue.includes(item.id);
+                  const isMusic = item.kind === 'music';
+
+                  return (
+                    <SelectableRow
+                      key={item.id}
+                      focusId={`media:card:${item.id}`}
+                      activeFocusId={activeFocusId}
+                      selected={isSelected}
+                      domain="media"
+                      onFocus={emitFocus}
+                      onActivate={() => void handleSelectMedia(item)}
+                      title={item.title}
+                      leading={
+                        <div
+                          className="relative flex items-end justify-end overflow-hidden rounded-[8px] p-1 text-white"
+                          style={{
+                            width: isMusic ? '52px' : '84px',
+                            height: isMusic ? '52px' : '48px',
+                            background: item.thumbGradient,
+                            boxShadow: 'var(--shadow-page)',
+                          }}
+                        >
+                          <span className="rounded bg-black/65 px-1.5 py-[1px] font-mono text-[11px] leading-tight">
+                            {item.durationLabel}
                           </span>
-                        ) : null}
-                      </div>
-                    }
-                    badge={item.badge}
-                    badgeTone={isDaily ? 'ok' : isEphemeral ? 'core' : 'media'}
-                    secondaryBadge={
-                      item.previouslyRecommendedOn
-                        ? `经典重温 · ${item.previouslyRecommendedOn}`
-                        : inQueue
-                          ? '已在灵感电台'
-                          : undefined
-                    }
-                    title={item.title}
-                    subtitle={item.subtitle}
-                    description={item.summary}
-                    footer={
-                      <>
-                        <span className="truncate font-mono">{item.creator}</span>
-                        <span className="truncate font-mono text-[10px]">
-                          {item.verificationLabel ?? item.sourceId}
-                        </span>
-                      </>
-                    }
-                  />
-                );
-              })}
-            </div>
-          )}
+                        </div>
+                      }
+                      meta={
+                        <>
+                          <span className="truncate">{item.creator}</span>
+                          {item.curationMode === 'daily_immutable' ? (
+                            <span style={{ color: 'var(--status-ok-fg)' }}>· 每日精选</span>
+                          ) : item.previouslyRecommendedOn ? (
+                            <span style={{ color: 'var(--status-warn-fg)' }}>· 重温</span>
+                          ) : inQueue ? (
+                            <span style={{ color: 'var(--domain-core)' }}>· 灵感电台</span>
+                          ) : null}
+                        </>
+                      }
+                    />
+                  );
+                })}
+              </div>
+            )}
+
+            <p
+              className="mt-2 border-t pt-3 text-[12px] leading-[1.68] text-[var(--text-subtle)]"
+              style={{ borderColor: HAIRLINE_BORDER }}
+            >
+              歌单隔离：<span className="font-mono">p.YJXV7dEIeb3GzZX</span> 仅接受每日不重复精选；即时点播与重温仅写入「OmniDesk AI 灵感电台」。
+            </p>
+          </aside>
         </div>
-      }
-      rightPane={
-        selectedItem ? (
-          <MediaInspector
-            item={selectedItem}
-            playing={playing}
-            currentSec={currentSec}
-            activeLyricIndex={activeLyricIndex}
-            nextSponsorSegment={nextSponsorSegment}
-            inEphemeralQueue={ephemeralQueue.includes(selectedItem.id)}
-            activeFocusId={activeFocusId}
-            onFocus={emitFocus}
-            onTogglePlay={() => setPlaying((p) => !p)}
-            onSeek={(sec) => {
-              setCurrentSec(sec);
-              setPlaying(true);
-            }}
-            onSkipSponsor={handleSkipSponsor}
-            onQueueEphemeral={handleQueueEphemeral}
-            onStatusChange={setActionStatus}
-          />
-        ) : null
-      }
-      footer={
-        <>
-          <span>焦点锚点: {activeFocusId || '未锁定'}</span>
-          <span>Space/Enter 激活 · SponsorBlock · libmpv 2.5</span>
-        </>
       }
     />
   );

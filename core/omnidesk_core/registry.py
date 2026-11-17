@@ -375,7 +375,7 @@ class CapabilityRegistry:
     ) -> None:
         self._bus, self._isolate_errors, self._secret_provider = bus, isolate_errors, secret_provider
         self._lock = threading.RLock()
-        self._entries: dict[str, CapabilityRegistration] = {}
+        self._entries: dict[str, list[CapabilityRegistration]] = {}
 
     def _extra_secrets(self) -> Iterable[str]:
         if self._secret_provider is None:
@@ -410,10 +410,18 @@ class CapabilityRegistry:
             priority=priority, metadata=dict(metadata) if metadata else {},
         )
         with self._lock:
-            existing = self._entries.get(parsed.raw)
-            if existing is not None and (not replace or existing.plugin_id != pid):
-                raise CapabilityConflictError(parsed.raw, plugin_id=pid, existing_plugin_id=existing.plugin_id)
-            self._entries[parsed.raw] = entry
+            bucket = self._entries.get(parsed.raw, [])
+            for existing in bucket:
+                if existing.plugin_id == pid:
+                    if not replace:
+                        raise CapabilityConflictError(
+                            parsed.raw, plugin_id=pid, existing_plugin_id=existing.plugin_id
+                        )
+                    break
+            new_bucket = [e for e in bucket if e.plugin_id != pid]
+            new_bucket.append(entry)
+            new_bucket.sort(key=lambda item: item.priority, reverse=True)
+            self._entries[parsed.raw] = new_bucket
         return entry
 
     def register_streaming(
@@ -439,55 +447,65 @@ class CapabilityRegistry:
             metadata=metadata,
         )
 
-    def unregister(self, capability_id: str, *, plugin_id: str | None = None) -> bool:
-        """Remove a registered capability, checking ownership when `plugin_id` is supplied."""
-        with self._lock:
-            existing = self._entries.get(capability_id)
-            if existing is None:
-                return False
-            if plugin_id is not None and existing.plugin_id != plugin_id:
-                raise CapabilityConflictError(
-                    capability_id, plugin_id=plugin_id, existing_plugin_id=existing.plugin_id,
-                    message=f"Cannot revoke capability {capability_id!r} owned by {existing.plugin_id!r}",
-                )
+    def _remove_plugin_entries(self, capability_id: str, plugin_id: str) -> int:
+        entries = self._entries.get(capability_id)
+        if not entries:
+            return 0
+        kept = [entry for entry in entries if entry.plugin_id != plugin_id]
+        removed = len(entries) - len(kept)
+        if not removed:
+            return 0
+        if kept:
+            self._entries[capability_id] = kept
+        else:
             self._entries.pop(capability_id, None)
-            return True
+        return removed
+
+    def unregister(self, capability_id: str, *, plugin_id: str | None = None) -> bool:
+        """Remove registrations for `capability_id`, scoped to `plugin_id` when supplied."""
+        with self._lock:
+            if plugin_id is None:
+                return bool(self._entries.pop(capability_id, None))
+            return self._remove_plugin_entries(capability_id, plugin_id) > 0
 
     def revoke_plugin(self, plugin_id: str) -> int:
         """Atomically revoke all capabilities owned by `plugin_id`."""
         if not isinstance(plugin_id, str) or not plugin_id.strip():
             raise InvalidArgumentError("plugin_id must be a non-empty string")
         with self._lock:
-            targets = [cid for cid, e in self._entries.items() if e.plugin_id == plugin_id]
-            for cid in targets:
-                self._entries.pop(cid, None)
-            return len(targets)
+            return sum(self._remove_plugin_entries(cid, plugin_id) for cid in list(self._entries))
 
     unregister_plugin = revoke_plugin
 
     def has(self, capability_id: str) -> bool:
         with self._lock:
-            return capability_id in self._entries
+            return bool(self._entries.get(capability_id))
 
     def __contains__(self, capability_id: object) -> bool:
         return isinstance(capability_id, str) and self.has(capability_id)
 
     def get(self, capability_id: str) -> CapabilityRegistration | None:
         with self._lock:
-            return self._entries.get(capability_id)
+            entries = self._entries.get(capability_id)
+            return entries[0] if entries else None
 
     def resolve(self, capability_id: str) -> CapabilityRegistration:
-        """Validate versioned ID and return registration or raise CapabilityNotFoundError."""
+        """Validate versioned ID and return highest-priority registration or raise CapabilityNotFoundError."""
         parsed = parse_capability_id(capability_id)
         if (entry := self.get(parsed.raw)) is None:
             raise CapabilityNotFoundError(parsed.raw)
         return entry
 
+    def providers_for(self, capability_id: str) -> list[CapabilityRegistration]:
+        """Return all registered providers for `capability_id` in priority resolution order."""
+        with self._lock:
+            return list(self._entries.get(capability_id, ()))
+
     def list_capabilities(
         self, *, plugin_id: str | None = None, prefix: str | None = None, streaming: bool | None = None
     ) -> list[CapabilityRegistration]:
         with self._lock:
-            entries = list(self._entries.values())
+            entries = [entry for bucket in self._entries.values() for entry in bucket]
         if plugin_id is not None:
             entries = [e for e in entries if e.plugin_id == plugin_id]
         if prefix is not None:
@@ -498,7 +516,7 @@ class CapabilityRegistry:
 
     def list_versions(self, base_id: str) -> list[CapabilityRegistration]:
         with self._lock:
-            entries = [e for e in self._entries.values() if e.base_id == base_id]
+            entries = [bucket[0] for bucket in self._entries.values() if bucket and bucket[0].base_id == base_id]
         return sorted(entries, key=lambda e: e.version)
 
     def latest_version(self, base_id: str) -> CapabilityRegistration | None:

@@ -50,7 +50,12 @@ class _CoreStreamBridge:
 
     def __init__(self, core_stream: Any) -> None:
         self._stream = core_stream
-        self.is_cancelled = False
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Dynamically proxy the underlying core stream cancellation state."""
+        val = getattr(self._stream, "is_cancelled", False)
+        return bool(val() if callable(val) else val)
 
     async def emit_delta(
         self,
@@ -111,6 +116,22 @@ def _wrap_handler_for_foreign_registry(
     return _wrapped
 
 
+def _default_plugin_data_dir(plugin_id: str, paths: Any = None) -> Path:
+    """Resolve default `paths.data_dir / 'plugins' / plugin_id` without falling back to plugin_dir."""
+    if paths is not None and getattr(paths, "data_dir", None) is not None:
+        return Path(paths.data_dir).expanduser() / "plugins" / plugin_id
+    try:
+        from omnidesk_core.paths import OmnideskPaths
+    except ImportError:
+        raw = os.environ.get("XDG_DATA_HOME", "").strip()
+        home_raw = os.environ.get("HOME", "").strip()
+        home_dir = Path(home_raw).expanduser() if home_raw else Path.home()
+        expanded = Path(raw).expanduser() if raw else None
+        base = expanded if (expanded is not None and expanded.is_absolute()) else home_dir / ".local" / "share"
+        return base / "omnidesk" / "plugins" / plugin_id
+    return OmnideskPaths.from_env().data_dir / "plugins" / plugin_id
+
+
 class PluginContext:
     """Execution context scoped to a single `plugin_id` with atomic cleanup tracking."""
 
@@ -121,6 +142,7 @@ class PluginContext:
         plugin_dir: Path | str | None = None,
         data_dir: Path | str | None = None,
         config_dir: Path | str | None = None,
+        paths: Any = None,
         capabilities: Any = None,
         bus: Any = None,
         domains: Any = None,
@@ -131,7 +153,11 @@ class PluginContext:
     ) -> None:
         self._plugin_id = validate_plugin_id(plugin_id)
         self._plugin_dir = Path(plugin_dir).expanduser() if plugin_dir is not None else Path.cwd()
-        self._data_dir = Path(data_dir).expanduser() if data_dir is not None else self._plugin_dir
+        self._data_dir = (
+            Path(data_dir).expanduser()
+            if data_dir is not None
+            else _default_plugin_data_dir(self._plugin_id, paths)
+        )
         self._capabilities = capabilities if capabilities is not None else InMemoryCapabilityRegistry()
         self._bus = bus if bus is not None else InMemoryEntityBus()
         self._domains = domains if domains is not None else InMemoryDomainRegistry()

@@ -1,0 +1,119 @@
+{
+  "schema_version": 2,
+  "id": "plugin-x",
+  "name": "X (Twitter) Timeline & Threads",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "X/Twitter timeline, lists, and thread reader powered by Chrome session login, context-bound GraphQL proxy, and inline bilingual translation.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-x",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/plugin-x.git",
+    "branch": "main"
+  },
+  "verify_cmd": "uv run pytest -q",
+  "provides": [
+    "text.source.v1",
+    "text.comments.v1"
+  ],
+  "consumes": [
+    "web.embed.v1",
+    "web.cookies.v1",
+    "web.extract.v1",
+    "web.fetch.v1",
+    "llm.translate.v1",
+    "llm.chat.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "network:wan",
+    "ipc:capability_call",
+    "storage:plugin_data"
+  ],
+  "config_schema": [
+    {
+      "key": "chrome_cookie_source",
+      "label": "登录 Cookie 来源策略",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "plugin-chrome-web",
+        "vault",
+        "file",
+        "disabled"
+      ],
+      "required": false,
+      "description": "auto 会依次尝试 plugin-chrome-web (web.cookies.v1)、SecretVault 手动 Cookie 与本地 Cookie 文件。"
+    },
+    {
+      "key": "cookie_header",
+      "label": "手动 / 快照 Cookie Header (SecretVault)",
+      "type": "secret",
+      "default": "",
+      "required": false,
+      "description": "加密存储于 0600 SecretVault 的 Cookie Header，绝不写入普通配置或日志。"
+    },
+    {
+      "key": "cookie_file_path",
+      "label": "备用 Cookie 文件路径 (Netscape / JSON)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "可选：Chrome 导出的 cookies.json 或 cookies.txt 路径，按域名与过期时间匹配。"
+    },
+    {
+      "key": "prefer_chrome_fetch",
+      "label": "优先使用 Chrome 上下文代理请求",
+      "type": "bool",
+      "default": true,
+      "required": false,
+      "description": "遇到 Cloudflare、动态签名或 GraphQL 校验时，优先委托 plugin-chrome-web 代发请求。"
+    },
+    {
+      "key": "auto_translate",
+      "label": "自动双语对照翻译",
+      "type": "bool",
+      "default": true,
+      "required": false,
+      "description": "调用 llm.translate.v1 / llm.chat.v1 自动生成推文正文与串推回复树的双语对照，跳过代码块与数学公式。"
+    },
+    {
+      "key": "target_lang",
+      "label": "双语翻译目标语言",
+      "type": "select",
+      "default": "zh-CN",
+      "options": [
+        "zh-CN",
+        "zh-TW",
+        "en",
+        "ja",
+        "ko"
+      ],
+      "required": false,
+      "description": "自动双语翻译与手动翻译请求使用的默认目标语言。"
+    },
+    {
+      "key": "default_list_ids",
+      "label": "初始订阅 X Lists (可选)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "可选：初始订阅的 X 列表（格式 list_id:列表名，逗号分隔，持久化至 subscriptions.json）。"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "HTTP 请求超时 (秒)",
+      "type": "int",
+      "default": 15,
+      "required": false,
+      "description": "单次抓取请求的超时时间。"
+    }
+  ]
+}

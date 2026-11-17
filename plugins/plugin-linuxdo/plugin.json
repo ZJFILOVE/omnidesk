@@ -1,0 +1,104 @@
+{
+  "schema_version": 2,
+  "id": "plugin-linuxdo",
+  "name": "Linux.do Discourse Client",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "Discourse API reader for Linux.do tech threads, code block highlighting, LaTeX math, AI thread summarization, bilingual translation, and Chrome Cloudflare-aware session sync.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-linuxdo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-linuxdo.git",
+    "branch": "main"
+  },
+  "python_dependencies": [],
+  "verify_cmd": "uv run pytest -q",
+  "provides": [
+    "text.source.v1",
+    "text.comments.v1"
+  ],
+  "consumes": [
+    "web.embed.v1",
+    "web.cookies.v1",
+    "web.extract.v1",
+    "web.fetch.v1",
+    "llm.chat.v1",
+    "llm.translate.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "network:wan",
+    "ipc:capability_call"
+  ],
+  "config_schema": [
+    {
+      "key": "chrome_cookie_source",
+      "label": "登录 Cookie 来源策略",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "plugin-chrome-web",
+        "vault",
+        "file",
+        "disabled"
+      ],
+      "required": false,
+      "description": "auto 会依次尝试 plugin-chrome-web (web.cookies.v1)、SecretVault 手动 Cookie 与本地 Cookie 文件。"
+    },
+    {
+      "key": "cookie_header",
+      "label": "手动 / 快照 Cookie Header (SecretVault)",
+      "type": "secret",
+      "default": "",
+      "required": false,
+      "description": "加密存储于 0600 SecretVault 的 Cookie Header，绝不写入普通配置或日志。"
+    },
+    {
+      "key": "cookie_file_path",
+      "label": "备用 Cookie 文件路径 (Netscape / JSON)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "可选：Chrome 导出的 cookies.json 或 cookies.txt 路径，按域名与过期时间匹配。"
+    },
+    {
+      "key": "prefer_chrome_fetch",
+      "label": "优先使用 Chrome 上下文代理请求",
+      "type": "bool",
+      "default": true,
+      "required": false,
+      "description": "遇到 Cloudflare、动态签名或 GraphQL 校验时，优先委托 plugin-chrome-web 代发请求。"
+    },
+    {
+      "key": "pinned_categories",
+      "label": "置顶版面列表",
+      "type": "string",
+      "default": "4:开发调优,14:资源荟萃,42:文档共建",
+      "required": false,
+      "description": "逗号分隔或 JSON 数组的 Linux.do 置顶板块（持久化于 subscriptions.json）。"
+    },
+    {
+      "key": "auto_translate",
+      "label": "双语对照翻译",
+      "type": "bool",
+      "default": false,
+      "required": false,
+      "description": "阅读英文技术帖时启用双语对照并自动跳过代码块与数学公式。"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "HTTP 请求超时 (秒)",
+      "type": "int",
+      "default": 15,
+      "required": false,
+      "description": "单次抓取请求的超时时间。"
+    }
+  ]
+}

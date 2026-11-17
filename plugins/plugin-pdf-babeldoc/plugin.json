@@ -1,0 +1,66 @@
+{
+  "schema_version": 2,
+  "id": "plugin-pdf-babeldoc",
+  "name": "BabelDOC Dual-Column PDF",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "book",
+  "author": "OmniDesk",
+  "description": "Local PDF library scanner, BabelDOC dual-column translation runner, glossary locking, and bilingual spread reader.",
+  "provides": [
+    "book.source.v1",
+    "book.bilingual_pdf.v1"
+  ],
+  "consumes": [
+    "llm.translate.v1"
+  ],
+  "permissions": [
+    "process:babeldoc",
+    "fs:user_mount",
+    "config:read",
+    "config:write"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "babeldoc_bin",
+      "label": "BabelDOC 可执行文件",
+      "type": "string",
+      "default": "",
+      "required": true,
+      "description": "Command name on PATH or absolute path to the local babeldoc binary"
+    },
+    {
+      "key": "pdf_library_roots",
+      "label": "PDF 书库根目录",
+      "type": "string",
+      "default": "",
+      "required": true,
+      "description": "Allowed PDF library directories (separated by ':', newline, ',', or JSON array)"
+    },
+    {
+      "key": "output_root",
+      "label": "双栏 PDF 输出根目录",
+      "type": "string",
+      "default": "",
+      "required": true,
+      "description": "Allowed root directory for generated dual-column PDFs and page-map sidecars"
+    },
+    {
+      "key": "target_language",
+      "label": "默认目标语言",
+      "type": "string",
+      "default": "zh",
+      "description": "Default target language passed to BabelDOC --lang-out (e.g. zh, zh-TW, en, ja)"
+    },
+    {
+      "key": "timeout_sec",
+      "label": "任务超时（秒）",
+      "type": "int",
+      "default": 600,
+      "description": "Maximum execution time in seconds for a BabelDOC subprocess job"
+    }
+  ]
+}

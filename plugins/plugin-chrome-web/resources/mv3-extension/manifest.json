@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "OmniDesk Chrome Web Bridge",
+  "version": "0.2.0",
+  "description": "Minimal local MV3 extension skeleton for OmniDesk managed Chrome --app windows (no remote code).",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "toggle-bilingual": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Toggle OmniDesk bilingual web reading mode"
+    }
+  }
+}

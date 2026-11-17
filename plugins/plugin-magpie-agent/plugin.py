@@ -1,222 +1,175 @@
-"""Safe read-only degradation skeleton for `plugin-magpie-agent` (`llm.router.v1`)."""
+"""Stage 2 Magpie AI provider plugin (`llm.router.v1`, `llm.chat.v1`, `llm.translate.v1`, `ai.agent.v1`, `ai.curation.v1`)."""
 
 from __future__ import annotations
 
-import asyncio
+import importlib
 import json
-import re
 import shutil
-import urllib.error
-import urllib.parse
-import urllib.request
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext, SubprocessResult
 
-_LOG_LINE_RE = re.compile(r"^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+plugin:\s*")
-_EFFORTS_RE = re.compile(r"^(?:none|minimal|low|medium|high|xhigh|max|ultra)(?:/(?:none|minimal|low|medium|high|xhigh|max|ultra))*$")
-_MODEL_HEAD_RE = re.compile(r"^[A-Za-z0-9._-]+/\S+$")
-_MEMBER_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._:@/-]+$")
-_SUPPORTED_ACTIONS = ("current_route", "list_harnesses", "list_models", "list_quotas")
-_DEFAULT_GROUP_ID = "omnidesk-active"
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-
-def _strip_plugin_log_lines(text: str) -> str:
-    return "\n".join(line for line in text.splitlines() if not _LOG_LINE_RE.match(line)).strip()
-
-
-def _parse_json_output(text: str) -> Any:
-    cleaned = _strip_plugin_log_lines(text)
-    if not cleaned:
-        raise ValueError("empty JSON output")
-    return json.loads(cleaned)
-
-
-def _is_loopback_url(url: str) -> bool:
+def _import_sibling(name: str) -> Any:
+    if __package__:
+        return importlib.import_module(f".{name}", package=__package__)
+    plugin_dir = str(Path(__file__).resolve().parent)
+    added = plugin_dir not in sys.path
+    if added:
+        sys.path.insert(0, plugin_dir)
     try:
-        parsed = urllib.parse.urlparse(url)
-    except ValueError:
-        return False
-    return parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() in _LOOPBACK_HOSTS
+        return importlib.import_module(name)
+    finally:
+        if added and plugin_dir in sys.path:
+            sys.path.remove(plugin_dir)
 
 
-def _redact_secret(text: str, secret: str | None) -> str:
-    if not text:
-        return ""
-    if secret and len(secret) >= 4:
-        text = text.replace(secret, "[REDACTED]")
-    return re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{6,}", r"\1[REDACTED]", text)
+_common = _import_sibling("magpie_common")
+_router = _import_sibling("magpie_router")
+_router_actions = _import_sibling("magpie_router_actions")
+_gateway_mod = _import_sibling("magpie_gateway")
+_chat_mod = _import_sibling("magpie_chat")
+_agent_mod = _import_sibling("magpie_agent_actions")
+_curation_mod = _import_sibling("magpie_curation")
+
+DEFAULT_GATEWAY_URL = _common.DEFAULT_GATEWAY_URL
+DEFAULT_GROUP_ID = _common.DEFAULT_GROUP_ID
+_strip_plugin_log_lines = _common.strip_plugin_log_lines
+_parse_json_output = _common.parse_json_output
+_is_loopback_url = _common.is_loopback_url
+_redact_secret = _common.redact_secret
+_parse_harnesses = _router.parse_harnesses
+_parse_models = _router.parse_models
+_parse_group_detail = _router.parse_group_detail
+_normalize_quotas = _router.normalize_quotas
 
 
-def _parse_harnesses(stdout: str) -> list[dict[str, Any]]:
-    harnesses: list[dict[str, Any]] = []
-    for raw_line in _strip_plugin_log_lines(stdout).splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = [p.strip() for p in re.split(r"\s{2,}", line) if p.strip()]
-        name, rest = parts[0], parts[1:]
-        config_path = ""
-        if rest and (rest[-1].startswith(("~/", "/", "./")) or rest[-1].endswith((".json", ".toml", ".yml", ".yaml"))):
-            config_path = rest.pop()
-        attrs: dict[str, str] = {}
-        status = ""
-        for segment in rest:
-            for token in (t.strip() for t in segment.split("·") if t.strip()):
-                matched = False
-                for key, prefix in (("effort", "effort "), ("thinking", "thinking "), ("sign_in", "sign-in "), ("provider", "provider ")):
-                    if token.startswith(prefix):
-                        attrs[key] = token.removeprefix(prefix).strip()
-                        matched = True
-                        break
-                if not matched and not status:
-                    status = token
-        harnesses.append({
-            "name": name, "harness_id": re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"),
-            "status": status, "model": status if "/" in status else "",
-            "effort": attrs.get("effort", ""), "thinking": attrs.get("thinking", ""),
-            "sign_in": attrs.get("sign_in", ""), "provider": attrs.get("provider", ""),
-            "config_path": config_path,
-            "configured": (status not in {"", "—", "-"}) or (attrs.get("provider", "") not in {"", "—", "-"}),
-        })
-    return harnesses
-
-
-def _parse_models(stdout: str) -> tuple[list[dict[str, Any]], list[str]]:
-    models: list[dict[str, Any]] = []
-    groups: list[str] = []
-    current_group = ""
-    for raw_line in _strip_plugin_log_lines(stdout).splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = [p.strip() for p in re.split(r"\s{2,}", line) if p.strip()]
-        head, tail = parts[0], parts[1:]
-        if not _MODEL_HEAD_RE.match(head) or head.startswith(("http:", "https:")):
-            current_group = line
-            if current_group not in groups:
-                groups.append(current_group)
-            continue
-        provider, _, slug = head.partition("/")
-        efforts = tail.pop().split("/") if tail and _EFFORTS_RE.match(tail[-1]) else []
-        models.append({
-            "id": head, "provider": provider, "slug": slug,
-            "name": " ".join(tail).strip() or slug, "group": current_group,
-            "efforts": efforts, "is_group": provider in {"group", "auto"},
-        })
-    return models, groups
-
-
-def _parse_group_detail(stdout: str, group_id: str, default_routing: str) -> dict[str, Any]:
-    routing, stays, members, fallback_members = default_routing, "turn", [], []
-    own_group = f"group/{group_id}"
-    in_models = False
-    for raw_line in _strip_plugin_log_lines(stdout).splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        for match in re.finditer(r"\b(routing|stays)\s*[=:]\s*([A-Za-z0-9_-]+)", stripped):
-            if match.group(1) == "routing":
-                routing = match.group(2)
-            else:
-                stays = match.group(2)
-        cols = [p.strip() for p in re.split(r"\s{2,}", stripped) if p.strip()]
-        is_key_row = raw_line.startswith("  ") and not raw_line.startswith("    ") and bool(cols)
-        if is_key_row:
-            key = cols[0]
-            if key == "routing" and len(cols) >= 2:
-                in_models, routing = False, cols[1].split()[0]
-                continue
-            if key == "stays" and len(cols) >= 2:
-                in_models, stays = False, cols[1].split()[0]
-                continue
-            if key == "models":
-                in_models = True
-                stripped = "  ".join(cols[1:])
-            elif key in {"rules", "levels", "classifier", "context", "compact", "family", "note"}:
-                in_models = False
-                continue
-        if in_models:
-            m_num = re.match(r"^(?:\d+\s+)?([A-Za-z0-9._-]+/[A-Za-z0-9._:@/+_-]+)", stripped)
-            if m_num and m_num.group(1) != own_group and m_num.group(1) not in members:
-                members.append(m_num.group(1))
-        elif len(cols) == 1 and _MEMBER_RE.match(cols[0]) and cols[0] != own_group:
-            if not cols[0].startswith(("http:", "https:")) and cols[0] not in fallback_members:
-                fallback_members.append(cols[0])
-    resolved = members or fallback_members
-    primary = resolved[0] if resolved else ""
-    return {
-        "routing": routing,
-        "stays": stays,
-        "primary_member": primary,
-        "harness_provider": primary.partition("/")[0] if "/" in primary else "",
-        "fallbacks": resolved[1:],
-    }
-
-
-def _normalize_quotas(raw: Any) -> list[dict[str, Any]]:
-    entries = raw.get("quotas", []) if isinstance(raw, Mapping) else raw
-    if not isinstance(entries, list):
-        raise ValueError("quotas payload must be a list")
-    normalized: list[dict[str, Any]] = []
-    for item in entries:
-        if not isinstance(item, Mapping):
-            continue
-        windows = [
-            {
-                "name": str(w.get("name", "")), "used_pct": w.get("used"), "remaining_pct": w.get("remaining"),
-                "resets_at": str(w.get("resetsAt") or w.get("resets_at") or ""),
-                "unlimited": bool(w.get("unlimited", False)), "display": str(w.get("display", "")),
-                "amount": w.get("amount"), "limit": w.get("limit"), "unit": str(w.get("unit", "")),
-            }
-            for w in (item.get("windows") or []) if isinstance(w, Mapping)
-        ]
-        normalized.append({
-            "provider": str(item.get("provider", "")), "name": str(item.get("name", "")),
-            "user": str(item.get("user", "")), "plan": str(item.get("plan", "")),
-            "kind": str(item.get("kind", "")), "balance": item.get("balance"),
-            "error": str(item.get("error", "")), "as_of": str(item.get("asOf") or item.get("readAt") or ""),
-            "last_served_at": str(item.get("lastServedAt") or ""), "last": bool(item.get("last", False)),
-            "windows": windows,
-        })
-    return normalized
+async def _forward_stream_chunk(stream_sink: Any, chunk: Mapping[str, Any]) -> None:
+    if stream_sink is None:
+        return
+    event = str(chunk.get("event") or "delta")
+    data = chunk.get("data")
+    if event == "delta":
+        if isinstance(data, str):
+            await stream_sink.emit_delta(data)
+            return
+        if isinstance(data, Mapping) and isinstance(data.get("text"), str):
+            extra = {k: v for k, v in data.items() if k != "text"}
+            await stream_sink.emit_delta(data["text"], data=extra or None)
+            return
+    await stream_sink.emit_event(event, data if isinstance(data, Mapping) else {"value": data})
 
 
 class MagpieAgentPlugin(BasePlugin):
-    """Read-only safe-degradation skeleton for `llm.router.v1`."""
+    """Production Stage 2 Magpie AI adapter with fail-closed isolation and zero secret leakage."""
+
+    def __init__(self) -> None:
+        self._gateway = _gateway_mod.MagpieGatewayClient()
+        self._session_seen: dict[str, set[str]] = {}
+        self._unloaded = False
 
     async def on_load(self, ctx: PluginContext) -> None:
-        """Register `llm.router.v1` without performing blocking I/O."""
+        """Fast non-blocking registration of all 5 capabilities."""
         await super().on_load(ctx)
+        self._unloaded = False
+        self._gateway.reset()
+        self._session_seen.clear()
         ctx.register_capability("llm.router.v1", self.handle_router)
+        ctx.register_streaming_capability("llm.chat.v1", self.handle_chat_stream)
+        ctx.register_capability("llm.translate.v1", self.handle_translate)
+        ctx.register_streaming_capability("ai.agent.v1", self.handle_agent_stream)
+        ctx.register_capability("ai.curation.v1", self.handle_curation)
+
+    async def on_unload(self) -> None:
+        """Abort active gateway connections and clear transient session state."""
+        self._unloaded = True
+        self._gateway.close_all()
+        self._session_seen.clear()
 
     async def on_health_check(self) -> dict[str, Any]:
-        """Report local configuration readiness without calling external network services."""
+        """Return lightweight offline readiness diagnostics without network I/O."""
         magpie_bin = self._magpie_bin()
         resolved = self._resolve_bin(magpie_bin) if magpie_bin else None
+        gw_url, gw_err = self._configured_gateway_url()
         plugin_id = self.ctx.plugin_id if self.ctx is not None else "plugin-magpie-agent"
         return {
             "ok": True,
             "plugin_id": plugin_id,
-            "mode": "safe_degraded_skeleton",
-            "registered_capabilities": ["llm.router.v1"],
+            "mode": "stage2_production",
+            "registered_capabilities": [
+                "llm.router.v1",
+                "llm.chat.v1",
+                "llm.translate.v1",
+                "ai.agent.v1",
+                "ai.curation.v1",
+            ],
+            "streaming_capabilities": ["llm.chat.v1", "ai.agent.v1"],
             "magpie_bin_configured": bool(magpie_bin),
             "magpie_bin_found": bool(resolved),
+            "default_group": f"group/{self._default_group()}",
+            "gateway_url": gw_url if not gw_err else "",
+            "gateway_url_valid": gw_err is None,
         }
 
     def _magpie_bin(self) -> str:
         return "magpie" if self.ctx is None else str(self.ctx.get_config("magpie_bin", "magpie") or "").strip()
+
+    def _default_group(self) -> str:
+        raw = DEFAULT_GROUP_ID if self.ctx is None else str(self.ctx.get_config("default_group", DEFAULT_GROUP_ID) or DEFAULT_GROUP_ID).strip()
+        return raw.removeprefix("group/") or DEFAULT_GROUP_ID
 
     def _routing_strategy(self) -> str:
         if self.ctx is None:
             return "order"
         return str(self.ctx.get_config("routing_strategy", "order") or "order").strip() or "order"
 
+    def _stays_policy(self) -> str:
+        if self.ctx is None:
+            return "turn"
+        return str(self.ctx.get_config("stays_policy", "turn") or "turn").strip() or "turn"
+
+    def _request_timeout_ms(self) -> int:
+        if self.ctx is None:
+            return 60000
+        raw = self.ctx.get_config("request_timeout_ms", 60000)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            return 60000
+        return raw
+
     def _gateway_key(self) -> str | None:
         return None if self.ctx is None else self.ctx.get_secret("gateway_key")
+
+    def _configured_gateway_url(self) -> tuple[str, str | None]:
+        raw = DEFAULT_GATEWAY_URL if self.ctx is None else str(self.ctx.get_config("gateway_url", DEFAULT_GATEWAY_URL) or "").strip()
+        if not raw:
+            return "", None
+        if not _is_loopback_url(raw):
+            return "", f"Magpie 网关仅允许 loopback 地址（收到: {raw!r}）"
+        return raw.rstrip("/"), None
+
+    async def _resolve_chat_gateway_url(self) -> tuple[str, str | None]:
+        gw_url, gw_err = self._configured_gateway_url()
+        if gw_err:
+            return "", gw_err
+        if gw_url and gw_url != DEFAULT_GATEWAY_URL:
+            return gw_url, None
+        if gw_url == "" or (gw_url == DEFAULT_GATEWAY_URL and self._magpie_bin() not in {"", "magpie"}):
+            res, err_code, _ = await self._run_magpie(["status", "--json"], timeout_sec=2.0)
+            if res is not None and not err_code:
+                try:
+                    st = _parse_json_output(res.stdout)
+                except (json.JSONDecodeError, ValueError):
+                    st = {}
+                if isinstance(st, Mapping) and st.get("url"):
+                    discovered = str(st["url"]).strip().rstrip("/")
+                    if _is_loopback_url(discovered):
+                        return discovered, None
+        if not gw_url:
+            return "", "Magpie 网关地址未配置且无法从本地探测"
+        return gw_url, None
 
     @staticmethod
     def _resolve_bin(magpie_bin: str) -> str | None:
@@ -239,148 +192,82 @@ class MagpieAgentPlugin(BasePlugin):
             return res, "service_offline", "Magpie CLI 返回异常状态，已安全降级"
         return res, "", ""
 
-    async def _fetch_loopback_quotas(self, gateway_url: str, *, timeout_sec: float = 2.0) -> Any | None:
-        if not _is_loopback_url(gateway_url):
-            return None
-        target = gateway_url.rstrip("/") + "/v1/magpie/quotas"
-        secret = self._gateway_key()
-
-        def _do_get() -> Any:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            req = urllib.request.Request(target, method="GET")
-            if secret:
-                req.add_header("Authorization", f"Bearer {secret}")
-            with opener.open(req, timeout=timeout_sec) as resp:
-                return json.loads(resp.read().decode("utf-8")) if resp.status == 200 else None
-
-        try:
-            return await asyncio.to_thread(_do_get)
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
-            return None
+    async def _call_chat_via_ctx(self, chat_req: dict[str, Any], stream_sink: Any = None) -> CapabilityResult:
+        if self.ctx is not None and self.ctx.capabilities.has("llm.chat.v1"):
+            if stream_sink is not None:
+                return await self.ctx.capabilities.call_stream(
+                    "llm.chat.v1",
+                    chat_req,
+                    on_chunk=lambda c: _forward_stream_chunk(stream_sink, c),
+                )
+            return await self.ctx.capabilities.call("llm.chat.v1", chat_req)
+        return await self.handle_chat_stream(chat_req, stream_sink)
 
     async def handle_router(self, req: Mapping[str, Any]) -> CapabilityResult:
-        """Dispatch `llm.router.v1` read-only inspection actions with fail-closed degradation."""
-        payload = dict(req) if req is not None else {}
-        action = str(payload.get("action") or "").strip()
-        if action == "current_route":
-            return await self._handle_current_route(payload)
-        if action == "list_harnesses":
-            return await self._handle_list_harnesses()
-        if action == "list_models":
-            return await self._handle_list_models()
-        if action == "list_quotas":
-            return await self._handle_list_quotas(payload)
-        if action == "set_route":
-            return CapabilityResult.fail(
-                "当前仅实现只读安全降级骨架，暂不支持 set_route 写回",
-                data={"degraded": True, "online": False, "action": "set_route"},
-                error_code="not_implemented",
-            )
-        return CapabilityResult.fail(
-            f"不支持的 llm.router.v1 动作: {action!r}",
-            data={"supported_actions": list(_SUPPORTED_ACTIONS)},
-            error_code="invalid_argument",
+        """Handle `llm.router.v1` inspection, quota retrieval, and `set_route`."""
+        secret = self._gateway_key()
+        if self._unloaded:
+            return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
+        gw_url, gw_err = self._configured_gateway_url()
+        return await _router_actions.handle_router_action(
+            req,
+            ctx=self.ctx,
+            run_magpie=self._run_magpie,
+            gateway=self._gateway,
+            magpie_bin=self._magpie_bin(),
+            default_group=self._default_group(),
+            default_routing=self._routing_strategy(),
+            default_stays=self._stays_policy(),
+            configured_gw_url=gw_url,
+            gw_url_error=gw_err,
+            secret=secret,
         )
 
-    async def _handle_current_route(self, req: Mapping[str, Any]) -> CapabilityResult:
-        group_id = str(req.get("group_id") or _DEFAULT_GROUP_ID).strip() or _DEFAULT_GROUP_ID
-        routing = self._routing_strategy()
-        base: dict[str, Any] = {
-            "summary": f"group/{group_id} -> offline (magpie unavailable)",
-            "gateway_url": "",
-            "gateway_running": False,
-            "group_id": group_id,
-            "harness_provider": "",
-            "primary_member": "",
-            "routing": routing,
-            "stays": "turn",
-            "fallbacks": [],
-            "degraded": True,
-            "online": False,
-            "mode": "safe_degraded_skeleton",
-        }
-        res, err_code, err_msg = await self._run_magpie(["status", "--json"], timeout_sec=3.0)
-        if res is None or err_code:
-            return CapabilityResult.fail(err_msg, data=base, error_code=err_code)
-        try:
-            status_obj = _parse_json_output(res.stdout)
-        except (json.JSONDecodeError, ValueError):
-            return CapabilityResult.fail("Magpie 状态输出无法解析，已安全降级", data=base, error_code="service_offline")
-        if not isinstance(status_obj, Mapping):
-            return CapabilityResult.fail("Magpie 状态格式无效，已安全降级", data=base, error_code="service_offline")
-
-        gateway_running = bool(status_obj.get("running", False))
-        gateway_url = str(status_obj.get("url") or "")
-        group_info: dict[str, Any] = {"routing": routing, "stays": "turn", "primary_member": "", "harness_provider": "", "fallbacks": []}
-        if gateway_running:
-            grp_res, grp_err, _ = await self._run_magpie(["group", group_id], timeout_sec=3.0)
-            if grp_res is not None and not grp_err:
-                group_info = _parse_group_detail(grp_res.stdout, group_id, routing)
-
-        primary = group_info["primary_member"]
-        summary = (
-            f"group/{group_id} -> {primary}"
-            if gateway_running and primary
-            else (f"group/{group_id} -> unconfigured" if gateway_running else f"group/{group_id} -> offline (gateway stopped)")
+    async def handle_chat_stream(self, req: Mapping[str, Any], stream: Any = None) -> CapabilityResult:
+        """Handle `llm.chat.v1` with optional SSE streaming and JSON structured output."""
+        secret = self._gateway_key()
+        if self._unloaded:
+            return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
+        gw_url, gw_err = await self._resolve_chat_gateway_url()
+        return await _chat_mod.handle_chat(
+            req,
+            gateway=self._gateway,
+            gateway_url=gw_url,
+            gateway_url_error=gw_err,
+            default_group=self._default_group(),
+            default_timeout_ms=self._request_timeout_ms(),
+            secret=secret,
+            stream_sink=stream,
         )
-        return CapabilityResult.ok({
-            **base,
-            **group_info,
-            "summary": summary,
-            "gateway_url": gateway_url,
-            "gateway_running": gateway_running,
-            "degraded": not (gateway_running and bool(primary)),
-            "online": gateway_running,
-        })
 
-    async def _handle_list_harnesses(self) -> CapabilityResult:
-        base = {"degraded": True, "online": False, "harnesses": [], "count": 0}
-        res, err_code, err_msg = await self._run_magpie(["ls"], timeout_sec=3.0)
-        if res is None or err_code:
-            return CapabilityResult.fail(err_msg, data=base, error_code=err_code)
-        harnesses = _parse_harnesses(res.stdout)
-        return CapabilityResult.ok({"degraded": False, "online": True, "harnesses": harnesses, "count": len(harnesses)})
+    async def handle_translate(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """Handle `llm.translate.v1` single or batch translation backed by `llm.chat.v1`."""
+        secret = self._gateway_key()
+        if self._unloaded:
+            return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
+        return await _chat_mod.handle_translate(req, call_chat=self._call_chat_via_ctx, secret=secret)
 
-    async def _handle_list_models(self) -> CapabilityResult:
-        base = {"degraded": True, "online": False, "models": [], "groups": [], "count": 0}
-        res, err_code, err_msg = await self._run_magpie(["models"], timeout_sec=3.0)
-        if res is None or err_code:
-            return CapabilityResult.fail(err_msg, data=base, error_code=err_code)
-        models, groups = _parse_models(res.stdout)
-        return CapabilityResult.ok({"degraded": False, "online": True, "models": models, "groups": groups, "count": len(models)})
+    async def handle_agent_stream(self, req: Mapping[str, Any], stream: Any = None) -> CapabilityResult:
+        """Handle `ai.agent.v1` domain-contextual actions backed by `llm.chat.v1`."""
+        secret = self._gateway_key()
+        if self._unloaded:
+            return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
+        return await _agent_mod.handle_agent(
+            req, call_chat=self._call_chat_via_ctx, secret=secret, stream_sink=stream
+        )
 
-    async def _handle_list_quotas(self, req: Mapping[str, Any]) -> CapabilityResult:
-        base = {"degraded": True, "online": False, "quotas": [], "count": 0, "source": "unavailable"}
-        status_res, status_err, status_msg = await self._run_magpie(["status", "--json"], timeout_sec=3.0)
-        if status_res is None or status_err:
-            return CapabilityResult.fail(status_msg, data=base, error_code=status_err)
-        try:
-            status_obj = _parse_json_output(status_res.stdout)
-        except (json.JSONDecodeError, ValueError):
-            status_obj = {}
-
-        if isinstance(status_obj, Mapping) and status_obj.get("running"):
-            loopback_data = await self._fetch_loopback_quotas(str(status_obj.get("url") or ""), timeout_sec=2.0)
-            if loopback_data is not None:
-                try:
-                    quotas = _normalize_quotas(loopback_data)
-                except ValueError:
-                    return CapabilityResult.fail("网关配额数据格式无效，已安全降级", data=base, error_code="service_offline")
-                return CapabilityResult.ok({"degraded": False, "online": True, "quotas": quotas, "count": len(quotas), "source": "gateway"})
-
-        if req.get("allow_cli_fallback", True) is False:
-            return CapabilityResult.fail("Magpie 网关未运行且禁用了 CLI 回退，已安全降级", data=base, error_code="service_offline")
-
-        provider = str(req.get("provider") or "").strip()
-        cmd = ["quota", provider, "--json"] if provider else ["quota", "--json"]
-        q_res, q_err, q_msg = await self._run_magpie(cmd, timeout_sec=5.0)
-        if q_res is None or q_err:
-            return CapabilityResult.fail(_redact_secret(q_msg, self._gateway_key()), data=base, error_code=q_err)
-        try:
-            quotas = _normalize_quotas(_parse_json_output(q_res.stdout))
-        except (json.JSONDecodeError, ValueError):
-            return CapabilityResult.fail("Magpie 配额输出无法解析，已安全降级", data=base, error_code="service_offline")
-        return CapabilityResult.ok({"degraded": False, "online": True, "quotas": quotas, "count": len(quotas), "source": "cli"})
+    async def handle_curation(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """Handle `ai.curation.v1` interactive and daily orchestration."""
+        secret = self._gateway_key()
+        if self._unloaded or self.ctx is None:
+            return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
+        return await _curation_mod.handle_curation(
+            req,
+            ctx=self.ctx,
+            call_chat=lambda r: self._call_chat_via_ctx(r, None),
+            session_seen=self._session_seen,
+            secret=secret,
+        )
 
 
 def create_plugin() -> BasePlugin:

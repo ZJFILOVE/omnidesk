@@ -1,0 +1,93 @@
+{
+  "schema_version": 2,
+  "id": "plugin-chrome-web",
+  "name": "Managed Chrome --app & MV3 Bridge",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "托管系统原生 Chrome --app 阅读/登录窗，提供只读 Cookies SQLite 同步与受限 127.0.0.1 CDP DOM 提取/同源 fetch 桥接。",
+  "provides": [
+    "web.embed.v1",
+    "web.cookies.v1",
+    "web.extract.v1",
+    "web.fetch.v1"
+  ],
+  "consumes": [
+    "llm.translate.v1"
+  ],
+  "permissions": [
+    "process:chrome",
+    "network:loopback",
+    "network:wan",
+    "secret:vault",
+    "config:read",
+    "config:write"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "chrome_bin",
+      "label": "Chrome 可执行文件",
+      "type": "string",
+      "default": "google-chrome",
+      "description": "Executable name on PATH (or 'auto') or absolute path to Chrome/Chromium"
+    },
+    {
+      "key": "profile_dir",
+      "label": "受管 Profile 目录（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional Chrome --user-data-dir override; defaults to <XDG_DATA_HOME>/omnidesk/chrome-profile"
+    },
+    {
+      "key": "extension_enabled",
+      "label": "启用内置 MV3 扩展",
+      "type": "bool",
+      "default": true,
+      "description": "Load the bundled local MV3 extension via --load-extension when launching Chrome --app"
+    },
+    {
+      "key": "cdp_port",
+      "label": "本地 CDP 端口 (127.0.0.1)",
+      "type": "int",
+      "default": 9222,
+      "description": "Loopback-only (127.0.0.1) Chrome DevTools Protocol port; 0 disables remote debugging flag"
+    },
+    {
+      "key": "cookie_import_target",
+      "label": "Cookie 导入目标",
+      "type": "select",
+      "default": "vault",
+      "options": [
+        "vault",
+        "file",
+        "both"
+      ],
+      "description": "Persist imported cookies to 0600 SecretVault, an isolated 0600 file, or both"
+    },
+    {
+      "key": "cookie_file_path",
+      "label": "Cookie 导入文件路径（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional 0600 JSON output path when cookie_import_target includes 'file'"
+    },
+    {
+      "key": "max_fetch_bytes",
+      "label": "单次 Fetch 响应上限 (字节)",
+      "type": "int",
+      "default": 8388608,
+      "description": "Maximum allowed response size in bytes for web.fetch.v1 (default 8 MiB)"
+    },
+    {
+      "key": "request_timeout_ms",
+      "label": "CDP 请求超时 (毫秒)",
+      "type": "int",
+      "default": 15000,
+      "description": "Default timeout in milliseconds for CDP extract and same-origin fetch operations"
+    }
+  ]
+}

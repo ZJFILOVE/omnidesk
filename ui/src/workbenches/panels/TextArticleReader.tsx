@@ -1,18 +1,25 @@
-import React from 'react';
+import React, { useRef } from 'react';
+import MarkdownRenderer from '../../components/MarkdownRenderer';
+import SelectionBubble, { type SelectionActionEvent } from '../../components/SelectionBubble';
 import {
   FocusButton,
   HAIRLINE_BORDER,
   focusClass,
   focusableProps,
 } from '../../components/WorkbenchLayout';
+import {
+  EditorialCallout,
+  SegmentedPills,
+  TagChip,
+} from '../../components/WorkbenchPrimitives';
 import type { ArticleBlock, TextArticle } from '../../data/mock';
 import type { BilingualMode } from './CommentTreePanel';
 
-const MODE_LABELS: Record<BilingualMode, string> = {
-  bilingual: '双语对照',
-  zh: '仅译文',
-  en: '仅原文',
-};
+const BILINGUAL_OPTIONS: { id: BilingualMode; label: string }[] = [
+  { id: 'bilingual', label: '双语对照' },
+  { id: 'zh', label: '仅译文' },
+  { id: 'en', label: '仅原文' },
+];
 
 export interface TextArticleReaderProps {
   article: TextArticle;
@@ -23,6 +30,12 @@ export interface TextArticleReaderProps {
   onSendToBabelDoc: () => void;
   onOpenChromeApp: () => void;
   onSelectBlock: (blockId: string) => void;
+  onSelectionAction?: (event: SelectionActionEvent) => void;
+  onLookupEtymology?: (text: string, contextSentence: string) => void;
+  onParseClause?: (text: string, contextSentence: string) => void;
+  onAddToVocab?: (text: string, contextSentence: string) => void;
+  onSendToCompanion?: (text: string, contextSentence: string) => void;
+  onCopySelection?: (text: string) => void;
 }
 
 export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
@@ -34,141 +47,144 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
   onSendToBabelDoc,
   onOpenChromeApp,
   onSelectBlock,
+  onSelectionAction,
+  onLookupEtymology,
+  onParseClause,
+  onAddToVocab,
+  onSendToCompanion,
+  onCopySelection,
 }) => {
   const showEn = bilingualMode === 'bilingual' || bilingualMode === 'en';
   const showZh = bilingualMode === 'bilingual' || bilingualMode === 'zh';
+  const blocksRef = useRef<HTMLDivElement | null>(null);
 
   const renderBlock = (block: ArticleBlock) => {
     const blockFocusId = `text:block:${article.id}:${block.id}`;
     const isFocused = activeFocusId === blockFocusId;
+    const translatedKind =
+      block.kind === 'code' || block.kind === 'formula' ? 'paragraph' : block.kind;
+    const isTonalBlock = block.kind === 'formula' || block.kind === 'code';
+
     return (
       <div
         key={block.id}
+        data-block-id={block.id}
+        data-block-kind={block.kind}
         data-focused={isFocused ? 'true' : undefined}
-        {...focusableProps(blockFocusId, activeFocusId, onFocus, () => onSelectBlock(block.id))}
-        className={focusClass(isFocused, 'cursor-pointer rounded-lg border p-3.5 transition-colors')}
+        {...focusableProps(blockFocusId, activeFocusId, onFocus, () => {
+          const hasSelection =
+            typeof window !== 'undefined' && Boolean(window.getSelection()?.toString().trim());
+          if (!hasSelection) {
+            onSelectBlock(block.id);
+          }
+        })}
+        className={focusClass(
+          isFocused,
+          `cursor-pointer rounded-[12px] transition-colors ${
+            isTonalBlock
+              ? 'px-4 py-3.5'
+              : block.kind === 'quote'
+                ? 'border-l-[3px] py-2 pr-3 pl-4'
+                : 'px-3 py-2.5 hover:bg-[var(--hover-fill)]'
+          }`,
+        )}
         style={{
-          backgroundColor:
-            block.kind === 'formula' || block.kind === 'code'
-              ? 'var(--bg-soft, #F1EFEC)'
-              : 'var(--bg-surface, #FCFBF9)',
-          borderColor:
-            block.kind === 'quote' ? 'var(--domain-text, #2260AA)' : HAIRLINE_BORDER,
-          borderLeftWidth: block.kind === 'quote' ? '3px' : undefined,
+          backgroundColor: isTonalBlock ? 'var(--bg-sunken)' : undefined,
+          borderColor: block.kind === 'quote' ? 'var(--domain-text)' : undefined,
         }}
       >
-        <div className="mb-1.5 flex items-center justify-between font-mono text-[10px] uppercase">
-          <span style={{ color: 'var(--domain-text, #2260AA)' }}>
-            {block.kind}
-            {block.language ? ` · ${block.language}` : ''}
-          </span>
-          <span style={{ color: 'var(--text-subtle, #8A847D)' }}>#{block.id}</span>
-        </div>
-
         {showEn ? (
-          block.kind === 'code' ? (
-            <pre
-              className="overflow-x-auto rounded border p-2.5 font-mono text-xs leading-relaxed"
-              style={{ backgroundColor: 'var(--bg-canvas, #F6F5F3)', borderColor: HAIRLINE_BORDER }}
-            >
-              <code>{block.original}</code>
-            </pre>
-          ) : block.kind === 'formula' ? (
-            <div
-              className="rounded border px-3 py-2 font-mono text-xs"
-              style={{ backgroundColor: 'var(--bg-canvas, #F6F5F3)', borderColor: HAIRLINE_BORDER }}
-            >
-              {block.original}
-            </div>
-          ) : (
-            <p className={block.kind === 'heading' ? 'text-sm font-semibold' : 'text-[13.5px] leading-relaxed'}>
-              {block.original}
-            </p>
-          )
+          <div data-selection-source="original">
+            <MarkdownRenderer
+              content={block.original}
+              blockKind={block.kind}
+              language={block.language}
+            />
+          </div>
         ) : null}
 
         {showZh && block.translated ? (
-          <p
-            className={`${showEn ? 'mt-2 border-t pt-2' : ''} text-[13.5px] leading-relaxed`}
-            style={{
-              borderColor: HAIRLINE_BORDER,
-              color: block.kind === 'heading' ? 'var(--text-primary, #222120)' : 'var(--text-muted, #66625D)',
-            }}
+          <div
+            data-selection-source="translation"
+            className={showEn ? 'mt-3 border-t pt-3' : ''}
+            style={{ borderColor: HAIRLINE_BORDER }}
           >
-            {block.translated}
-          </p>
+            <MarkdownRenderer
+              content={block.translated}
+              blockKind={translatedKind}
+              muted={block.kind !== 'heading'}
+            />
+          </div>
         ) : null}
       </div>
     );
   };
 
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-4 p-5">
-      <header
-        className="rounded-lg border p-4"
-        style={{ backgroundColor: 'var(--bg-surface, #FCFBF9)', borderColor: HAIRLINE_BORDER }}
-      >
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <span className="font-mono text-xs font-semibold" style={{ color: 'var(--domain-text, #2260AA)' }}>
-            {article.sourceName}
-          </span>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {(['bilingual', 'zh', 'en'] as const).map((mode) => (
-              <FocusButton
-                key={mode}
-                focusId={`text:mode:${mode}`}
-                activeFocusId={activeFocusId}
-                onFocus={onFocus}
-                onActivate={() => onBilingualModeChange(mode)}
-                selected={bilingualMode === mode}
-                tone="text"
-                surface="soft"
-                className="px-2 py-0.5 text-[11px] font-medium"
-              >
-                {MODE_LABELS[mode]}
-              </FocusButton>
-            ))}
+    <article className="omni-prose-measure mx-auto flex w-full flex-col gap-7 px-6 py-7 sm:px-9">
+      {/* Magazine / Journal Editorial Masthead */}
+      <header className="flex flex-col gap-4 border-b pb-6" style={{ borderColor: HAIRLINE_BORDER }}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+            <span className="font-semibold tracking-wide uppercase" style={{ color: 'var(--domain-text)' }}>
+              {article.sourceName}
+            </span>
+            <span className="text-[var(--text-subtle)]">·</span>
+            <span className="text-[var(--text-muted)]">{article.publishedAt}</span>
+            <span className="text-[var(--text-subtle)]">·</span>
+            <span className="text-[var(--text-muted)]">{article.readTime}</span>
           </div>
+
+          <SegmentedPills
+            options={BILINGUAL_OPTIONS}
+            value={bilingualMode}
+            onChange={onBilingualModeChange}
+            focusPrefix="text:mode:"
+            activeFocusId={activeFocusId}
+            onFocus={onFocus}
+            tone="text"
+            ariaLabel="双语阅读模式"
+          />
         </div>
 
-        <h2 className="text-lg leading-snug font-bold">{article.titleZh}</h2>
-        <p className="mt-1 font-mono text-xs" style={{ color: 'var(--text-muted, #66625D)' }}>
-          {article.title}
-        </p>
+        <div className="pt-1">
+          <h2 className="omni-editorial-title text-[26px] leading-[1.32] font-bold text-[var(--text-primary)] sm:text-[28px]">
+            {article.titleZh}
+          </h2>
+          <p className="mt-2 font-serif text-[15.5px] leading-[1.55] italic text-[var(--text-muted)]">
+            {article.title}
+          </p>
+        </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--text-muted, #66625D)' }}>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-[var(--text-muted)]">
           <span>作者：{article.author}</span>
-          <span>日期：{article.publishedAt}</span>
-          {article.doi ? <span className="font-mono">DOI: {article.doi}</span> : null}
+          {article.journalName ? <span>刊物：{article.journalName}</span> : null}
+          {article.impactScore ? <span>{article.impactScore}</span> : null}
+          {article.doi ? (
+            <span className="font-mono text-[12px] text-[var(--text-subtle)]">DOI {article.doi}</span>
+          ) : null}
         </div>
 
-        <p
-          className="mt-3 rounded border p-2.5 text-xs leading-relaxed"
-          style={{ backgroundColor: 'var(--bg-soft, #F1EFEC)', borderColor: HAIRLINE_BORDER }}
-        >
-          {article.summaryZh}
-        </p>
+        <EditorialCallout domain="text">
+          <MarkdownRenderer content={article.summaryZh} compact />
+        </EditorialCallout>
 
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
           <div className="flex flex-wrap gap-1.5">
             {article.tags.map((tag) => (
-              <span
-                key={tag}
-                className="rounded px-2 py-0.5 font-mono text-[10px]"
-                style={{ backgroundColor: 'var(--bg-soft, #F1EFEC)', color: 'var(--text-muted, #66625D)' }}
-              >
+              <TagChip key={tag} tone="neutral" mono>
                 #{tag}
-              </span>
+              </TagChip>
             ))}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
             <FocusButton
               focusId="text:action:babeldoc"
               activeFocusId={activeFocusId}
               onFocus={onFocus}
               onActivate={onSendToBabelDoc}
               surface="soft"
-              className="px-2.5 py-1 text-[11px] font-medium"
+              className="px-3 py-1.5 text-[12.5px] font-medium"
             >
               转交 BabelDOC
             </FocusButton>
@@ -179,7 +195,7 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
               onActivate={onOpenChromeApp}
               selected
               tone="text"
-              className="px-2.5 py-1 text-[11px] font-medium"
+              className="px-3 py-1.5 text-[12.5px] font-medium"
             >
               Chrome --app 阅读
             </FocusButton>
@@ -187,8 +203,23 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
         </div>
       </header>
 
-      <div className="flex flex-col gap-3">{article.blocks.map(renderBlock)}</div>
-    </div>
+      {/* Comfortable Prose Body (68-76ch, >= 1.78 line-height) */}
+      <div ref={blocksRef} data-testid="text-article-blocks" className="flex flex-col gap-3.5">
+        {article.blocks.map(renderBlock)}
+      </div>
+
+      <SelectionBubble
+        containerRef={blocksRef}
+        allowedSelector='[data-selection-source="original"]'
+        disabled={!showEn}
+        onLookupEtymology={onLookupEtymology}
+        onParseClause={onParseClause}
+        onAddToVocab={onAddToVocab}
+        onSendToCompanion={onSendToCompanion}
+        onCopy={onCopySelection}
+        onAction={onSelectionAction}
+      />
+    </article>
   );
 };
 

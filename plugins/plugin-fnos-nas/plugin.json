@@ -1,0 +1,159 @@
+{
+  "schema_version": 2,
+  "id": "plugin-fnos-nas",
+  "name": "Feiniu fnOS NAS Connector",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "media",
+  "author": "OmniDesk",
+  "description": "User-configured fnOS NAS connector (L1 local mount, L2 subtitle clip search & reading sync, L3 Radarr/Sonarr matching) with atomic protected subtitle write-back.",
+  "provides": [
+    "nas.connection.v1",
+    "media.source.v1",
+    "media.local_match.v1",
+    "media.clip_jump.v1",
+    "book.sync.v1"
+  ],
+  "consumes": [
+    "subtitle.fetch.v1",
+    "subtitle.sync.v1"
+  ],
+  "permissions": [
+    "fs:user_mount",
+    "network:lan",
+    "config:read",
+    "config:write",
+    "secret:vault"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "mount_root",
+      "label": "NAS 本地挂载根目录 (L1)",
+      "type": "string",
+      "default": "",
+      "description": "User-configured local mount directory for fnOS NAS (leave empty until configured; no hardcoded paths)"
+    },
+    {
+      "key": "video_subdirs",
+      "label": "影视扫描子目录",
+      "type": "string",
+      "default": "Movies,TV,Series,Video,Downloads",
+      "description": "Comma-separated relative directories under mount_root for movies, series, and subtitles"
+    },
+    {
+      "key": "music_subdirs",
+      "label": "音乐扫描子目录",
+      "type": "string",
+      "default": "Music,Audio",
+      "description": "Comma-separated relative directories under mount_root for audio tracks and LRC lyrics"
+    },
+    {
+      "key": "book_subdir",
+      "label": "书籍扫描子目录",
+      "type": "string",
+      "default": "Books,Ebooks",
+      "description": "Comma-separated relative directories under mount_root for eBooks and reading sync metadata"
+    },
+    {
+      "key": "managed_subtitle_dirs",
+      "label": "受管字幕写入子目录（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional comma-separated relative directories under mount_root allowed for write_subtitle (empty = any non-hidden dir under mount_root)"
+    },
+    {
+      "key": "target_language",
+      "label": "目标字幕语言",
+      "type": "string",
+      "default": "zh-CN",
+      "description": "Target language tag for bilingual subtitle preference and matching"
+    },
+    {
+      "key": "protect_manual_subtitles",
+      "label": "拒绝覆盖人工精校字幕",
+      "type": "bool",
+      "default": true,
+      "description": "When enabled, write_subtitle refuses to overwrite existing manual/human-curated subtitles"
+    },
+    {
+      "key": "media_service_url",
+      "label": "伴随字幕检索服务 URL (L2)",
+      "type": "string",
+      "default": "",
+      "description": "Optional LAN subtitle search HTTP service base URL (trust_env=False, follow_redirects=False)"
+    },
+    {
+      "key": "media_service_token",
+      "label": "字幕检索 Bearer Token",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault for media_service_url Authorization"
+    },
+    {
+      "key": "companion_sync_url",
+      "label": "阅读与生词同步 URL (L2)",
+      "type": "string",
+      "default": "",
+      "description": "Optional LAN companion progress/vocab sync HTTP base URL (trust_env=False, follow_redirects=False)"
+    },
+    {
+      "key": "companion_sync_token",
+      "label": "伴随同步 Bearer Token",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault for companion_sync_url Authorization"
+    },
+    {
+      "key": "radarr_url",
+      "label": "Radarr 服务 URL (L3)",
+      "type": "string",
+      "default": "",
+      "description": "Optional Radarr v3 LAN base URL for movie local matching"
+    },
+    {
+      "key": "radarr_api_key",
+      "label": "Radarr API Key",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault for Radarr X-Api-Key header"
+    },
+    {
+      "key": "sonarr_url",
+      "label": "Sonarr 服务 URL (L3)",
+      "type": "string",
+      "default": "",
+      "description": "Optional Sonarr v3 LAN base URL for series local matching"
+    },
+    {
+      "key": "sonarr_api_key",
+      "label": "Sonarr API Key",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault for Sonarr X-Api-Key header"
+    },
+    {
+      "key": "arr_remote_prefix",
+      "label": "Arr 容器路径映射前缀",
+      "type": "string",
+      "default": "",
+      "description": "Optional remote path prefix returned by Radarr/Sonarr to rewrite onto local mount_root"
+    },
+    {
+      "key": "http_timeout_sec",
+      "label": "局域网请求超时 (秒)",
+      "type": "int",
+      "default": 10,
+      "description": "Timeout in seconds for optional L2/L3 LAN HTTP calls"
+    },
+    {
+      "key": "refresh_interval_sec",
+      "label": "后台定时扫描间隔 (秒)",
+      "type": "int",
+      "default": 0,
+      "description": "0 disables background polling (on-demand scan only)"
+    }
+  ]
+}

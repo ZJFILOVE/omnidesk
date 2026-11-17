@@ -1,0 +1,128 @@
+{
+  "schema_version": 2,
+  "id": "plugin-reddit",
+  "name": "Reddit Technical Subreddits",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "workspace",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "Subreddit feed curation, deep collapsible discussion trees, Chrome cookie/OAuth session support, and inline AI translation.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-reddit",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/omnidesk-plugin-reddit.git",
+    "branch": "main"
+  },
+  "provides": [
+    "text.source.v1",
+    "text.comments.v1",
+    "reddit.auth.v1"
+  ],
+  "consumes": [
+    "web.embed.v1",
+    "web.cookies.v1",
+    "web.fetch.v1",
+    "web.extract.v1",
+    "llm.chat.v1",
+    "llm.translate.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "network:wan",
+    "ipc:capability_call"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "chrome_cookie_source",
+      "label": "登录 Cookie 来源策略",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        "auto",
+        "plugin-chrome-web",
+        "vault",
+        "file",
+        "disabled"
+      ],
+      "required": false,
+      "description": "auto 会依次尝试 plugin-chrome-web (web.cookies.v1)、SecretVault 手动 Cookie 与本地 Cookie 文件。"
+    },
+    {
+      "key": "cookie_header",
+      "label": "手动 / 快照 Cookie Header (SecretVault)",
+      "type": "secret",
+      "default": "",
+      "required": false,
+      "description": "加密存储于 0600 SecretVault 的 Cookie Header，绝不写入普通配置或日志。"
+    },
+    {
+      "key": "oauth_token",
+      "label": "Reddit OAuth Bearer Token (SecretVault)",
+      "type": "secret",
+      "default": "",
+      "required": false,
+      "description": "可选：加密存储于 0600 SecretVault 的 OAuth Bearer Token，用于 oauth.reddit.com 请求。"
+    },
+    {
+      "key": "cookie_file_path",
+      "label": "备用 Cookie 文件路径 (Netscape / JSON)",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "description": "可选：Chrome 导出的 cookies.json 或 cookies.txt 路径，按域名与过期时间匹配。"
+    },
+    {
+      "key": "prefer_chrome_fetch",
+      "label": "优先使用 Chrome 上下文代理请求",
+      "type": "bool",
+      "default": false,
+      "required": false,
+      "description": "遇到 Cloudflare、动态签名或 GraphQL 校验时，优先委托 plugin-chrome-web 代发请求。"
+    },
+    {
+      "key": "auto_translate",
+      "label": "自动内联双语翻译",
+      "type": "bool",
+      "default": false,
+      "required": false,
+      "description": "开启后在拉取帖子正文与讨论树时自动调用 llm.translate.v1 生成双语对照（自动跳过代码块与公式）。"
+    },
+    {
+      "key": "target_lang",
+      "label": "翻译目标语言",
+      "type": "string",
+      "default": "zh-CN",
+      "required": false,
+      "description": "内联双语翻译的目标语言代码（例如 zh-CN）。"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "HTTP 请求超时 (秒)",
+      "type": "int",
+      "default": 15,
+      "required": false,
+      "description": "单次抓取请求的超时时间。"
+    },
+    {
+      "key": "subreddits",
+      "label": "默认订阅 Subreddits (逗号分隔)",
+      "type": "string",
+      "default": "LocalLLaMA,cpp,rust,programming",
+      "required": false,
+      "description": "默认拉取的 Subreddit 列表，例如 LocalLLaMA,cpp,MachineLearning。"
+    },
+    {
+      "key": "user_agent",
+      "label": "合规 Reddit User-Agent",
+      "type": "string",
+      "default": "linux:omnidesk.plugin.reddit:v0.1.0 (by /u/omnidesk_reader)",
+      "required": false,
+      "description": "遵循 Reddit API 规范的 User-Agent 标识，避免使用默认 curl UA 触发 429 限流。"
+    }
+  ]
+}

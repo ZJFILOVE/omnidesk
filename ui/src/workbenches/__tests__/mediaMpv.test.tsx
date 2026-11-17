@@ -1,0 +1,215 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { MpvPlaybackState, TauriEvent } from '../../api';
+import { MPV_FRAME_CHANNEL, MPV_STATE_CHANNEL } from '../../api';
+import { MediaWorkbench } from '../MediaWorkbench';
+
+const stoppedState: MpvPlaybackState = {
+  available: true,
+  initialized: false,
+  playing: false,
+  paused: true,
+  stopped: true,
+  buffering: false,
+  positionSec: 0,
+  durationSec: 0,
+  speed: 1,
+  volume: 85,
+  videoWidth: 0,
+  videoHeight: 0,
+  fps: 0,
+  videoBitrate: 0,
+  decoderDropFrames: 0,
+  outputDropFrames: 0,
+  videoCodec: '',
+  audioCodec: '',
+  audioSamplerate: 0,
+  audioChannels: 0,
+  cacheDurationSec: 0,
+  hwdecCurrent: '',
+  hwdecActive: false,
+  lastError: '',
+  currentUrl: '',
+  itemId: '',
+  title: '',
+  artist: '',
+  album: '',
+  coverUrl: '',
+  ipcSocketPath: null,
+};
+
+const playingState: MpvPlaybackState = {
+  ...stoppedState,
+  initialized: true,
+  playing: true,
+  paused: false,
+  stopped: false,
+  positionSec: 12,
+  durationSec: 600,
+  hwdecCurrent: 'vaapi',
+  hwdecActive: true,
+  currentUrl: 'https://www.youtube.com/watch?v=kCc8FmEb1nY',
+  itemId: 'media-yt-attention',
+  title: 'Attention Is All You Need',
+};
+
+afterEach(() => {
+  cleanup();
+  delete window.__TAURI__;
+  vi.restoreAllMocks();
+});
+
+describe('MediaWorkbench real mpv integration', () => {
+  it('opens, pauses, seeks, changes volume and follows omnidesk:mpv-state', async () => {
+    let state = stoppedState;
+    const handlers = new Map<string, (event: TauriEvent<unknown>) => void>();
+    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
+      if (cmd === 'mpv_status') {
+        return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
+      }
+      if (cmd === 'mpv_open') {
+        const requestedStart = payload?.args?.startSeconds;
+        state = {
+          ...playingState,
+          positionSec:
+            typeof requestedStart === 'number' ? requestedStart : playingState.positionSec,
+        };
+        return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
+      }
+      if (cmd === 'mpv_pause') {
+        state = { ...state, playing: false, paused: true };
+        return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
+      }
+      if (cmd === 'mpv_seek') {
+        state = { ...state, positionSec: Number(payload?.args?.seconds ?? 0) };
+        return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
+      }
+      if (cmd === 'mpv_volume') {
+        state = { ...state, volume: Number(payload?.args?.volume ?? state.volume) };
+        return { ok: true, provider_plugin_id: 'mpv', data: state, error: '' };
+      }
+      return { ok: true, data: {}, error: '' };
+    });
+
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<
+          NonNullable<Window['__TAURI__']>['core']
+        >['invoke'],
+      },
+      event: {
+        listen: vi.fn(async (name: string, cb: (event: TauriEvent<unknown>) => void) => {
+          handlers.set(name, cb);
+          return vi.fn();
+        }),
+      },
+    };
+
+    render(<MediaWorkbench />);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_status');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '开始播放' }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_open', {
+        args: expect.objectContaining({
+          url: 'https://www.youtube.com/watch?v=kCc8FmEb1nY',
+          itemId: 'media-yt-attention',
+          hwdec: true,
+        }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText('MPV')).not.toBeNull();
+      expect(screen.getByText('00:12')).not.toBeNull();
+    });
+
+    fireEvent.change(screen.getByLabelText('播放时间轴'), { target: { value: '90' } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_seek', {
+        args: { seconds: 90, relative: false },
+      });
+    });
+
+    fireEvent.change(screen.getByLabelText('音量'), { target: { value: '40' } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_volume', { args: { volume: 40 } });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '暂停播放' }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_pause');
+    });
+
+    act(() => {
+      handlers.get(MPV_STATE_CHANNEL)?.({
+        event: MPV_STATE_CHANNEL,
+        id: 1,
+        payload: { ...state, positionSec: 42, playing: true, paused: false },
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText('00:42')).not.toBeNull();
+    });
+  });
+
+  it('switches to the embedded libmpv canvas when the render API is available', async () => {
+    const handlers = new Map<string, (event: TauriEvent<unknown>) => void>();
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd === 'mpv_status') {
+        return { ok: true, provider_plugin_id: 'mpv', data: stoppedState, error: '' };
+      }
+      if (cmd === 'mpv_embed_probe') {
+        return {
+          ok: true,
+          provider_plugin_id: 'libmpv',
+          data: {
+            available: true,
+            backend: 'libmpv-sw',
+            apiVersion: '2.5',
+            detail: 'libmpv 2.5 software-render API ready',
+          },
+          error: '',
+        };
+      }
+      if (cmd === 'mpv_embed_enable') {
+        return { ok: true, provider_plugin_id: 'libmpv', data: playingState, error: '' };
+      }
+      if (cmd === 'mpv_embed_set_viewport') {
+        return {
+          ok: true,
+          provider_plugin_id: 'libmpv',
+          data: { width: 960, height: 540, fps: 24 },
+          error: '',
+        };
+      }
+      return { ok: true, data: {}, error: '' };
+    });
+
+    window.__TAURI__ = {
+      core: {
+        invoke: invoke as unknown as NonNullable<
+          NonNullable<Window['__TAURI__']>['core']
+        >['invoke'],
+      },
+      event: {
+        listen: vi.fn(async (name: string, cb: (event: TauriEvent<unknown>) => void) => {
+          handlers.set(name, cb);
+          return vi.fn();
+        }),
+      },
+    };
+
+    render(<MediaWorkbench />);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('mpv_embed_enable');
+      expect(screen.getByTestId('mpv-canvas')).not.toBeNull();
+      expect(screen.getByText('LIBMPV')).not.toBeNull();
+    });
+    expect(handlers.has(MPV_FRAME_CHANNEL)).toBe(true);
+  });
+});

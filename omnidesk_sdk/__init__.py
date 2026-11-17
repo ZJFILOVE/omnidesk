@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+from .auth import CookieResolutionError, CookieSessionResolver, SessionCookie
 from .context import PluginContext, TrackedResources
+from .http import (
+    BlockedRedirectError,
+    HttpErrorCode,
+    HttpResponse,
+    HttpTimeoutError,
+    ResponseTooLargeError,
+    SafeHttpClient,
+    SafeHttpError,
+    SsrfBlockedError,
+    UpstreamStatusError,
+)
 from .models import (
     BookBlockKind,
     BookFormat,
@@ -65,6 +77,7 @@ __all__ = [
     "BufferedCapabilityStream",
     "BusEvent",
     "BusSubscription",
+    "BlockedRedirectError",
     "CapabilityDescriptor",
     "CapabilityResult",
     "CapabilityStream",
@@ -72,8 +85,13 @@ __all__ = [
     "ChapterSegment",
     "CommentNode",
     "ContentDomain",
+    "CookieResolutionError",
+    "CookieSessionResolver",
     "CurationMode",
     "DockWidgetSpec",
+    "HttpErrorCode",
+    "HttpResponse",
+    "HttpTimeoutError",
     "InMemoryCapabilityRegistry",
     "InMemoryDomainRegistry",
     "InMemoryEntityBus",
@@ -86,6 +104,11 @@ __all__ = [
     "PluginContext",
     "PluginKind",
     "PublishResult",
+    "ResponseTooLargeError",
+    "SafeHttpClient",
+    "SafeHttpError",
+    "SessionCookie",
+    "SsrfBlockedError",
     "SubprocessResult",
     "TextArticle",
     "TextChannel",
@@ -94,6 +117,7 @@ __all__ = [
     "TextParagraphKind",
     "TextSource",
     "TrackedResources",
+    "UpstreamStatusError",
     "VocabCard",
     "WorkspaceTabSpec",
     "invoke_lifecycle_hook",

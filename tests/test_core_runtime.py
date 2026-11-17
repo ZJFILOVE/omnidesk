@@ -129,14 +129,18 @@ def test_capability_registration_versioning_and_validation() -> None:
     assert len(reg.list_capabilities(plugin_id="plugin-a")) == 2
     assert len(reg.list_capabilities(prefix="media.")) == 1
 
-    # Conflict from another plugin or without replace=True
-    with pytest.raises(CapabilityConflictError):
-        reg.register("llm.chat.v1", lambda req: req, plugin_id="plugin-b")
+    # Different plugin registering same capability succeeds without conflict (first-registered wins on tie)
+    reg.register("llm.chat.v1", lambda req: {"v": 99}, plugin_id="plugin-b")
+    assert reg.resolve("llm.chat.v1").plugin_id == "plugin-a"
+    assert len(reg.list_capabilities(prefix="llm.chat.v1")) == 2
+
+    # Same plugin duplicate registration without replace=True conflicts
     with pytest.raises(CapabilityConflictError):
         reg.register("llm.chat.v1", lambda req: req, plugin_id="plugin-a")
 
-    # Same plugin with replace=True succeeds
-    reg.register("llm.chat.v1", lambda req: {"v": 10}, plugin_id="plugin-a", replace=True)
+    # Same plugin with replace=True replaces only its own entry without preempting plugin-b
+    reg.register("llm.chat.v1", lambda req: {"v": 10}, plugin_id="plugin-a", priority=200, replace=True)
+    assert len(reg.list_capabilities(prefix="llm.chat.v1")) == 2
     assert reg.call_sync("llm.chat.v1").data == {"v": 10}
 
 
@@ -224,9 +228,10 @@ async def test_capability_revocation_and_fault_isolation() -> None:
     reg.register("p1.two.v1", lambda req: {"n": 2}, plugin_id="plugin-one")
     reg.register("p2.keep.v1", lambda req: {"n": 3}, plugin_id="plugin-two")
 
-    # Cross-plugin single unregister must reject
-    with pytest.raises(CapabilityConflictError):
-        reg.unregister("p1.one.v1", plugin_id="plugin-two")
+    # Unregistering with a non-matching plugin_id is a no-op and returns False
+    assert reg.unregister("p1.one.v1", plugin_id="plugin-two") is False
+    assert reg.has("p1.one.v1")
+    assert reg.resolve("p1.one.v1").plugin_id == "plugin-one"
 
     removed = reg.revoke_plugin("plugin-one")
     assert removed == 2
@@ -834,3 +839,76 @@ def test_thread_concurrency_safety_across_core_registries() -> None:
     assert reg.list_capabilities() == []
     assert domains.counts() == {"media": 0, "text": 0, "book": 0}
     assert bus.subscription_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_capability_multi_provider_priority_revocation_and_dispatch() -> None:
+    reg = CapabilityRegistry()
+
+    # Two plugins register the same capability with equal priority -> first-registered wins
+    reg.register("media.source.v1", lambda req: {"src": "nas", **req}, plugin_id="plugin-fnos-nas", priority=100)
+    reg.register("media.source.v1", lambda req: {"src": "music", **req}, plugin_id="plugin-music", priority=100)
+    assert reg.resolve("media.source.v1").plugin_id == "plugin-fnos-nas"
+    assert reg.get("media.source.v1").plugin_id == "plugin-fnos-nas"
+    assert [e.plugin_id for e in reg.list_capabilities(prefix="media.source.v1")] == [
+        "plugin-fnos-nas",
+        "plugin-music",
+    ]
+
+    # Higher priority third plugin wins resolve/get/call_sync while preserving all providers
+    reg.register("media.source.v1", lambda req: {"src": "imdb", **req}, plugin_id="plugin-arr-imdb", priority=250)
+    assert reg.resolve("media.source.v1").plugin_id == "plugin-arr-imdb"
+    sync_res = reg.call_sync("media.source.v1", {"q": "dune"})
+    assert sync_res.ok is True and sync_res.provider_plugin_id == "plugin-arr-imdb"
+    assert sync_res.data == {"src": "imdb", "q": "dune"}
+    assert len(reg.list_capabilities()) == 3
+
+    # Same plugin duplicate replace=False raises CapabilityConflictError; replace=True is idempotent
+    with pytest.raises(CapabilityConflictError):
+        reg.register("media.source.v1", lambda req: {"src": "music-v2"}, plugin_id="plugin-music", priority=300)
+    reg.register(
+        "media.source.v1",
+        lambda req: {"src": "music-v2", **req},
+        plugin_id="plugin-music",
+        priority=300,
+        replace=True,
+    )
+    assert len(reg.list_capabilities()) == 3
+    assert reg.resolve("media.source.v1").plugin_id == "plugin-music"
+    assert reg.call_sync("media.source.v1", {"q": "bach"}).data == {"src": "music-v2", "q": "bach"}
+
+    # Streaming dispatch with multiple providers hits highest-priority provider
+    async def stream_low(req: dict[str, Any], stream: CapabilityStream) -> CapabilityResult:
+        await stream.emit_delta("low")
+        return CapabilityResult.ok({"tier": "low"})
+
+    async def stream_high(req: dict[str, Any], stream: CapabilityStream) -> CapabilityResult:
+        await stream.emit_delta("high")
+        return CapabilityResult.ok({"tier": "high"})
+
+    reg.register_streaming("llm.chat.v1", stream_low, plugin_id="plugin-low", priority=50)
+    reg.register_streaming("llm.chat.v1", stream_high, plugin_id="plugin-high", priority=200)
+    chunks = [c async for c in reg.stream("llm.chat.v1", {})]
+    assert [c.data for c in chunks[:-1]] == ["high"]
+    assert chunks[-1].result is not None and chunks[-1].result.provider_plugin_id == "plugin-high"
+
+    # Unregister one plugin leaves remaining providers intact and falls back to next priority
+    assert reg.unregister("media.source.v1", plugin_id="plugin-music") is True
+    assert reg.unregister("media.source.v1", plugin_id="plugin-music") is False
+    assert reg.resolve("media.source.v1").plugin_id == "plugin-arr-imdb"
+    assert reg.call_sync("media.source.v1").provider_plugin_id == "plugin-arr-imdb"
+
+    # revoke_plugin removes only that plugin's entries across all capabilities
+    assert reg.revoke_plugin("plugin-arr-imdb") == 1
+    assert reg.resolve("media.source.v1").plugin_id == "plugin-fnos-nas"
+    assert reg.revoke_plugin("plugin-high") == 1
+    fallback_chunks = [c async for c in reg.stream("llm.chat.v1", {})]
+    assert [c.data for c in fallback_chunks[:-1]] == ["low"]
+    assert fallback_chunks[-1].result is not None and fallback_chunks[-1].result.provider_plugin_id == "plugin-low"
+
+    # unregister without plugin_id removes all remaining providers
+    assert reg.unregister("media.source.v1") is True
+    assert reg.unregister("media.source.v1") is False
+    assert not reg.has("media.source.v1")
+    assert reg.revoke_plugin("plugin-low") == 1
+    assert reg.list_capabilities() == []

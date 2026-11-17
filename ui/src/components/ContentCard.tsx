@@ -81,20 +81,18 @@ export const ContentCard: React.FC<ContentCardProps> = ({
       )}
       className={focusClass(
         isFocused,
-        `group flex cursor-pointer flex-col overflow-hidden rounded-lg border text-left transition-colors ${className}`,
+        `group flex cursor-pointer flex-col overflow-hidden rounded-[14px] text-left transition-colors ${className}`,
       )}
       style={{
         backgroundColor: selected
-          ? 'var(--bg-soft, #F1EFEC)'
+          ? 'var(--bg-soft, #E6E2DA)'
           : 'var(--bg-surface, #FCFBF9)',
-        borderColor: selected
-          ? 'var(--border-strong, rgba(36, 33, 29, 0.22))'
-          : 'var(--border-line, rgba(36, 33, 29, 0.12))',
+        boxShadow: 'var(--shadow-page)',
       }}
     >
       {aspect !== 'none' ? (
         <div
-          className={`relative w-full overflow-hidden border-b ${
+          className={`relative w-full overflow-hidden ${
             aspect === '16:9' ? 'aspect-video' : aspect === '1:1' ? 'aspect-square' : ''
           }`}
           style={{
@@ -102,7 +100,6 @@ export const ContentCard: React.FC<ContentCardProps> = ({
             background:
               coverGradient ??
               'linear-gradient(135deg, #2B3A4A 0%, #4E4237 60%, #7C304E 100%)',
-            borderColor: 'var(--border-line, rgba(36, 33, 29, 0.12))',
           }}
         >
           <div

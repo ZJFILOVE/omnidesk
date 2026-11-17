@@ -1,0 +1,105 @@
+{
+  "schema_version": 2,
+  "id": "plugin-blog",
+  "name": "个人博客与博主订阅阅读器",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "hybrid",
+  "domain": "text",
+  "author": "OmniDesk",
+  "description": "Any-blog subscription reader with RSS/Atom discovery, HTML fallback, Chrome-rendered SPA/paywall extraction, bilingual reading, and persisted subscriptions.",
+  "homepage": "https://github.com/ZJFILOVE/omnidesk-plugin-blog",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJFILOVE/plugin-blog.git",
+    "branch": "main"
+  },
+  "provides": [
+    "text.source.v1",
+    "blog.subscription.v1"
+  ],
+  "consumes": [
+    "web.embed.v1",
+    "web.cookies.v1",
+    "web.extract.v1",
+    "web.fetch.v1",
+    "llm.translate.v1",
+    "llm.chat.v1"
+  ],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "secret:vault",
+    "network:wan",
+    "ipc:capability_call",
+    "storage:plugin_data",
+    "ui:panel"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "default_blogs",
+      "label": "默认订阅博客",
+      "type": "string",
+      "default": "",
+      "description": "逗号或换行分隔的博客地址，可写成 https://example.com:显示名称。"
+    },
+    {
+      "key": "prefer_chrome_fetch",
+      "label": "优先使用 Chrome 渲染抓取",
+      "type": "bool",
+      "default": true,
+      "description": "遇到 SPA、Cloudflare 或动态渲染页面时调用 web.extract.v1。"
+    },
+    {
+      "key": "auto_translate",
+      "label": "自动双语对照翻译",
+      "type": "bool",
+      "default": true,
+      "description": "调用 llm.translate.v1 / llm.chat.v1 生成中文标题与正文对照。"
+    },
+    {
+      "key": "target_lang",
+      "label": "目标翻译语言",
+      "type": "string",
+      "default": "zh-CN",
+      "description": "双语翻译目标语言代码。"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "抓取超时（秒）",
+      "type": "int",
+      "default": 20,
+      "description": "单次网页或 Chrome 抽取的超时时间。"
+    },
+    {
+      "key": "max_articles_per_feed",
+      "label": "单源最大文章数",
+      "type": "int",
+      "default": 40,
+      "description": "每个博客单次最多返回的文章条数（1-100）。"
+    },
+    {
+      "key": "cookie_domain",
+      "label": "手动 Cookie 作用域",
+      "type": "string",
+      "default": "",
+      "description": "可选：仅当目标域名匹配该后缀时才附加 SecretVault 中的 Cookie Header。"
+    },
+    {
+      "key": "cookie_header",
+      "label": "手动 Cookie Header (SecretVault)",
+      "type": "secret",
+      "default": "",
+      "description": "加密存储的 Cookie Header，仅在 cookie_domain 匹配时使用。"
+    },
+    {
+      "key": "cookie_file_path",
+      "label": "备用 Cookie 文件路径",
+      "type": "string",
+      "default": "",
+      "description": "可选：Netscape cookies.txt 或 JSON cookies 文件路径。"
+    }
+  ]
+}

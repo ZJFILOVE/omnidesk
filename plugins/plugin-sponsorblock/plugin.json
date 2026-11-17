@@ -1,0 +1,66 @@
+{
+  "schema_version": 2,
+  "id": "plugin-sponsorblock",
+  "name": "SponsorBlock K-Anon Timeline",
+  "version": "0.2.0",
+  "runtime": "python",
+  "entry": "plugin:create_plugin",
+  "kind": "extension",
+  "domain": "media",
+  "author": "OmniDesk",
+  "description": "YouTube (sponsor.ajay.app) and Bilibili (bsbsb.top) K-anonymity SHA-256 prefix SponsorBlock queries, chapter merging, and F9 skip lookup.",
+  "provides": [
+    "player.timeline.v1"
+  ],
+  "consumes": [],
+  "permissions": [
+    "network:wan",
+    "config:read",
+    "config:write"
+  ],
+  "verify_cmd": "uv run pytest -q",
+  "config_schema": [
+    {
+      "key": "youtube_api_base",
+      "label": "YouTube SponsorBlock API Base",
+      "type": "string",
+      "default": "https://sponsor.ajay.app",
+      "description": "Base URL for YouTube SponsorBlock K-anonymity API"
+    },
+    {
+      "key": "bilibili_api_base",
+      "label": "Bilibili SponsorBlock API Base",
+      "type": "string",
+      "default": "https://bsbsb.top",
+      "description": "Base URL for Bilibili SponsorBlock K-anonymity API"
+    },
+    {
+      "key": "categories",
+      "label": "启用片段分类",
+      "type": "string",
+      "default": "sponsor,selfpromo,interaction,intro,outro",
+      "description": "Comma-separated SponsorBlock categories to query"
+    },
+    {
+      "key": "cache_ttl_sec",
+      "label": "缓存 TTL (秒)",
+      "type": "int",
+      "default": 3600,
+      "description": "Time-to-live in seconds for cached timeline responses"
+    },
+    {
+      "key": "enabled",
+      "label": "启用 SponsorBlock",
+      "type": "bool",
+      "default": true,
+      "description": "Enable or disable SponsorBlock timeline queries"
+    },
+    {
+      "key": "request_timeout_sec",
+      "label": "请求超时 (秒)",
+      "type": "int",
+      "default": 10,
+      "description": "HTTP request timeout in seconds"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "id": "hackernews",
+  "name": "Hacker News",
+  "category": "blog",
+  "format": "json",
+  "feed": {
+    "url": "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=30",
+    "items_path": "hits",
+    "fields": {
+      "id": "objectID",
+      "title": "title",
+      "url": "url|https://news.ycombinator.com/item?id={{objectID}}",
+      "author": "author",
+      "score": "points",
+      "comment_count": "num_comments",
+      "published_at": "created_at"
+    }
+  },
+  "article": {
+    "url": "https://hn.algolia.com/api/v1/items/{{id}}",
+    "mode": "readability",
+    "comments": {
+      "path": "children",
+      "id": "id",
+      "author": "author",
+      "body": "text",
+      "created_at": "created_at",
+      "score": "points",
+      "replies": "children"
+    }
+  }
+}
