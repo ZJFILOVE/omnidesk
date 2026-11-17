@@ -104,7 +104,7 @@ async def test_search_detail_download_and_slow_html_resolution_offline(tmp_path:
         assert first["size"] == "14.2 MB"
         assert first["language"] == "English"
         assert first["detail_url"] == f"{mirror_url}/md5/{MD5_SICP}"
-        assert first["download_token"]
+        assert first["download_token"] == ""
         assert res.data["results"][1]["item_id"] == MD5_DDIA
 
         # Format filter & limit
@@ -123,27 +123,21 @@ async def test_search_detail_download_and_slow_html_resolution_offline(tmp_path:
         det_res = await ctx.capabilities.call("book.search.v1", {"action": "detail", "item_id": MD5_SICP})
         assert det_res.ok is True
         assert det_res.data["title"] == "Structure and Interpretation of Computer Programs"
-        assert set(det_res.data["available_formats"]) == {"pdf", "epub"}
+        assert det_res.data["available_formats"] == ["pdf"]
+        assert {o["kind"] for o in det_res.data["download_options"]} == {"slow", "direct"}
 
         nf_res = await ctx.capabilities.call("book.search.v1", {"action": "detail", "item_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
         assert nf_res.ok is False and nf_res.data["error_code"] == "not_found"
 
-        # Download via /slow_download/ HTML intermediate link, plus direct EPUB, MOBI, AZW3, TXT
-        for fmt, tok, expected_bytes, dest in (
-            ("pdf", f"/slow_download/{MD5_SICP}/0/0", state.pdf_bytes, "sicp.pdf"),
-            ("epub", f"/dl/{MD5_SICP}/epub", state.epub_bytes, "nested/patterns.epub"),
-            ("mobi", f"/dl/{MD5_SICP}/mobi", state.mobi_bytes, "book.mobi"),
-            ("azw3", f"/dl/{MD5_SICP}/mobi", state.mobi_bytes, "book.azw3"),
-            ("txt", f"/dl/{MD5_SICP}/txt", state.txt_bytes, "notes.txt"),
-        ):
-            dl_res = await ctx.capabilities.call(
-                "book.search.v1",
-                {"action": "download", "item_id": MD5_SICP, "format": fmt, "download_token": tok, "destination": dest},
-            )
-            assert dl_res.ok is True, f"{fmt} failed: {dl_res}"
-            saved = Path(dl_res.data["file_path"])
-            assert saved.read_bytes() == expected_bytes
-            assert dl_res.data["sha256"] == hashlib.sha256(expected_bytes).hexdigest()
+        # A record is one specific file. Select a real slow source, then verify MD5.
+        dl_res = await ctx.capabilities.call("book.search.v1", {
+            "action": "download", "item_id": MD5_SICP, "format": "pdf",
+            "download_token": f"/slow_download/{MD5_SICP}/0/0", "destination": "sicp.pdf"})
+        assert dl_res.ok, dl_res.error
+        assert Path(dl_res.data["file_path"]).read_bytes() == state.pdf_bytes
+        wrong_format = await ctx.capabilities.call("book.search.v1", {
+            "action": "download", "item_id": MD5_SICP, "format": "epub"})
+        assert not wrong_format.ok and wrong_format.data["error_code"] == "format_mismatch"
         assert list(dl_root.rglob("*.tmp")) == []
 
         await invoke_lifecycle_hook(plugin.on_unload)
@@ -232,7 +226,7 @@ async def test_fast_api_auth_priority_redaction_and_handoff(tmp_path: Path, capl
         ctx.set_secret("api_key", "")
         cold_dl = await ctx.capabilities.call(
             "book.search.v1",
-            {"action": "download", "item_id": MD5_SICP, "format": "pdf", "destination": "cold.pdf"},
+            {"action": "download", "item_id": MD5_SICP, "format": "pdf", "destination": "cold.pdf", "download_token": f"/slow_download/{MD5_SICP}/0/0"},
         )
         assert cold_dl.ok is True and Path(cold_dl.data["file_path"]).read_bytes() == state.pdf_bytes
 

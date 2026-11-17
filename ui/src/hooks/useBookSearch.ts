@@ -11,11 +11,13 @@ export function useBookSearch(query: string, provider: BookSearchProvider, enabl
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const version = useRef(0);
   const pending = useRef(false);
+  const nextCursor = useRef<{ page: number; offset: number } | undefined>(undefined);
   const resolvedProvider = useRef<BookSearchProvider>(provider);
 
   useEffect(() => {
     const current = ++version.current;
     pending.current = false;
+    nextCursor.current = undefined;
     setResults([]);
     setLoading(false);
     setError(null);
@@ -34,8 +36,9 @@ export function useBookSearch(query: string, provider: BookSearchProvider, enabl
           return;
         }
         resolvedProvider.current = result.data.providerPluginId as BookSearchProvider;
+        nextCursor.current = result.data.nextCursor;
         setResults(result.data.results);
-        setHasMore(result.data.results.length > 0);
+        setHasMore(result.data.hasMore ?? result.data.results.length > 0);
       } catch (err) {
         if (current === version.current) setError(String(err));
       } finally {
@@ -52,12 +55,13 @@ export function useBookSearch(query: string, provider: BookSearchProvider, enabl
     setLoadingMore(true);
     setLoadMoreError(null);
     try {
-      const result = await searchBooks({ query: query.trim(), provider: resolvedProvider.current, limit: 24, page: page + 1 });
+      const result = await searchBooks({ query: query.trim(), provider: resolvedProvider.current, limit: 24, page: page + 1, cursor: nextCursor.current });
       if (current !== version.current) return;
       if (!result.ok) {
         setLoadMoreError(formatRpcError(result.error));
         return;
       }
+      nextCursor.current = result.data.nextCursor;
       const seen = new Set(results.map((item) => item.itemId));
       const next = result.data.results.filter((item) => {
         if (seen.has(item.itemId)) return false;
@@ -66,7 +70,7 @@ export function useBookSearch(query: string, provider: BookSearchProvider, enabl
       });
       setResults((previous) => [...previous, ...next]);
       if (next.length) setPage(page + 1);
-      setHasMore(next.length > 0);
+      setHasMore(result.data.hasMore ?? next.length > 0);
     } catch (err) {
       if (current === version.current) setLoadMoreError(String(err));
     } finally {

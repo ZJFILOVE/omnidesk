@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import urllib.parse
@@ -15,6 +16,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+from annas_html import page_state
 from annas_auth import AuthMaterial, resolve_auth_material  # noqa: E402
 from annas_http import HttpFetchError, download_to_target, fetch_with_chrome_fallback  # noqa: E402
 from annas_parser import (  # noqa: E402
@@ -24,8 +26,7 @@ from annas_parser import (  # noqa: E402
     normalize_format,
     parse_annas_detail_response,
     parse_annas_item_id,
-    parse_annas_search_response,
-    resolve_token_and_format,
+    parse_search_page, AnnasPageError,
 )
 from annas_security import (  # noqa: E402
     SUPPORTED_BOOK_FORMATS,
@@ -41,7 +42,7 @@ from annas_security import (  # noqa: E402
 )
 from annas_ui import build_annas_ui_schema, forward_book_handoff  # noqa: E402
 
-_SUPPORTED_ACTIONS = ("mirrors", "configure_mirror", "search", "detail", "download", "open_in_babeldoc", "open_in_ebook", "send_to_nas", "status")
+_SUPPORTED_ACTIONS = ("mirrors", "configure_mirror", "search", "detail", "download", "open_browser", "open_in_babeldoc", "open_in_ebook", "send_to_nas", "status")
 _MAX_CACHE = 256
 MIRRORS = [{'url': 'https://annas-archive.gl', 'label': 'annas-archive.gl'}, {'url': 'https://annas-archive.pk', 'label': 'annas-archive.pk'}, {'url': 'https://annas-archive.gd', 'label': 'annas-archive.gd'}, {'url': 'https://annas-archive.is', 'label': 'annas-archive.is · 未核实归属'}]
 
@@ -54,6 +55,7 @@ class AnnasArchivePlugin(BasePlugin):
         self._detail_cache: dict[str, dict[str, Any]] = {}
         self._download_records: dict[str, dict[str, Any]] = {}
         self._last_results: list[dict[str, Any]] = []
+        self._last_search_url = ""
 
     async def on_load(self, ctx: PluginContext) -> None:
         """Register `book.search.v1` and declarative BookWorkbench tab without blocking I/O."""
@@ -99,6 +101,9 @@ class AnnasArchivePlugin(BasePlugin):
             raw = str(self._cfg(key, "") or "").strip()
             if raw:
                 try:
+                    parsed = urllib.parse.urlsplit(raw)
+                    if parsed.query or parsed.fragment:
+                        raise BookSearchSecurityError("unsafe_url", "Anna 入口地址不能包含查询参数或片段")
                     return raw.rstrip("/"), frozenset({parse_origin(raw)})
                 except BookSearchSecurityError:
                     if required:
@@ -134,6 +139,8 @@ class AnnasArchivePlugin(BasePlugin):
 
     def _fail_from_exc(self, exc: BookSearchSecurityError | HttpFetchError, auth: AuthMaterial | None = None) -> CapabilityResult:
         secrets = auth.extra_secrets() if auth is not None else ()
+        if isinstance(exc, HttpFetchError) and exc.status_code == 403:
+            return CapabilityResult.fail("Anna 拒绝了当前请求；可在 Chrome 打开当前镜像完成验证后重试", error_code="verification_required")
         return CapabilityResult.fail(redact_text(str(exc), secrets), error_code=exc.error_code)
 
     async def handle_book_search(self, req: Mapping[str, Any] | None) -> CapabilityResult:
@@ -163,10 +170,28 @@ class AnnasArchivePlugin(BasePlugin):
                     self._search_cache.clear()
                     self._detail_cache.clear()
                     self._last_results = []
+                    self._last_search_url = ""
                 except BookSearchSecurityError as exc:
                     return self._fail_from_exc(exc)
             endpoint, _ = self._resolve_endpoint(required=False)
             return CapabilityResult.ok({"mirror_url": endpoint, "mirrors": MIRRORS})
+        if action == "open_browser":
+            if self.ctx is None or not self.ctx.capabilities.has("web.embed.v1"):
+                return CapabilityResult.fail("请启用 Chrome 插件以完成站点验证", error_code="capability_unavailable")
+            endpoint, origins = self._resolve_endpoint()
+            md5 = parse_annas_item_id(clean_text(payload.get("item_id")))
+            url = self._last_search_url or endpoint
+            if md5:
+                url = join_base_url(endpoint, f"/md5/{md5}")
+                token = clean_text(payload.get("download_token"))
+                options = self._detail_cache.get(md5, {}).get("download_options", [])
+                if token and any(option["download_token"] == token for option in options):
+                    url = join_base_url(endpoint, token)
+            try:
+                validate_url(url, configured_origins=origins, resolve_dns=False)
+            except BookSearchSecurityError as exc:
+                return self._fail_from_exc(exc)
+            return await self.ctx.capabilities.call("web.embed.v1", {"action": "open", "url": url})
         if action == "search":
             return await self._handle_search(payload)
         if action == "detail":
@@ -201,27 +226,48 @@ class AnnasArchivePlugin(BasePlugin):
         if not query:
             return CapabilityResult.fail("search 缺少必填参数 query", error_code="invalid_argument")
         fmt = normalize_format(payload.get("format"))
-        if fmt and fmt not in SUPPORTED_BOOK_FORMATS:
+        if fmt and fmt not in {"pdf", "epub", "mobi", "azw3", "txt", "djvu", "fb2", "cbr", "cbz"}:
             return CapabilityResult.fail(f"不支持的格式过滤: {fmt!r}", error_code="invalid_argument")
         raw_limit = payload.get("limit", 20)
         if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit <= 0:
             return CapabilityResult.fail("limit 必须为正整数", error_code="invalid_argument")
         limit = min(100, raw_limit)
-        raw_page = payload.get("page", 1)
-        page = raw_page if isinstance(raw_page, int) and not isinstance(raw_page, bool) and raw_page >= 1 else 1
+        cursor = payload.get("cursor")
+        if cursor is not None and not isinstance(cursor, Mapping):
+            return CapabilityResult.fail("无效的分页游标", error_code="invalid_argument")
+        raw_page = cursor.get("page", 1) if cursor is not None else payload.get("page", 1)
+        offset = cursor.get("offset", 0) if cursor is not None else 0
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10000:
+            return CapabilityResult.fail("无效的分页偏移", error_code="invalid_argument")
+        if isinstance(raw_page, bool) or not isinstance(raw_page, int) or not 1 <= raw_page <= 10000:
+            return CapabilityResult.fail("page 须为 1–10000 的整数", error_code="invalid_argument")
+        page = raw_page
 
         try:
             endpoint, origins = self._resolve_endpoint()
         except BookSearchSecurityError as exc:
             return self._fail_from_exc(exc)
 
+        if parse_annas_item_id(query):
+            detail = await self._handle_detail({"item_id": parse_annas_item_id(query)})
+            if not detail.ok:
+                return detail
+            self._last_results = [detail.data]
+            return CapabilityResult.ok({"results": self._last_results, "count": 1, "page": 1, "has_more": False, "source": "plugin-annas-archive"})
         auth = await resolve_auth_material(self.ctx, endpoint)
-        q_pairs: list[tuple[str, str]] = [("q", query), ("page", str(page))]
+        q_pairs: list[tuple[str, str]] = [("q", query), ("page", str(page)), ("display", ""), ("index", "")]
         if fmt:
             q_pairs.append(("ext", fmt))
+        for key in ("lang", "content", "sort"):
+            value = payload.get(key, "")
+            if not isinstance(value, str) or len(value) > 80:
+                return CapabilityResult.fail(f"{key} 格式无效", error_code="invalid_argument")
+            if value:
+                q_pairs.append((key, value))
         search_path = endpoint if urllib.parse.urlsplit(endpoint).path.lower().endswith("/search") else f"{endpoint}/search"
         search_url = f"{search_path}?{urllib.parse.urlencode(q_pairs)}"
 
+        self._last_search_url = search_url
         try:
             resp = await fetch_with_chrome_fallback(
                 self.ctx, search_url, auth=auth, timeout_sec=self._timeout_sec(),
@@ -231,8 +277,12 @@ class AnnasArchivePlugin(BasePlugin):
         except (HttpFetchError, BookSearchSecurityError) as exc:
             return self._fail_from_exc(exc, auth)
 
+        try:
+            page_data = parse_search_page(resp.body, resp.content_type, endpoint, page=page)
+        except AnnasPageError as exc:
+            return CapabilityResult.fail(str(exc), error_code=exc.code, browser_url=search_url)
         results: list[dict[str, Any]] = []
-        for item in parse_annas_search_response(resp.body, resp.content_type, endpoint):
+        for item in page_data["results"]:
             if fmt and item.get("format") and item["format"] != fmt:
                 continue
             try:
@@ -244,13 +294,15 @@ class AnnasArchivePlugin(BasePlugin):
                 item["detail_url"] = ""
             results.append(item)
             self._cache_put(self._search_cache, item["item_id"], item)
-            if len(results) >= limit:
-                break
-
+        eligible = results
+        results = eligible[offset:offset + limit]
+        next_cursor = ({"page": page, "offset": offset + limit} if offset + limit < len(eligible)
+                       else {"page": page_data["next_page"], "offset": 0} if page_data["has_more"] else None)
         self._last_results = list(results)
         return CapabilityResult.ok({
             "results": results, "count": len(results), "query": query, "format": fmt,
-            "limit": limit, "endpoint": scrub_url_secrets(endpoint), "source": "plugin-annas-archive",
+            "limit": limit, "page": page, "has_more": next_cursor is not None, "next_page": page_data["next_page"], "next_cursor": next_cursor,
+            "endpoint": scrub_url_secrets(endpoint), "source": "plugin-annas-archive",
         })
 
     async def _handle_detail(self, payload: Mapping[str, Any]) -> CapabilityResult:
@@ -260,13 +312,8 @@ class AnnasArchivePlugin(BasePlugin):
 
         try:
             endpoint, origins = self._resolve_endpoint()
-            explicit_detail = clean_text(payload.get("detail_url"))
-            if explicit_detail:
-                detail_url = validate_url(explicit_detail, configured_origins=origins, resolve_dns=False)
-            elif item_id in self._search_cache and self._search_cache[item_id].get("detail_url"):
-                detail_url = validate_url(self._search_cache[item_id]["detail_url"], configured_origins=origins, resolve_dns=False)
-            else:
-                detail_url = validate_url(join_base_url(endpoint, f"/md5/{item_id}"), configured_origins=origins, resolve_dns=False)
+            # Canonical record URL, never an arbitrary URL supplied with a valid MD5.
+            detail_url = validate_url(join_base_url(endpoint, f"/md5/{item_id}"), configured_origins=origins, resolve_dns=False)
         except BookSearchSecurityError as exc:
             return self._fail_from_exc(exc)
 
@@ -280,24 +327,43 @@ class AnnasArchivePlugin(BasePlugin):
         except (HttpFetchError, BookSearchSecurityError) as exc:
             return self._fail_from_exc(exc, auth)
 
+        state = page_state(resp.body)
+        if state["state"] != "ready":
+            return CapabilityResult.fail(state["message"], error_code=state["state"], browser_url=detail_url)
         detail_obj = parse_annas_detail_response(
             resp.body, resp.content_type, endpoint, requested_id=item_id, detail_url=scrub_url_secrets(detail_url)
         )
         if detail_obj is None:
-            return CapabilityResult.fail(f"未找到图书 {item_id}", error_code="not_found", item_id=item_id)
+            return CapabilityResult.fail("无法识别 Anna 文件详情页面，请检查入口或完成浏览器验证", error_code="unsupported_response", item_id=item_id)
+        detail_obj["member_api_available"] = bool(auth.api_key)
+        detail_obj["download_supported"] = detail_obj.get("format") in SUPPORTED_BOOK_FORMATS
+        valid_options = []
+        for option in detail_obj.get("download_options", []):
+            try:
+                validate_url(join_base_url(endpoint, option["download_token"]), configured_origins=origins, resolve_dns=False)
+                if option["kind"] in {"fast", "slow"} and parse_origin(join_base_url(endpoint, option["download_token"])) != parse_origin(endpoint):
+                    option = {**option, "kind": "external"}
+                valid_options.append(option)
+            except BookSearchSecurityError:
+                continue
+        detail_obj["download_options"] = valid_options
         self._cache_put(self._detail_cache, item_id, detail_obj)
         return CapabilityResult.ok(detail_obj)
 
     async def _resolve_fast_api_download(
-        self, endpoint: str, item_id: str, *, auth: AuthMaterial, origins: frozenset[Origin]
+        self, endpoint: str, item_id: str, *, auth: AuthMaterial, origins: frozenset[Origin], option: Mapping[str, Any] | None = None
     ) -> str | None:
         if not auth.api_key or not item_id:
             return None
-        fast_url = f"{endpoint}/dyn/api/fast_download.json?{urllib.parse.urlencode({'md5': item_id, 'key': auth.api_key})}"
+        params = {"md5": item_id, "key": auth.api_key}
+        if option:
+            params.update({key: option[key] for key in ("path_index", "domain_index") if key in option})
+        fast_url = f"{endpoint}/dyn/api/fast_download.json?{urllib.parse.urlencode(params)}"
         try:
             resp = await fetch_with_chrome_fallback(
                 self.ctx, fast_url, auth=auth, timeout_sec=self._timeout_sec(),
                 max_bytes=256 * 1024, configured_origins=origins, accept="application/json",
+                allow_json_errors=True, allow_chrome=False,
             )
         except HttpFetchError as exc:
             if exc.error_code == "not_found":
@@ -307,7 +373,7 @@ class AnnasArchivePlugin(BasePlugin):
         if isinstance(data, Mapping):
             err = clean_text(data.get("error"))
             if err:
-                code = "quota_exceeded" if "quota" in err.lower() or "left" in err.lower() else "auth_required"
+                code = "quota_exceeded" if any(word in err.lower() for word in ("quota", "left", "limit")) else "auth_required"
                 raise HttpFetchError(code, redact_text(err, auth.extra_secrets()))
             dl_url = clean_text(data.get("download_url"))
             if dl_url:
@@ -317,8 +383,8 @@ class AnnasArchivePlugin(BasePlugin):
     async def _handle_download(self, payload: Mapping[str, Any]) -> CapabilityResult:
         raw_id = clean_text(payload.get("item_id") or payload.get("id") or payload.get("md5"))
         req_token = clean_text(payload.get("download_token"))
-        if not raw_id and not req_token:
-            return CapabilityResult.fail("download 需要 item_id 或 download_token", error_code="invalid_argument")
+        if not raw_id:
+            return CapabilityResult.fail("Anna 下载需要文件 MD5", error_code="invalid_argument")
         item_id = parse_annas_item_id(raw_id) if raw_id else ""
         if raw_id and not item_id:
             return CapabilityResult.fail("无效的 item_id", error_code="invalid_argument")
@@ -336,50 +402,76 @@ class AnnasArchivePlugin(BasePlugin):
         except BookSearchSecurityError as exc:
             return self._fail_from_exc(exc)
 
-        meta = self._detail_cache.get(effective_id) or self._search_cache.get(effective_id)
-        if not req_token and meta is None and item_id:
+        # Always obtain the file's real source choices; search cards carry no fabricated URL.
+        meta = self._detail_cache.get(effective_id)
+        if item_id and meta is None:
             detail_res = await self._handle_detail({"item_id": item_id})
             if not detail_res.ok:
                 return detail_res
             meta = detail_res.data
-
+        meta = meta or {}
+        file_fmt = normalize_format(meta.get("format"))
+        if req_fmt and file_fmt and req_fmt != file_fmt:
+            return CapabilityResult.fail("一个 MD5 对应一个文件；请选择所需格式的另一条搜索结果", error_code="format_mismatch")
         auth = await resolve_auth_material(self.ctx, endpoint)
+        options = meta.get("download_options", [])
+        option = next((o for o in options if o["download_token"] == req_token), None) if req_token else None
+        if req_token and option is None:
+            return CapabilityResult.fail("下载来源不在该文件详情中，请刷新详情后选择", error_code="invalid_argument")
+        if option is None and not auth.api_key:
+            return CapabilityResult.fail("请选择此文件的下载来源", error_code="selection_required", download_options=options)
+        if option and option["kind"] == "external":
+            return CapabilityResult.fail("该来源需要在原站点完成下载", error_code="browser_required", browser_url=join_base_url(endpoint, req_token))
+        if option and option["kind"] == "fast" and not auth.api_key:
+            return CapabilityResult.fail("快速下载需要会员 Secret Key，或在浏览器登录会员账号", error_code="membership_required")
+        matched_fmt = file_fmt or req_fmt
+        if not matched_fmt:
+            return CapabilityResult.fail("文件格式未知，请先查看详情", error_code="unsupported_format")
         dest_raw = payload.get("destination")
-        dl_token, matched_fmt = resolve_token_and_format(meta, req_token, req_fmt, dest_raw, SUPPORTED_BOOK_FORMATS)
-        default_name = sanitize_filename(clean_text((meta or {}).get("title")) or effective_id, ext=matched_fmt or "epub")
-
+        default_name = sanitize_filename(clean_text(meta.get("title")) or effective_id, ext=matched_fmt)
+        tmp_path = None
         try:
             target_path = resolve_download_target(download_root, str(dest_raw) if dest_raw is not None else None, default_filename=default_name)
-            dl_url = ""
-            if auth.api_key and item_id and (not req_token or req_token.startswith("fast:")):
-                dl_url = await self._resolve_fast_api_download(endpoint, item_id, auth=auth, origins=origins) or ""
-            if not dl_url:
-                if not dl_token:
-                    return CapabilityResult.fail("缺少有效的 download_token", error_code="not_found", item_id=effective_id)
-                dl_url = validate_url(join_base_url(endpoint, dl_token), configured_origins=origins, resolve_dns=False)
+            if option is None or option["kind"] == "fast":
+                dl_url = await self._resolve_fast_api_download(endpoint, item_id, auth=auth, origins=origins, option=option)
+                if not dl_url:
+                    return CapabilityResult.fail("会员 API 未返回下载地址", error_code="invalid_response")
+            else:
+                dl_url = validate_url(join_base_url(endpoint, req_token), configured_origins=origins, resolve_dns=False)
+                if option["kind"] == "slow":
+                    response = await fetch_with_chrome_fallback(self.ctx, dl_url, auth=auth,
+                        timeout_sec=self._timeout_sec(), max_bytes=512 * 1024, configured_origins=origins)
+                    state = page_state(response.body)
+                    if state["state"] != "ready":
+                        return CapabilityResult.fail(state["message"], error_code=state["state"],
+                            wait_seconds=state.get("wait_seconds", 0), browser_url=dl_url)
+                    direct = extract_slow_download_link(response.body)
+                    if not direct:
+                        return CapabilityResult.fail("慢速下载页尚未提供文件链接，请在浏览器完成验证或等待后重试", error_code="browser_required", browser_url=dl_url)
+                    dl_url = validate_url(join_base_url(endpoint, direct), configured_origins=origins, resolve_dns=False)
+            # Anna cookies belong only to Anna, never the partner download host.
+            file_auth = auth if parse_origin(dl_url) == parse_origin(endpoint) else AuthMaterial()
             tmp_path, sha256_hex, size_bytes, final_url, content_type = await download_to_target(
-                self.ctx, dl_url, target_path, auth=auth, timeout_sec=self._timeout_sec(), max_bytes=max_bytes, configured_origins=origins
-            )
-        except (BookSearchSecurityError, HttpFetchError, json.JSONDecodeError) as exc:
-            err_obj = exc if isinstance(exc, (BookSearchSecurityError, HttpFetchError)) else HttpFetchError("service_offline", "fast_download 响应解析失败")
-            return self._fail_from_exc(err_obj, auth)
-
-        try:
-            if "html" in content_type.lower() and "/slow_download/" in final_url and size_bytes < 512 * 1024:
-                direct_href = extract_slow_download_link(tmp_path.read_bytes())
-                if direct_href:
-                    tmp_path.unlink(missing_ok=True)
-                    next_url = validate_url(join_base_url(endpoint, direct_href), configured_origins=origins, resolve_dns=False)
-                    tmp_path, sha256_hex, size_bytes, _, _ = await download_to_target(
-                        self.ctx, next_url, target_path, auth=auth, timeout_sec=self._timeout_sec(), max_bytes=max_bytes, configured_origins=origins
-                    )
-            final_fmt = finalize_downloaded_file(tmp_path, target_path, matched_fmt or None, max_bytes)
+                self.ctx, dl_url, target_path, auth=file_auth, timeout_sec=self._timeout_sec(), max_bytes=max_bytes, configured_origins=origins)
+            if "html" in content_type.lower():
+                state = page_state(tmp_path.read_bytes()[:512 * 1024])
+                return CapabilityResult.fail(state.get("message", "下载站点返回网页，需要在浏览器继续"),
+                    error_code=state["state"] if state["state"] != "ready" else "browser_required", browser_url=final_url)
+            # MD5 is Anna's file identity; reject an incorrect file before publishing it.
+            digest = hashlib.md5(usedforsecurity=False)
+            with tmp_path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if item_id and digest.hexdigest() != item_id:
+                return CapabilityResult.fail("下载文件的 MD5 与 Anna 记录不一致，文件未导入", error_code="checksum_mismatch")
+            final_fmt = finalize_downloaded_file(tmp_path, target_path, matched_fmt, max_bytes)
         except (BookSearchSecurityError, HttpFetchError) as exc:
-            tmp_path.unlink(missing_ok=True)
             return self._fail_from_exc(exc, auth)
-        except OSError as exc:
-            tmp_path.unlink(missing_ok=True)
-            return CapabilityResult.fail(redact_text(f"下载校验失败: {exc}", auth.extra_secrets()), error_code="invalid_magic")
+        except (ValueError, OSError):
+            return CapabilityResult.fail("Anna 下载响应或文件校验失败", error_code="invalid_response")
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
         record = {
             "item_id": effective_id, "format": final_fmt, "file_path": str(target_path), "local_path": str(target_path),
@@ -404,8 +496,8 @@ class AnnasArchivePlugin(BasePlugin):
 
     async def handle_tab_action(self, action_id: str, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
         state_map = dict(state) if state is not None else {}
-        if action_id == "search":
-            res = await self.handle_book_search({"action": "search", **state_map})
+        if action_id in {"search", "open_browser"}:
+            res = await self.handle_book_search({**state_map, "action": action_id})
             return {"ok": res.ok, "result": res.data, "error": res.error, "ui_schema": self._build_ui_schema()}
         return {"ok": False, "error": f"Unsupported action: {action_id}", "ui_schema": self._build_ui_schema()}
 

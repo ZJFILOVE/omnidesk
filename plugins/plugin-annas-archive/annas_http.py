@@ -187,9 +187,16 @@ def _sync_fetch_bytes(
     max_bytes: int,
     configured_origins: frozenset[Origin],
     secrets: tuple[str, ...],
+    allow_json_errors: bool = False,
 ) -> HttpResponseData:
     safe_url = validate_url(url, configured_origins=configured_origins, resolve_dns=True)
     opener = _build_opener(safe_url, configured_origins, resolve_dns=True)
+    if allow_json_errors:
+        class NoApiRedirect(urllib.request.HTTPRedirectHandler):
+            handler_order = 100
+            def redirect_request(self, *args, **kwargs):
+                raise HttpFetchError("unsafe_url", "会员 API 重定向已停止，请使用最终官方入口")
+        opener.add_handler(NoApiRedirect())
     req = urllib.request.Request(safe_url, headers=dict(headers), method="GET")
     deadline = time.monotonic() + max(0.05, timeout_sec)
     try:
@@ -211,6 +218,11 @@ def _sync_fetch_bytes(
             final_url = scrub_url_secrets(str(resp.geturl() or safe_url))
             return HttpResponseData(status_code=int(resp.status), url=final_url, headers=resp_headers, body=bytes(buf))
     except BaseException as exc:
+        if allow_json_errors and isinstance(exc, urllib.error.HTTPError) and exc.code in {400, 401, 403, 429}:
+            body = exc.read(min(max_bytes, 256 * 1024) + 1)
+            if len(body) <= max_bytes and "json" in exc.headers.get("Content-Type", ""):
+                return HttpResponseData(status_code=exc.code, url=scrub_url_secrets(safe_url),
+                    headers={k.lower(): v for k, v in exc.headers.items()}, body=body)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise _map_transport_exc(exc, secrets) from exc
@@ -283,10 +295,12 @@ async def fetch_with_chrome_fallback(
     configured_origins: frozenset[Origin],
     accept: str = "text/html,application/json;q=0.9,*/*;q=0.8",
     prefer_chrome_fetch: bool = False,
+    allow_json_errors: bool = False,
+    allow_chrome: bool = True,
 ) -> HttpResponseData:
     """Fetch URL with SSRF safety; optionally route or fallback via `web.fetch.v1`."""
     safe_url = validate_url(url, configured_origins=configured_origins, resolve_dns=False)
-    has_web_fetch = ctx is not None and ctx.capabilities.has("web.fetch.v1")
+    has_web_fetch = allow_chrome and ctx is not None and ctx.capabilities.has("web.fetch.v1")
 
     async def _via_chrome() -> HttpResponseData:
         assert ctx is not None
@@ -335,7 +349,7 @@ async def fetch_with_chrome_fallback(
             timeout_sec=timeout_sec,
             max_bytes=max_bytes,
             configured_origins=configured_origins,
-            secrets=auth.extra_secrets(),
+            secrets=auth.extra_secrets(), allow_json_errors=allow_json_errors,
         )
     except HttpFetchError as exc:
         if exc.error_code in {"auth_required", "service_offline", "timeout"} and has_web_fetch:

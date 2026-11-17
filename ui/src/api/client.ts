@@ -982,7 +982,7 @@ function normalizeBookSearchResult(
     itemId: String(raw.item_id ?? raw.id ?? raw.md5 ?? ''),
     title: String(raw.title ?? raw.name ?? raw.item_id ?? '未命名图书'),
     author: String(raw.author ?? raw.authors ?? '未知作者'),
-    format: String(raw.format ?? raw.extension ?? 'epub').toLowerCase(),
+    format: String(raw.format ?? raw.extension ?? (providerPluginId === 'plugin-annas-archive' ? '' : 'epub')).toLowerCase(),
     size: String(raw.size ?? raw.size_label ?? raw.filesize ?? ''),
     language: String(raw.language ?? raw.lang ?? ''),
     year: String(raw.year ?? ''),
@@ -1000,12 +1000,13 @@ export async function searchBooks(args: {
   format?: string;
   limit?: number;
   page?: number;
-}): Promise<RpcResult<{ results: BookSearchResult[]; providerPluginId: string }>> {
+  cursor?: { page: number; offset: number };
+}): Promise<RpcResult<{ results: BookSearchResult[]; providerPluginId: string; hasMore?: boolean; nextCursor?: { page: number; offset: number } }>> {
   const providers: string[] =
     args.provider && args.provider !== 'auto'
       ? [args.provider]
       : ['plugin-zlib', 'plugin-annas-archive'];
-  let lastFailure: RpcResult<{ results: BookSearchResult[]; providerPluginId: string }> | null =
+  let lastFailure: RpcResult<{ results: BookSearchResult[]; providerPluginId: string; hasMore?: boolean; nextCursor?: { page: number; offset: number } }> | null =
     null;
   let emptySuccess: RpcResult<{
     results: BookSearchResult[];
@@ -1021,6 +1022,7 @@ export async function searchBooks(args: {
         format: args.format || undefined,
         limit: args.limit ?? 20,
         page: args.page ?? 1,
+        cursor: args.cursor,
       },
     });
     if (result.available && result.ok) {
@@ -1029,9 +1031,9 @@ export async function searchBooks(args: {
       );
       const normalized = {
         ...result,
-        data: { results, providerPluginId },
+        data: { results, providerPluginId, hasMore: typeof result.data.has_more === 'boolean' ? result.data.has_more : undefined, nextCursor: isRecord(result.data.next_cursor) && typeof result.data.next_cursor.page === 'number' && typeof result.data.next_cursor.offset === 'number' ? { page: result.data.next_cursor.page, offset: result.data.next_cursor.offset } : undefined },
         providerPluginId,
-      } as RpcResult<{ results: BookSearchResult[]; providerPluginId: string }>;
+      } as RpcResult<{ results: BookSearchResult[]; providerPluginId: string; hasMore?: boolean; nextCursor?: { page: number; offset: number } }>;
       if (results.length > 0) return normalized;
       emptySuccess = normalized;
       continue;

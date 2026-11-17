@@ -2,13 +2,13 @@
   "schema_version": 2,
   "id": "plugin-annas-archive",
   "name": "Anna's Archive Book Search",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "runtime": "python",
   "entry": "plugin:create_plugin",
   "kind": "hybrid",
   "domain": "book",
   "author": "OmniDesk",
-  "description": "Searches Anna's Archive mirrors, inspects MD5 metadata, safely downloads verified ebooks via fast API or mirror links, and forwards to BabelDOC, EPUB reader, or Feiniu NAS.",
+  "description": "Anna-specific MD5 file search, source selection, member API, browser verification and checksum-verified downloads.",
   "provides": [
     "book.search.v1"
   ],
@@ -18,7 +18,8 @@
     "book.sync.v1",
     "nas.connection.v1",
     "web.cookies.v1",
-    "web.fetch.v1"
+    "web.fetch.v1",
+    "web.embed.v1"
   ],
   "permissions": [
     "network:wan",

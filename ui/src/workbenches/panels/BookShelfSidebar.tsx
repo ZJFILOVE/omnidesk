@@ -61,7 +61,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
       <SegmentedPills
         options={[
           { id: 'shelf', label: '封面书架', count: books.length },
-          { id: 'search', label: 'Z-Lib 搜书' },
+          { id: 'search', label: '搜书' },
         ]}
         value={leftTab}
         onChange={onTabChange}
@@ -231,7 +231,7 @@ export const BookShelfSidebar: React.FC<BookShelfSidebarProps> = ({
                 </span>
                 <span className="inline-flex items-center gap-1 font-medium text-[var(--text-muted)]">
                   <Plus className="h-3 w-3" aria-hidden="true" />
-                  <span>{entry.providerPluginId ? '下载并导入' : '导入书架'}</span>
+                  <span>{entry.providerPluginId === 'plugin-annas-archive' ? '查看文件与来源' : entry.providerPluginId ? '下载并导入' : '导入书架'}</span>
                 </span>
               </div>
               <div className="text-[15.5px] font-semibold text-[var(--text-primary)]">

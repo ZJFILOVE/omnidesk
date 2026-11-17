@@ -4,6 +4,7 @@ import type { SelectionActionEvent } from '../components/SelectionBubble';
 import StateView from '../components/StateView';
 import { LoadMoreButton } from '../components/LoadMoreButton';
 import { MediaCover } from '../components/MediaCover';
+import { AnnasDownloadPanel } from '../components/AnnasDownloadPanel';
 import { TranslationButton } from '../components/TranslationContext';
 import { useBookSearch } from '../hooks/useBookSearch';
 import {
@@ -93,7 +94,7 @@ const CATALOG_GRADIENTS = [
 function toCatalogItem(result: BookSearchResult): BookCatalogItem {
   let hash = 0;
   for (const char of result.itemId) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  const format = result.format.includes('pdf') ? 'pdf' : 'epub';
+  const format = (result.format || 'unknown') as BookCatalogItem['format'];
   return {
     id: `${result.providerPluginId}:${result.itemId}`,
     title: result.title,
@@ -149,6 +150,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const searchCatalog = useMemo(() => catalogSearch.results.map(toCatalogItem), [catalogSearch.results]);
   const searchLoading = catalogSearch.loading;
   const searchError = catalogSearch.error;
+  const [annaRequest, setAnnaRequest] = useState<{ entry: BookCatalogItem; action: 'download' | 'open_in_babeldoc' | 'open_in_ebook' | 'send_to_nas' } | null>(null);
   const [downloadedIds, setDownloadedIds] = useState<Set<string>>(() => new Set());
   const [selectedBookId, setSelectedBookId] = useState<string>(BOOK_ITEMS[0]?.id ?? '');
   useEffect(() => {
@@ -379,7 +381,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
       id: `imported-${entry.id}`,
       title: entry.title,
       author: entry.author,
-      format: entry.format,
+      format: entry.format === 'unknown' ? 'txt' : entry.format,
       language: entry.language,
       progressPct: 0,
       totalPages: 420,
@@ -421,6 +423,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   const handleCatalogAction = async (
     entry: BookCatalogItem,
     action: 'download' | 'open_in_babeldoc' | 'open_in_ebook' | 'send_to_nas',
+    prepared = false,
   ) => {
     if (!entry.providerPluginId || !entry.itemId) {
       addCatalogToShelf(entry);
@@ -429,6 +432,10 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
     if (!isTauriAvailable()) {
       if (action === 'download') addCatalogToShelf(entry);
       else setStatusMessage('离线预览：真实图书交付动作需要连接 Core');
+      return;
+    }
+    if (entry.providerPluginId === 'plugin-annas-archive' && !prepared && (action === 'download' || !downloadedIds.has(entry.id))) {
+      setAnnaRequest({ entry, action });
       return;
     }
     const item = {
@@ -444,7 +451,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
         ? `正在通过 ${entry.providerPluginId} 下载「${entry.title}」…`
         : `正在准备「${entry.title}」并执行 ${action}…`,
     );
-    if (action !== 'download' && !downloadedIds.has(entry.id)) {
+    if (action !== 'download' && !prepared && !downloadedIds.has(entry.id)) {
       const download = await bookSearchAction('download', { item });
       if (!download.ok) {
         setStatusMessage(`下载失败：${formatRpcError(download.error)}`);
@@ -483,6 +490,14 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
   };
 
   return (
+    <>
+      {annaRequest && <AnnasDownloadPanel entry={annaRequest.entry} onClose={() => setAnnaRequest(null)} onDownloaded={path => {
+        const { entry, action } = annaRequest;
+        setDownloadedIds(previous => new Set(previous).add(entry.id));
+        setAnnaRequest(null);
+        if (action === "download") setStatusMessage(`已校验并保存「${entry.title}」 → ${path}；可继续选择阅读、翻译或送 NAS`);
+        else void handleCatalogAction(entry, action, true);
+      }} />}
     <WorkbenchLayout
       domain="book"
       testId="workbench-book"
@@ -720,6 +735,7 @@ export const BookWorkbench: React.FC<BookWorkbenchProps> = ({
         ) : undefined
       }
     />
+    </>
   );
 };
 

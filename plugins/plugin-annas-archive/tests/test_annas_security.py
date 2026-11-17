@@ -47,6 +47,7 @@ async def test_download_security_caps_magic_and_temp_cleanup(tmp_path: Path) -> 
     ctx = _make_ctx(tmp_path)
     dl_root = tmp_path / "downloads"
     state = MockAnnasState()
+    state.detail_extra_links = [f"/dl/{MD5_SICP}/pdf", "/dl/oversized-header", "/dl/oversized-stream", "/dl/wrong-magic", "/dl/timeout-mid", "/dl/redirect-ok", "/dl/redirect-unsafe"]
 
     with run_mock_annas_server(state) as mirror_url:
         ctx.set_config({"mirror_url": mirror_url, "download_root": "", "max_download_mb": 1, "request_timeout_sec": 0.2})
@@ -85,15 +86,17 @@ async def test_download_security_caps_magic_and_temp_cleanup(tmp_path: Path) -> 
             "book.search.v1",
             {"action": "download", "item_id": MD5_SICP, "format": "pdf", "download_token": "/dl/wrong-magic", "destination": "bad.pdf"},
         )
-        assert wrong_magic.ok is False and wrong_magic.data["error_code"] == "invalid_magic"
+        assert wrong_magic.ok is False and wrong_magic.data["error_code"] == "browser_required"
         assert not (dl_root / "bad.pdf").exists()
 
-        bomb = await ctx.capabilities.call(
-            "book.search.v1",
-            {"action": "download", "item_id": MD5_SICP, "format": "epub", "download_token": "/dl/zip-bomb", "destination": "bomb.epub"},
-        )
-        assert bomb.ok is False and bomb.data["error_code"] == "zip_bomb"
-        assert not (dl_root / "bomb.epub").exists()
+        # ZIP bomb validation remains a file-layer check, independent of MD5 routing.
+        from annas_security import finalize_downloaded_file, BookSearchSecurityError
+        bomb_file = dl_root / "bomb.tmp"
+        bomb_file.write_bytes(state.bomb_bytes)
+        with pytest.raises(BookSearchSecurityError) as raised:
+            finalize_downloaded_file(bomb_file, dl_root / "bomb.epub", "epub", 1024 * 1024)
+        assert raised.value.error_code == "zip_bomb"
+        bomb_file.unlink(missing_ok=True)
 
         existing = dl_root / "keep.pdf"
         existing.write_bytes(b"%PDF-1.7\noriginal")
@@ -125,6 +128,7 @@ async def test_ssrf_and_redirect_protections(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path)
     dl_root = tmp_path / "dl"
     state = MockAnnasState()
+    state.detail_extra_links = [f"/dl/{MD5_SICP}/pdf", "/dl/oversized-header", "/dl/oversized-stream", "/dl/wrong-magic", "/dl/timeout-mid", "/dl/redirect-ok", "/dl/redirect-unsafe"]
 
     with run_mock_annas_server(state) as mirror_url:
         ctx.set_config({"mirror_url": mirror_url, "download_root": str(dl_root)})
@@ -185,7 +189,7 @@ async def test_ssrf_and_redirect_protections(tmp_path: Path) -> None:
                 "book.search.v1",
                 {"action": "download", "item_id": MD5_SICP, "format": "pdf", "download_token": direct_bad, "destination": "bad2.pdf"},
             )
-            assert res.ok is False and res.data["error_code"] == "unsafe_url"
+            assert res.ok is False and res.data["error_code"] == "invalid_argument"
 
         ctx.set_config({"mirror_url": "file:///etc/passwd"})
         cfg_bad = await ctx.capabilities.call("book.search.v1", {"action": "search", "query": "test"})

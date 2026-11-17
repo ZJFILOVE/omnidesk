@@ -14,10 +14,11 @@ from annas_html import (
     SlowDownloadLinkParser,
     clean_html_text,
     parse_meta_badges,
+    Document, page_state,
 )
 
-_MD5_HREF_RE = re.compile(r"/md5/([0-9a-fA-F]{32}|[A-Za-z0-9_-]{8,64})(?:[/?#]|$)")
-_MD5_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$|^[A-Za-z0-9_-]{6,64}$")
+_MD5_HREF_RE = re.compile(r"/md5/([0-9a-fA-F]{32})(?:[/?#]|$)")
+_MD5_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 clean_text = clean_html_text
 
 
@@ -85,8 +86,6 @@ def _normalize_search_entry(entry: Mapping[str, Any], base_url: str) -> dict[str
         return None
     detail_url = join_base_url(base_url, href) if href else join_base_url(base_url, f"/md5/{item_id}")
     dl_token = clean_text(entry.get("download_token") or entry.get("download_url") or entry.get("dl"))
-    if not dl_token:
-        dl_token = f"/slow_download/{item_id}/0/0"
     return {
         "item_id": item_id,
         "id": item_id,
@@ -98,7 +97,7 @@ def _normalize_search_entry(entry: Mapping[str, Any], base_url: str) -> dict[str
         "language": clean_text(entry.get("language") or entry.get("lang")),
         "detail_url": detail_url,
         "download_token": dl_token,
-        "source": "plugin-annas-archive",
+        "source": "plugin-annas-archive", "record_type": "file",
     }
 
 
@@ -163,7 +162,7 @@ def parse_annas_detail_response(
                 return None
             fmt = normalize_format(book.get("format") or book.get("extension"))
             size = format_size(book.get("size") or book.get("filesize"))
-            dl_token = clean_text(book.get("download_token") or book.get("download_url") or f"/slow_download/{requested_id}/0/0")
+            dl_token = clean_text(book.get("download_token") or book.get("download_url") or "")
             formats_out: list[dict[str, Any]] = []
             raw_formats = payload.get("formats") or book.get("formats") or []
             if isinstance(raw_formats, list):
@@ -186,8 +185,8 @@ def parse_annas_detail_response(
                 "isbn": clean_text(book.get("isbn")), "language": clean_text(book.get("language")),
                 "description": clean_text(book.get("description")), "format": fmt, "size": size,
                 "detail_url": join_base_url(base_url, str(book.get("detail_url") or detail_url)),
-                "download_token": dl_token, "formats": formats_out,
-                "available_formats": list(dict.fromkeys(f["format"] for f in formats_out if f.get("format"))),
+                "download_token": "", "download_options": [{"kind": "direct", "label": "镜像文件链接", **f} for f in formats_out if f.get("download_token")], "formats": [{"format": fmt, "size": size}] if fmt else [],
+                "available_formats": [fmt] if fmt else [],
                 "source": "plugin-annas-archive",
             }
 
@@ -197,28 +196,21 @@ def parse_annas_detail_response(
     meta = parser.meta
     if not clean_text(meta.get("title")):
         return None
-    badges = parse_meta_badges(" · ".join(meta.get("meta_lines", [])))
-    formats_out = [
-        {
-            "format": normalize_format(f.get("format") or badges["format"]),
-            "size": badges["size"],
-            "download_token": clean_text(f.get("download_token")),
-            "label": clean_text(f.get("label")),
-        }
-        for f in meta.get("formats", [])
-        if isinstance(f, Mapping)
-    ]
-    primary_fmt = badges["format"] or (formats_out[0]["format"] if formats_out else "")
-    primary_dl = (formats_out[0]["download_token"] if formats_out else "") or f"/slow_download/{requested_id}/0/0"
-    if not formats_out and primary_fmt:
-        formats_out = [{"format": primary_fmt, "size": badges["size"], "download_token": primary_dl}]
+    fmt, size = meta["format"], meta["size"]
+    options = []
+    for entry in meta["download_options"]:
+        if entry.get("md5") and entry["md5"] != requested_id:
+            continue
+        options.append({**entry, "format": fmt, "size": size})
     return {
         "item_id": requested_id, "id": requested_id, "md5": requested_id,
-        "title": clean_text(meta.get("title")), "author": clean_text(meta.get("author")),
-        "year": badges["year"], "publisher": "", "isbn": "", "language": badges["language"],
-        "description": clean_text(meta.get("description")), "format": primary_fmt, "size": badges["size"],
-        "detail_url": detail_url, "download_token": primary_dl, "formats": formats_out,
-        "available_formats": list(dict.fromkeys(f["format"] for f in formats_out if f.get("format"))),
+        "title": clean_text(meta.get("title")), "author": meta["author"],
+        "year": meta["year"], "publisher": meta["publisher"], "isbn": "", "language": meta["language"],
+        "description": meta["description"], "format": fmt, "size": size,
+        "detail_url": detail_url, "download_token": "", "download_options": options,
+        # Compatibility field: a MD5 describes one file, not alternative formats.
+        "formats": [{"format": fmt, "size": size, "download_token": ""}] if fmt else [],
+        "available_formats": [fmt] if fmt else [], "record_type": "file",
         "source": "plugin-annas-archive",
     }
 
@@ -231,28 +223,46 @@ def extract_slow_download_link(body: bytes) -> str:
     return parser.links[0] if parser.links else ""
 
 
-def resolve_token_and_format(
-    meta: Mapping[str, Any] | None,
-    req_token: str,
-    req_fmt: str,
-    dest_raw: Any,
-    supported_formats: frozenset[str],
-) -> tuple[str, str]:
-    """Select download token and inferred target format from explicit input, metadata, or destination."""
-    dl_token, matched_fmt = req_token, req_fmt
-    if not dl_token and meta is not None:
-        for fmt_entry in meta.get("formats", []):
-            if isinstance(fmt_entry, Mapping) and (not req_fmt or fmt_entry.get("format") == req_fmt):
-                dl_token = clean_text(fmt_entry.get("download_token"))
-                matched_fmt = matched_fmt or normalize_format(fmt_entry.get("format"))
-                if dl_token:
-                    break
-        if not dl_token:
-            dl_token = clean_text(meta.get("download_token"))
-            matched_fmt = matched_fmt or normalize_format(meta.get("format"))
-    if not matched_fmt and isinstance(dest_raw, str):
-        dot_pos = dest_raw.rfind(".")
-        ext = dest_raw[dot_pos + 1 :].strip().lower() if dot_pos >= 0 else ""
-        if ext in supported_formats:
-            matched_fmt = ext
-    return dl_token, matched_fmt
+
+class AnnasPageError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def parse_search_page(body, content_type, base_url, *, page=1):
+    state = page_state(body)
+    if state["state"] != "ready":
+        raise AnnasPageError(state["state"], state["message"])
+    text = body.decode("utf-8", errors="replace")
+    items = parse_annas_search_response(body, content_type, base_url)
+    doc = Document(); doc.feed(text)
+    visible = doc.root.text().lower()
+    is_json = "json" in content_type or text.lstrip().startswith(("{", "["))
+    if is_json:
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            raise AnnasPageError("parse_error", "Anna 镜像返回的 JSON 无效") from None
+        valid = isinstance(payload, list) or isinstance(payload, dict) and any(isinstance(payload.get(k), list) for k in ("results", "items", "books"))
+        if not valid:
+            raise AnnasPageError("unsupported_response", "该入口没有返回 Anna 文件搜索列表")
+    elif not items:
+        empty = any(marker in visible for marker in ("no files found", "no results found", "no results", "未找到", "没有找到"))
+        if not empty:
+            raise AnnasPageError("unsupported_response", "页面不是可识别的 Anna MD5 搜索结果，请检查镜像或完成浏览器验证")
+    next_page = None
+    for node in doc.root.walk():
+        if node.tag != "a":
+            continue
+        parsed = urllib.parse.urlsplit(node.attrs.get("href") or "")
+        if parsed.path != "/search":
+            continue
+        values = urllib.parse.parse_qs(parsed.query)
+        try:
+            candidate = int(values.get("page", ["0"])[0])
+        except ValueError:
+            continue
+        if candidate == page + 1:
+            next_page = candidate
+    return {"results": items, "page": page, "next_page": next_page, "has_more": next_page is not None}

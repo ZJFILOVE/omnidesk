@@ -28,8 +28,6 @@ class AuthMaterial:
         headers = {"User-Agent": _DEFAULT_USER_AGENT, "Accept": accept}
         if self.cookie_header:
             headers["Cookie"] = self.cookie_header
-        if self.api_key:
-            headers["X-Api-Key"] = self.api_key
         return headers
 
 

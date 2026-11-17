@@ -186,7 +186,7 @@ export interface BookCatalogItem {
   id: string;
   title: string;
   author: string;
-  format: 'pdf' | 'epub';
+  format: BookItem['format'] | 'unknown';
   language: string;
   sourceName: string;
   sizeLabel: string;

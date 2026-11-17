@@ -7,7 +7,7 @@ import os
 import zipfile
 from pathlib import Path
 
-SUPPORTED_BOOK_FORMATS: frozenset[str] = frozenset({"pdf", "epub", "mobi", "azw3", "txt"})
+SUPPORTED_BOOK_FORMATS: frozenset[str] = frozenset({"pdf", "epub", "mobi", "azw3", "txt", "djvu"})
 _MAX_ZIP_ENTRIES = 10_000
 _MAX_ZIP_RATIO = 50.0
 _ZIP_RATIO_MIN_BYTES = 512 * 1024
@@ -128,12 +128,19 @@ def validate_downloaded_file(path: Path, expected_format: str | None, max_bytes:
         stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n")
         if stripped.startswith(b"%PDF-"):
             fmt = "pdf"
+        elif head.startswith(b"AT&TFORM") and head[12:16] in (b"DJVU", b"DJVM"):
+            fmt = "djvu"
         elif head.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
             fmt = "epub"
         elif len(head) >= 68 and head[60:68] in (b"BOOKMOBI", b"TEXtREAd"):
             fmt = "mobi"
         else:
             fmt = "txt"
+
+    if fmt == "djvu":
+        if not (head.startswith(b"AT&TFORM") and head[12:16] in (b"DJVU", b"DJVM")):
+            raise BookValidationError("invalid_magic", "文件魔数不匹配 DjVu (AT&TFORM)")
+        return "djvu"
 
     if fmt == "pdf":
         if not head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"%PDF-"):

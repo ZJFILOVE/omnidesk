@@ -21,7 +21,7 @@ def build_annas_ui_schema(
     return {
         "type": "Section",
         "id": "annas-search-root",
-        "title": "Anna's Archive 书库检索",
+        "title": "Anna’s Archive · 文件索引检索",
         "children": [
             {
                 "type": "KeyValue",
@@ -36,13 +36,15 @@ def build_annas_ui_schema(
                 "id": "annas-search-form",
                 "fields": [
                     {"name": "query", "label": "书名 / 作者 / MD5 / ISBN", "type": "string", "default": ""},
-                    {"name": "format", "label": "格式过滤", "type": "string", "default": ""},
+                    {"name": "format", "label": "文件格式（如 pdf / epub）", "type": "string", "default": ""},
+                    {"name": "lang", "label": "语言代码（如 en / zh）", "type": "string", "default": ""},
+                    {"name": "sort", "label": "排序（newest / oldest / largest / smallest）", "type": "string", "default": ""},
                 ],
             },
             {
                 "type": "ActionRow",
                 "id": "annas-actions",
-                "actions": [{"id": "search", "label": "检索图书", "variant": "primary"}],
+                "actions": [{"id": "search", "label": "检索图书", "variant": "primary"}, {"id": "open_browser", "label": "在 Chrome 打开 / 完成验证"}],
             },
             {
                 "type": "List",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import io
 import json
@@ -12,7 +13,7 @@ import zipfile
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-MD5_SICP = "0123456789abcdef0123456789abcdef"
+MD5_SICP = hashlib.md5(b"%PDF-1.7\n% sicp-annas\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", usedforsecurity=False).hexdigest()
 MD5_DDIA = "fedcba9876543210fedcba9876543210"
 
 
@@ -63,6 +64,8 @@ class MockAnnasState:
         self.bomb_bytes: bytes = make_zip_bomb_epub_bytes()
         self.oversized_declared_len: int = 2 * 1024 * 1024
         self.fast_error: str = ""
+        self.detail_extra_links: list[str] = []
+        self.partner_html: str | None = None
         self.search_html: str = (
             "<html><body>"
             f'<a href="/md5/{MD5_SICP}" class="flex">'
@@ -127,6 +130,7 @@ def run_mock_annas_server(state: MockAnnasState) -> Iterator[str]:
                     f'<a href="/dl/{MD5_SICP}/epub">Mirror Server (EPUB)</a>'
                     "</body></html>"
                 )
+                html += "".join(f'<a href="{href}" download>Test file</a>' for href in state.detail_extra_links)
                 _send_bytes(self, 200, "text/html; charset=utf-8", html.encode("utf-8"))
                 return
             if parsed.path.startswith("/md5/"):
@@ -134,12 +138,12 @@ def run_mock_annas_server(state: MockAnnasState) -> Iterator[str]:
                 return
             if parsed.path == "/dyn/api/fast_download.json":
                 if state.fast_error:
-                    _send_bytes(self, 200, "application/json", json.dumps({"error": state.fast_error}).encode("utf-8"))
+                    _send_bytes(self, 400, "application/json", json.dumps({"error": state.fast_error}).encode("utf-8"))
                     return
                 _send_bytes(self, 200, "application/json", json.dumps({"download_url": f"/dl/{MD5_SICP}/pdf"}).encode("utf-8"))
                 return
             if parsed.path == f"/slow_download/{MD5_SICP}/0/0":
-                html = f'<html><body><a class="js-download-link" href="/dl/{MD5_SICP}/pdf">Download now</a></body></html>'
+                html = state.partner_html or f'<html><body><a class="js-download-link" href="/dl/{MD5_SICP}/pdf">Download now</a></body></html>'
                 _send_bytes(self, 200, "text/html; charset=utf-8", html.encode("utf-8"))
                 return
             if parsed.path == "/dl/redirect-unsafe":

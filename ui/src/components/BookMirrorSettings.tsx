@@ -28,6 +28,15 @@ function ProviderMirrors({ provider, name, onChanged }: { provider: string; name
     } catch (err) { setError(String(err)); }
     finally { setBusy(false); }
   };
+  const openAnna = async () => {
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const result = await callCapability({ capability: 'book.search.v1', providerPluginId: provider, payload: { action: 'open_browser' } });
+      if (!result.ok) setError(formatRpcError(result.error));
+      else setMessage('已打开当前 Anna 页面；完成验证后返回重新搜索。');
+    } catch (err) { setError(String(err)); }
+    finally { setBusy(false); }
+  };
   return <fieldset disabled={busy || !state} className="space-y-2">
     <legend className="mb-2 text-sm font-medium">{name}</legend>
     <div className="flex flex-wrap gap-2">
@@ -38,6 +47,7 @@ function ProviderMirrors({ provider, name, onChanged }: { provider: string; name
       <button type="button" disabled={busy || !state || !url.trim()} onClick={() => void save()} className={`${field} disabled:opacity-40`}>{busy ? '正在保存…' : `应用 ${name} 镜像`}</button>
     </div>
     <p className="text-xs text-[var(--text-muted)]">当前：{state?.mirror_url || '正在读取…'}</p>
+    {provider === 'plugin-annas-archive' && <button type="button" className={field} onClick={() => void openAnna()}>在 Chrome 打开 Anna / 完成验证</button>}
     {error && <p role="alert" className="text-sm text-[var(--status-err-fg)]">{error}</p>}
     <p role="status" className="text-sm text-[var(--text-muted)]">{message}</p>
   </fieldset>;
