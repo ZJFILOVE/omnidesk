@@ -90,6 +90,35 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
               ? '该曲目没有可用歌词（已尝试本地缓存、Adam 原生歌词与 LRCLIB）'
               : `没有可用${label}`,
         );
+        const untranslated = parsed
+          .map((line, index) => ({ id: String(index), text: line.original, hasTranslation: Boolean(line.translation) }))
+          .filter((entry) => !entry.hasTranslation && entry.text.trim().length > 0);
+        if (untranslated.length > 0) {
+          void Promise.resolve(
+            callCapability<{ results?: Array<{ id: string; translation: string }> }>({
+              capability: 'llm.translate.v1',
+              providerPluginId: 'plugin-magpie-agent',
+              payload: {
+                action: 'cache_lookup',
+                segments: untranslated.map(({ id, text }) => ({ id, text })),
+                target_lang: 'zh-CN',
+              },
+            }),
+          )
+            .then((cacheRes) => {
+              if (cancelled || !cacheRes?.ok || !Array.isArray(cacheRes.data?.results) || cacheRes.data.results.length === 0) {
+                return;
+              }
+              const byIndex = new Map(cacheRes.data.results.map((entry) => [Number(entry.id), entry.translation]));
+              setLines((prev) =>
+                prev.map((line, index) => {
+                  const cached = byIndex.get(index);
+                  return cached && !line.translation ? { ...line, translation: cached } : line;
+                }),
+              );
+            })
+            .catch(() => {});
+        }
       })
       .catch((error: unknown) => {
         if (!cancelled) {

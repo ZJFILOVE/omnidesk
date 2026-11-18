@@ -643,6 +643,15 @@ class AppleMusicMediaSource(MediaSource):
             raw_lrc = fetch_adam_lrc(song_id, str(self._get_config().get("storefront") or "cn"), qwen)
             if raw_lrc:
                 lines = parse_lrc_to_lyric_lines(raw_lrc, qwen)
+                if lines:
+                    try:
+                        lyrics_dir = self._lyrics_dir()
+                        lyrics_dir.mkdir(parents=True, exist_ok=True)
+                        lrc_path = lyrics_dir / f"{song_id}.lrc"
+                        if not lrc_path.is_symlink():
+                            lrc_path.write_text(raw_lrc, encoding="utf-8")
+                    except OSError:
+                        pass
         if not lines:
             lines = await self._fetch_online_lyrics(title, artist, album, duration_sec)
         return await self._finalize_lyrics(song_id, lines, title)
