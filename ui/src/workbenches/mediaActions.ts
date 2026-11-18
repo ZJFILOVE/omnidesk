@@ -1,5 +1,5 @@
-import { callCapability, formatRpcError } from '../api';
-import type { MediaItem } from '../data/mock';
+import { callCapability, formatRpcError, invokeDomain } from '../api';
+import type { LyricLine, MediaItem } from '../data/mock';
 
 interface SubtitleCandidate {
   id?: string;
@@ -21,6 +21,11 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+function dirname(path: string): string {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return idx > 0 ? path.slice(0, idx) : '';
+}
+
 export async function runSubHunterPipeline(
   item: MediaItem,
   options: {
@@ -36,9 +41,16 @@ export async function runSubHunterPipeline(
   }
 
   onProgress?.('SubHunter 正在检索字幕…');
+  const mediaPath = item.nasMeta?.path?.trim();
+  const outputDir = mediaPath ? dirname(mediaPath) : '';
   const search = await callCapability<{ results?: SubtitleCandidate[] }>({
     capability: 'subtitle.fetch.v1',
-    payload: { action: 'search', title, timeout_sec: 60 },
+    payload: {
+      action: 'search',
+      title,
+      ...(mediaPath ? { filename: basename(mediaPath) } : {}),
+      timeout_sec: 60,
+    },
     timeoutMs: 90_000,
   });
   if (!search.available) {
@@ -69,6 +81,7 @@ export async function runSubHunterPipeline(
       id: candidate.id,
       language: candidate.language,
       filename: candidate.filename,
+      ...(outputDir ? { output_dir: outputDir } : {}),
       timeout_sec: 120,
     },
     timeoutMs: 180_000,
@@ -128,7 +141,6 @@ export async function runSubHunterPipeline(
     }
   }
 
-  const mediaPath = item.nasMeta?.path?.trim();
   if (!mediaPath) {
     const suffix = translateNote ? `；${translateNote}` : '';
     return {
@@ -223,4 +235,106 @@ export async function enqueueEphemeralTrack(
     return { ok: false, message: `入队失败 ${formatRpcError(res.error)}` };
   }
   return { ok: true, message: '已加入「OmniDesk AI 灵感电台」（未触碰每日歌单）' };
+}
+
+export async function extractNasEmbeddedSubtitles(
+  item: MediaItem,
+): Promise<{ ok: boolean; message: string }> {
+  const res = await invokeDomain<{ count?: number; subtitle_path?: string; source?: string }>({
+    domain: 'media',
+    sourceId: 'plugin-fnos-nas',
+    method: 'extract_subtitles',
+    payload: {
+      item_id: item.id,
+      path: item.nasMeta?.path,
+      force_embedded: true,
+      save_srt: true,
+    },
+    timeoutMs: 60_000,
+  });
+  if (!res.available) {
+    return { ok: false, message: '离线预览模式不可提取原生字幕' };
+  }
+  if (!res.ok) {
+    return { ok: false, message: `提取原生字幕失败 ${formatRpcError(res.error)}` };
+  }
+  const saved = res.data.subtitle_path ? `，已保存 ${basename(res.data.subtitle_path)}` : '';
+  return {
+    ok: true,
+    message: `已提取 ${Number(res.data.count ?? 0)} 条原生字幕${saved}`,
+  };
+}
+
+export async function saveItemSubtitlesAsSrt(
+  item: MediaItem,
+  lines: LyricLine[],
+  translations: Record<string, string> = {},
+): Promise<{ ok: boolean; message: string; path?: string }> {
+  if (!lines.length) {
+    return { ok: false, message: '当前没有可保存的字幕内容' };
+  }
+  const merged = lines.map((line, index) => ({
+    time_sec: line.timeSec,
+    start_sec: line.timeSec,
+    original: line.original,
+    translation: translations[String(index)] ?? line.translation ?? '',
+  }));
+
+  const isYoutube =
+    item.sourceId === 'plugin-youtube' || item.streamResolver?.providerPluginId === 'plugin-youtube';
+  if (isYoutube) {
+    const videoId = String(
+      item.streamResolver?.payload?.video_id ?? item.streamResolver?.payload?.item_id ?? item.id ?? '',
+    );
+    const res = await callCapability<{ srt_path?: string }>({
+      capability: 'media.youtube.v1',
+      providerPluginId: 'plugin-youtube',
+      payload: {
+        action: 'save_srt',
+        video_id: videoId,
+        lines: merged,
+        mode: 'bilingual',
+      },
+      timeoutMs: 30_000,
+    });
+    if (!res || !res.available) {
+      return { ok: false, message: '离线预览模式不可保存 SRT' };
+    }
+    if (!res.ok) {
+      return { ok: false, message: `保存 SRT 失败 ${formatRpcError(res.error)}` };
+    }
+    return {
+      ok: true,
+      message: `已保存 YouTube SRT：${basename(res.data.srt_path ?? `${videoId}.srt`)}（下次可直接加载）`,
+      path: res.data.srt_path,
+    };
+  }
+
+  if (item.kind === 'nas' || item.sourceId === 'plugin-fnos-nas') {
+    const res = await invokeDomain<{ path?: string }>({
+      domain: 'media',
+      sourceId: 'plugin-fnos-nas',
+      method: 'save_srt',
+      payload: {
+        item_id: item.id,
+        media_path: item.nasMeta?.path,
+        lines: merged,
+        mode: 'bilingual',
+      },
+      timeoutMs: 30_000,
+    });
+    if (!res || !res.available) {
+      return { ok: false, message: '离线预览模式不可保存 SRT' };
+    }
+    if (!res.ok) {
+      return { ok: false, message: `保存 SRT 失败 ${formatRpcError(res.error)}` };
+    }
+    return {
+      ok: true,
+      message: `已保存 SRT：${basename(res.data.path ?? 'subtitle.srt')}（下次可直接加载）`,
+      path: res.data.path,
+    };
+  }
+
+  return { ok: false, message: '当前媒体源不支持保存为 SRT' };
 }

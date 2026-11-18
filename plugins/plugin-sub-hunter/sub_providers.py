@@ -24,7 +24,7 @@ _EPISODE_RE = re.compile(r"(?i)\bS(\d{1,2})[ ._-]*E(\d{1,3})\b")
 _RELEASE_STRIP_RE = re.compile(
     r"(?i)\b(?:2160p|1080p|720p|480p|bluray|bdrip|web-dl|webrip|hdtv|remux|x264|x265|hevc|h\.?264|h\.?265|aac|dts|ddp?\d(?:\.\d)?)\b"
 )
-_HREF_RE = re.compile(r"""href\s*=\s*["'](https://[^"']+)["']""", re.IGNORECASE)
+_HREF_RE = re.compile(r"""(?:href|data-url)\s*=\s*["']((?:https://|//|/(?:down|d|download)/)[^"']+)["']""", re.IGNORECASE)
 _LANG_ALIASES: dict[str, set[str]] = {
     "zh": {"zh", "chs", "zh-cn", "zh-hans", "sc", "gb", "简体", "简中", "中文", "双语"},
     "chs": {"zh", "chs", "zh-cn", "zh-hans", "sc", "gb", "简体", "简中", "中文", "双语"},
@@ -45,8 +45,10 @@ class ProviderOpts:
 
 def derive_search_params(req: Mapping[str, Any]) -> dict[str, Any]:
     """Derive normalized search query, title, imdb_id, season, episode, and language."""
-    raw_query = str(req.get("query") or "").strip()
-    title = str(req.get("title") or "").strip()
+    raw_query = str(req.get("query") or "").replace("·", " ").strip()
+    title = str(req.get("title") or "").replace("·", " ").strip()
+    raw_query = re.sub(r"\s+", " ", raw_query)
+    title = re.sub(r"\s+", " ", title)
     imdb_id = str(req.get("imdb_id") or "").strip()
     language = str(req.get("language") or req.get("lang") or "").strip()
     season, episode = req.get("season"), req.get("episode")
@@ -353,7 +355,12 @@ async def resolve_provider_download(
         m = _HREF_RE.search(text)
         if not m:
             raise sub_net.SubNetError("not_found", "SubHD 条目页未找到 HTTPS 下载链接")
-        return m.group(1), auth_headers, allow_lb
+        dl_url = m.group(1)
+        if dl_url.startswith("//"):
+            dl_url = f"https:{dl_url}"
+        elif dl_url.startswith("/"):
+            dl_url = f"{base}{dl_url}"
+        return dl_url, auth_headers, allow_lb
 
     if provider == "custom":
         base = str(cfg.get("custom_api_base") or "").strip().rstrip("/")

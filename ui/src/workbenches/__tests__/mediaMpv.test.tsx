@@ -5,6 +5,7 @@ import type { MpvPlaybackState, TauriEvent } from '../../api';
 import { MPV_FRAME_CHANNEL, MPV_STATE_CHANNEL } from '../../api';
 import type { MediaItem } from '../../data/mock';
 import { MediaWorkbench } from '../MediaWorkbench';
+import { MediaInspector } from '../panels/MediaInspector';
 import { resolveMediaStream } from '../useMpvPlayback';
 
 const stoppedState: MpvPlaybackState = {
@@ -368,5 +369,57 @@ describe('MediaWorkbench real mpv integration', () => {
     expect(overlay.textContent).toContain('vaapi');
     fireEvent.keyDown(window, { key: 'F3', ctrlKey: true });
     expect(screen.queryByTestId('mpv-stats-overlay')).toBeNull();
+  });
+
+  it('renders active bilingual subtitles overlaid on the video surface and toggles visibility', () => {
+    const item: MediaItem = {
+      id: 'yt-sub-overlay',
+      kind: 'video',
+      sourceId: 'youtube',
+      title: 'Overlay Demo',
+      subtitle: 'Channel',
+      creator: 'Creator',
+      durationSec: 300,
+      durationLabel: '05:00',
+      playUrl: 'https://www.youtube.com/watch?v=yt-sub-overlay',
+      aspect: '16:9',
+      badge: 'YouTube',
+      thumbGradient: '',
+      thumbTag: 'YouTube',
+      summary: '',
+      lyrics: [
+        { timeSec: 1, original: 'First line', translation: '第一行' },
+        { timeSec: 10, original: 'Second line', translation: '第二行' },
+      ],
+    };
+
+    render(
+      <MediaInspector
+        item={item}
+        playing
+        currentSec={2}
+        durationSec={300}
+        activeLyricIndex={0}
+        nextSponsorSegment={null}
+        inEphemeralQueue={false}
+        activeFocusId=""
+        onFocus={vi.fn()}
+        onTogglePlay={vi.fn()}
+        onSeek={vi.fn()}
+        onSkipSponsor={vi.fn()}
+        onQueueEphemeral={vi.fn()}
+        onStatusChange={vi.fn()}
+      />,
+    );
+
+    const overlay = screen.getByTestId('video-subtitle-overlay');
+    expect(overlay.textContent).toContain('First line');
+    expect(overlay.textContent).toContain('第一行');
+
+    fireEvent.click(screen.getByRole('button', { name: '隐藏视频字幕' }));
+    expect(screen.queryByTestId('video-subtitle-overlay')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '显示视频字幕' }));
+    expect(screen.getByTestId('video-subtitle-overlay').textContent).toContain('First line');
   });
 });

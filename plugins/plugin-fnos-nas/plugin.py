@@ -206,6 +206,124 @@ class FnosNasPlugin(BasePlugin):
         self._snapshot_cache = None
         return CapabilityResult.ok(result)
 
+    def _handle_extract_subtitles(self, payload: Mapping[str, Any]) -> CapabilityResult:
+        cfg = self._cfg()
+        snap = self._get_snapshot(bool(payload.get("force_refresh", False)))
+        if snap.mount_root is None:
+            return CapabilityResult.fail("尚未配置 NAS 挂载目录", error_code="not_configured")
+        item_id = str(payload.get("item_id") or "").strip()
+        rec = snap.records_by_id.get(item_id) if item_id else None
+        raw_path = str(payload.get("path") or (rec or {}).get("path") or "").strip()
+        if not raw_path:
+            return CapabilityResult.fail("缺少 item_id 或视频路径 path", error_code="invalid_argument")
+        media_path = Path(raw_path)
+        if not safety.is_safe_scan_entry(snap.mount_root, media_path) or media_path.is_symlink() or not media_path.is_file():
+            return CapabilityResult.fail("视频路径不在允许的挂载目录内或不存在", error_code="path_safety")
+
+        streams = subtitles.probe_embedded_subtitle_streams(media_path)
+        stream_index = payload.get("stream_index")
+        req_idx = int(stream_index) if isinstance(stream_index, int) else None
+        force_embedded = bool(payload.get("force_embedded", False))
+
+        if not force_embedded and rec and rec.get("subtitles"):
+            best_sub = subtitles.pick_best_sidecar_subtitle(rec["subtitles"])
+            if best_sub is not None:
+                try:
+                    raw_sub = safety.read_text_bounded(best_sub, safety.MAX_SUBTITLE_BYTES, root_guard=snap.mount_root)
+                    cues = subtitles.parse_subtitle_text(raw_sub, best_sub.suffix)
+                    lines = subtitles.subtitle_cues_to_lyric_lines(cues)
+                    return CapabilityResult.ok({
+                        "source": "sidecar",
+                        "subtitle_path": str(best_sub),
+                        "streams": streams,
+                        "lines": [ln.model_dump() for ln in lines],
+                        "srt": subtitles.cues_to_srt(cues),
+                        "count": len(lines),
+                    })
+                except safety.MountValidationError:
+                    pass
+
+        srt_text, chosen = subtitles.extract_embedded_subtitle_srt(media_path, stream_index=req_idx)
+        if not srt_text:
+            return CapabilityResult.fail(
+                "未在媒体文件中发现可用的文本内嵌字幕流",
+                data={"streams": streams},
+                error_code="not_found",
+            )
+        cues = subtitles.parse_srt_or_vtt(srt_text)
+        lines = subtitles.subtitle_cues_to_lyric_lines(cues)
+        saved_path = ""
+        if bool(payload.get("save_srt", True)):
+            lang = str((chosen or {}).get("language") or "und").strip() or "und"
+            suffix = f".{lang}.srt" if lang != "und" else ".srt"
+            target = media_path.with_name(media_path.stem + suffix)
+            try:
+                write_res = safety.safe_write_subtitle(
+                    snap.mount_root,
+                    target,
+                    srt_text,
+                    managed_dirs=str(cfg.get("managed_subtitle_dirs") or ""),
+                    protect_manual=bool(cfg.get("protect_manual_subtitles", True)),
+                    allow_overwrite_own=True,
+                    overwrite_manual=False,
+                )
+                saved_path = str(write_res.get("path") or target)
+                self._snapshot_cache = None
+            except safety.MountValidationError:
+                saved_path = ""
+
+        return CapabilityResult.ok({
+            "source": "embedded",
+            "stream": chosen,
+            "streams": streams,
+            "subtitle_path": saved_path,
+            "lines": [ln.model_dump() for ln in lines],
+            "srt": srt_text,
+            "count": len(lines),
+        })
+
+    def _handle_save_srt(self, payload: Mapping[str, Any]) -> CapabilityResult:
+        cfg = self._cfg()
+        snap = self._get_snapshot(False)
+        if snap.mount_root is None:
+            return CapabilityResult.fail("尚未配置 NAS 挂载目录", error_code="not_configured")
+        item_id = str(payload.get("item_id") or "").strip()
+        rec = snap.records_by_id.get(item_id) if item_id else None
+        raw_target = str(payload.get("target_path") or "").strip()
+        if not raw_target:
+            media_raw = str(payload.get("media_path") or (rec or {}).get("path") or "").strip()
+            if not media_raw:
+                return CapabilityResult.fail("save_srt 需要 item_id、media_path 或 target_path", error_code="invalid_argument")
+            media_path = Path(media_raw)
+            lang_tag = str(payload.get("lang_tag") or "zh-en").strip().lstrip(".")
+            raw_target = str(media_path.with_name(f"{media_path.stem}.{lang_tag}.srt" if lang_tag else f"{media_path.stem}.srt"))
+
+        srt_text = str(payload.get("srt") or "").strip()
+        if not srt_text:
+            raw_cues = payload.get("cues") or payload.get("lines") or []
+            if not isinstance(raw_cues, list) or not raw_cues:
+                return CapabilityResult.fail("save_srt 需要 cues/lines 或 srt 内容", error_code="invalid_argument")
+            mode = str(payload.get("mode") or "bilingual").strip().lower()
+            srt_text = subtitles.cues_to_srt(raw_cues, mode=mode)
+        if not srt_text.strip():
+            return CapabilityResult.fail("无法生成有效的 SRT 内容", error_code="invalid_argument")
+
+        try:
+            result = safety.safe_write_subtitle(
+                snap.mount_root,
+                raw_target,
+                srt_text,
+                managed_dirs=str(cfg.get("managed_subtitle_dirs") or ""),
+                protect_manual=bool(cfg.get("protect_manual_subtitles", True)),
+                allow_overwrite_own=bool(payload.get("allow_overwrite_own", True)),
+                overwrite_manual=bool(payload.get("overwrite_manual", False)),
+            )
+        except safety.MountValidationError as exc:
+            return CapabilityResult.fail(str(exc), data={"written": False, **exc.details}, error_code=exc.error_code)
+
+        self._snapshot_cache = None
+        return CapabilityResult.ok(result)
+
     async def handle_media_source(self, req: Mapping[str, Any]) -> CapabilityResult:
         """Handle `media.source.v1` RPC wrapper around FnosMediaSource."""
         payload = dict(req) if req is not None else {}
@@ -243,6 +361,10 @@ class FnosNasPlugin(BasePlugin):
         if action == "fetch_lyrics":
             lyrics = await self._media_source.fetch_lyrics(str(payload.get("item_id") or ""))
             return CapabilityResult.ok({"lyrics": [ln.model_dump() for ln in lyrics]})
+        if action == "extract_subtitles":
+            return await asyncio.to_thread(self._handle_extract_subtitles, payload)
+        if action == "save_srt":
+            return await asyncio.to_thread(self._handle_save_srt, payload)
         return CapabilityResult.fail(f"不支持的 media.source.v1 动作: {action!r}", error_code="invalid_argument")
 
     async def handle_local_match(self, req: Mapping[str, Any]) -> CapabilityResult:

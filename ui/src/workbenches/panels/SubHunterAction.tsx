@@ -17,6 +17,7 @@ export interface SubHunterActionProps {
   activeFocusId: string;
   onFocus: (id: string) => void;
   onStatusChange: (msg: string) => void;
+  onSubtitlesReady?: () => void;
 }
 
 export const SubHunterAction: React.FC<SubHunterActionProps> = ({
@@ -24,6 +25,7 @@ export const SubHunterAction: React.FC<SubHunterActionProps> = ({
   activeFocusId,
   onFocus,
   onStatusChange,
+  onSubtitlesReady,
 }) => {
   const [outputMode, setOutputMode] = React.useState<SubtitleOutputMode>('bilingual');
 
@@ -55,7 +57,12 @@ export const SubHunterAction: React.FC<SubHunterActionProps> = ({
             outputMode,
             onProgress: onStatusChange,
           })
-            .then((result) => onStatusChange(result.message))
+            .then((result) => {
+              onStatusChange(result.message);
+              if (result.ok) {
+                onSubtitlesReady?.();
+              }
+            })
             .catch((err) =>
               onStatusChange(
                 `SubHunter 失败：${err instanceof Error ? err.message : String(err)}`,

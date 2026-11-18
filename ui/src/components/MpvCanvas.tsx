@@ -38,29 +38,34 @@ function decodeBase64(data: string): ArrayBuffer {
 }
 
 async function decodeFrame(frame: MpvFrameEnvelope): Promise<CanvasImageSource> {
-  const bytes = decodeBase64(frame.data);
-  const blob = new Blob([bytes], { type: frame.mime || 'image/jpeg' });
+  const mime = frame.mime || 'image/jpeg';
   if (typeof createImageBitmap === 'function') {
+    let blob: Blob;
+    if (typeof fetch === 'function' && frame.data.length > 1024) {
+      try {
+        const response = await fetch(`data:${mime};base64,${frame.data}`);
+        blob = response.ok ? await response.blob() : new Blob([decodeBase64(frame.data)], { type: mime });
+      } catch {
+        blob = new Blob([decodeBase64(frame.data)], { type: mime });
+      }
+    } else {
+      blob = new Blob([decodeBase64(frame.data)], { type: mime });
+    }
     try {
       return await createImageBitmap(blob);
     } catch {
       // Fall through to the <img> decoder used by older WebKitGTK builds.
     }
   }
-  const url = URL.createObjectURL(blob);
-  try {
-    return await new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('JPEG frame decode failed'));
-      image.src = url;
-    });
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  return await new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('JPEG frame decode failed'));
+    image.src = `data:${mime};base64,${frame.data}`;
+  });
 }
 
-export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, fps = 60, className }) => {
+export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, fps = 30, className }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSeqRef = useRef(0);
   const viewportTimerRef = useRef<number | null>(null);
@@ -132,15 +137,14 @@ export const MpvCanvas: React.FC<MpvCanvasProps> = ({ active, fps = 60, classNam
     const reportViewport = () => {
       const rect = canvas.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
-      const dpr = window.devicePixelRatio || 1;
-      const width = Math.round(rect.width * dpr);
-      const height = Math.round(rect.height * dpr);
+      const width = Math.round(rect.width);
+      const height = Math.round(rect.height);
       if (viewportTimerRef.current !== null) {
         window.clearTimeout(viewportTimerRef.current);
       }
       viewportTimerRef.current = window.setTimeout(() => {
         viewportTimerRef.current = null;
-        void mpvEmbedSetViewport(width, height, Number.isFinite(fps) && fps > 0 ? Math.min(60, Math.ceil(fps)) : 60);
+        void mpvEmbedSetViewport(width, height, Number.isFinite(fps) && fps > 0 ? Math.min(60, Math.ceil(fps)) : 30);
       }, 120);
     };
 

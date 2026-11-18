@@ -28,8 +28,6 @@ async def translate_with_pool(req, *, translate, normalize):
     models = req.get("models", [])
     if not isinstance(models, list) or len(models) > 16 or any(not isinstance(m, str) or not m.strip() or len(m) > 200 for m in models):
         return CapabilityResult.fail("翻译模型须为最多 16 个非空模型 ID", error_code="invalid_argument")
-    if len(segments) > 4096:
-        return CapabilityResult.fail("一次最多翻译 4096 段，请分段提交", error_code="invalid_argument")
 
     slots = asyncio.Semaphore(concurrency)
     blocked_until = 0.0

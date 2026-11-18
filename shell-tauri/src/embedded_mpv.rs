@@ -53,10 +53,10 @@ const MPV_RENDER_PARAM_SW_STRIDE: c_int = 19;
 const MPV_RENDER_PARAM_SW_POINTER: c_int = 20;
 const MPV_RENDER_UPDATE_FRAME: u64 = 1;
 
-const DEFAULT_FRAME_WIDTH: u32 = 960;
-const DEFAULT_FRAME_HEIGHT: u32 = 540;
-const DEFAULT_FRAME_FPS: u32 = 60;
-const JPEG_QUALITY: u8 = 72;
+const DEFAULT_FRAME_WIDTH: u32 = 854;
+const DEFAULT_FRAME_HEIGHT: u32 = 480;
+const DEFAULT_FRAME_FPS: u32 = 30;
+const JPEG_QUALITY: u8 = 64;
 const STATE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[repr(C)]
@@ -323,13 +323,21 @@ impl EmbeddedMpv {
             ("keep-open", "yes"),
             ("vo", "libmpv"),
             ("hwdec", "auto-copy-safe"),
+            ("vd-lavc-threads", "0"),
             ("audio-display", "no"),
             ("osc", "no"),
             ("osd-level", "0"),
             ("input-default-bindings", "no"),
             ("input-vo-keyboard", "no"),
             ("sw-fast", "yes"),
+            ("sws-fast", "yes"),
+            ("sws-scaler", "fast-bilinear"),
             ("vd-lavc-dr", "no"),
+            ("framedrop", "vo"),
+            ("cache", "yes"),
+            ("demuxer-max-bytes", "134217728"),
+            ("demuxer-max-back-bytes", "33554432"),
+            ("demuxer-readahead-secs", "20"),
             ("audio-client-name", "OmniDesk"),
         ];
         for (name, value) in options {
@@ -475,6 +483,9 @@ impl EmbeddedMpv {
                 ready.complete(Ok(()));
 
                 let mut buffer: Vec<u32> = Vec::new();
+                let mut rgb_bytes: Vec<u8> = Vec::new();
+                let mut jpeg: Vec<u8> = Vec::new();
+                let mut b64 = String::new();
 
                 loop {
                     if stop.load(Ordering::Acquire) {
@@ -505,7 +516,7 @@ impl EmbeddedMpv {
 
                     let frame_width = width.load(Ordering::Relaxed).max(1);
                     let frame_height = height.load(Ordering::Relaxed).max(1);
-                    let target_fps = fps.load(Ordering::Relaxed).clamp(1, 60);
+                    let target_fps = fps.load(Ordering::Relaxed).clamp(1, 30);
                     let frame_interval = Duration::from_secs_f64(1.0 / target_fps as f64);
                     let frame_started = Instant::now();
                     let buffer_pixels = frame_width as usize * frame_height as usize;
@@ -551,12 +562,12 @@ impl EmbeddedMpv {
                     }
 
                     {
-                        let frame_bytes = rgb0_to_rgb(&buffer, frame_width, frame_height, stride);
-                        let mut jpeg = Vec::with_capacity(frame_bytes.len() / 8);
+                        rgb0_to_rgb_into(&buffer, frame_width, frame_height, stride, &mut rgb_bytes);
+                        jpeg.clear();
                         let encoder = Encoder::new(&mut jpeg, JPEG_QUALITY);
                         if encoder
                             .encode(
-                                &frame_bytes,
+                                &rgb_bytes,
                                 frame_width as u16,
                                 frame_height as u16,
                                 ColorType::Rgb,
@@ -566,6 +577,9 @@ impl EmbeddedMpv {
                             if let Ok(sink_guard) = sink.read() {
                                 if let Some(event_sink) = sink_guard.as_ref() {
                                     let sequence = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                                    b64.clear();
+                                    base64::engine::general_purpose::STANDARD
+                                        .encode_string(&jpeg, &mut b64);
                                     event_sink.emit_event(
                                         MPV_FRAME_CHANNEL,
                                         json!({
@@ -573,7 +587,7 @@ impl EmbeddedMpv {
                                             "width": frame_width,
                                             "height": frame_height,
                                             "mime": "image/jpeg",
-                                            "data": base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                                            "data": &b64,
                                         }),
                                     );
                                 }
@@ -586,6 +600,8 @@ impl EmbeddedMpv {
                     let elapsed = frame_started.elapsed();
                     if elapsed < frame_interval {
                         thread::sleep(frame_interval - elapsed);
+                    } else {
+                        thread::sleep(Duration::from_millis(2));
                     }
                 }
 
@@ -1007,10 +1023,10 @@ impl EmbeddedMpv {
 
     pub fn set_viewport(&self, width: u32, height: u32, fps: u32) {
         self.viewport_width
-            .store(width.clamp(320, 1280), Ordering::Relaxed);
+            .store(width.clamp(320, 960), Ordering::Relaxed);
         self.viewport_height
-            .store(height.clamp(180, 720), Ordering::Relaxed);
-        self.target_fps.store(fps.clamp(1, 60), Ordering::Relaxed);
+            .store(height.clamp(180, 540), Ordering::Relaxed);
+        self.target_fps.store(fps.clamp(1, 30), Ordering::Relaxed);
         self.wake.notify();
     }
 
@@ -1060,21 +1076,23 @@ impl Drop for EmbeddedMpv {
     }
 }
 
-fn rgb0_to_rgb(buffer: &[u32], width: u32, height: u32, stride: usize) -> Vec<u8> {
+fn rgb0_to_rgb_into(buffer: &[u32], width: u32, height: u32, stride: usize, out: &mut Vec<u8>) {
     let width = width as usize;
     let height = height as usize;
     let bytes = unsafe {
         std::slice::from_raw_parts(buffer.as_ptr() as *const u8, buffer.len() * 4)
     };
-    let mut out = Vec::with_capacity(width * height * 3);
+    out.clear();
+    let needed = width * height * 3;
+    if out.capacity() < needed {
+        out.reserve(needed - out.capacity());
+    }
     for y in 0..height {
-        let row = &bytes[y * stride..];
-        for x in 0..width {
-            let offset = x * 4;
-            out.extend_from_slice(&row[offset..offset + 3]);
+        let row = &bytes[y * stride..y * stride + width * 4];
+        for px in row.chunks_exact(4) {
+            out.extend_from_slice(&px[..3]);
         }
     }
-    out
 }
 
 #[cfg(test)]

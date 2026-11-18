@@ -478,3 +478,53 @@ async def test_write_subtitle_atomic_manual_protection_and_escapes(
     await invoke_lifecycle_hook(plugin2.on_unload)
     assert plugin2._bg_task is None
     await ctx2.acleanup()
+
+
+@pytest.mark.asyncio
+async def test_fnos_fetch_lyrics_reads_sidecar_srt_and_save_srt_writes_bilingual(tmp_path: Path) -> None:
+    mod = _load_plugin_module()
+    plugin = mod.create_plugin()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+
+    nas = tmp_path / "nas"
+    show_dir = nas / "TV" / "The Bear" / "Season 01"
+    show_dir.mkdir(parents=True)
+    ep = show_dir / "The.Bear.S01E01.2160p.mkv"
+    ep.write_bytes(b"V" * 2048)
+    ep.with_suffix(".srt").write_text("1\n00:00:05,000 --> 00:00:07,500\nYes, chef!\n", encoding="utf-8")
+
+    ctx = PluginContext(
+        manifest["id"],
+        plugin_dir=PLUGIN_DIR,
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "cfg",
+        config_schema=manifest["config_schema"],
+    )
+    ctx.set_config("mount_root", str(nas))
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    items_res = await ctx.capabilities.call("media.source.v1", {"action": "fetch_items"})
+    assert items_res.ok and len(items_res.data["items"]) == 1
+    item_id = items_res.data["items"][0]["id"]
+
+    lyrics_res = await ctx.capabilities.call("media.source.v1", {"action": "fetch_lyrics", "item_id": item_id})
+    assert lyrics_res.ok
+    assert len(lyrics_res.data["lyrics"]) == 1
+    assert lyrics_res.data["lyrics"][0]["original"] == "Yes, chef!"
+
+    save_res = await ctx.capabilities.call(
+        "media.source.v1",
+        {
+            "action": "save_srt",
+            "item_id": item_id,
+            "lines": [{"time_sec": 5.0, "original": "Yes, chef!", "translation": "好的，主厨！"}],
+        },
+    )
+    assert save_res.ok
+    saved_path = Path(save_res.data["path"])
+    assert saved_path.exists()
+    content = saved_path.read_text(encoding="utf-8")
+    assert "Yes, chef!\n好的，主厨！" in content
+
+    await invoke_lifecycle_hook(plugin.on_unload)
+    await ctx.acleanup()

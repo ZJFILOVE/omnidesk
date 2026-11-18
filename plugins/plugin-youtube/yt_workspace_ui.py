@@ -36,6 +36,7 @@ SUPPORTED_ACTIONS = (
     "cover",
     "list_subtitles",
     "fetch_subtitles",
+    "save_srt",
     "list_subscriptions",
     "sync_subscriptions",
     "fetch_chapters",

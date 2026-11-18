@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
-from collections.abc import Sequence
+import shutil
+import subprocess
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -393,3 +396,207 @@ def is_bilingual_subtitle_file(path: Path, mount_root: Path) -> bool:
     except MountValidationError:
         return False
     return bool(_CJK_RE.search(raw) and re.search(r"[A-Za-z]{3,}", raw))
+
+
+_TEXT_SUB_CODECS = frozenset({"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"})
+
+
+def format_srt_timestamp(seconds: float) -> str:
+    """Format seconds as SRT timestamp ``HH:MM:SS,mmm``."""
+    total_ms = max(0, int(round(float(seconds) * 1000)))
+    h, rem = divmod(total_ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def cues_to_srt(
+    cues: Sequence[Mapping[str, Any] | SubtitleCue],
+    *,
+    mode: str = "bilingual",
+) -> str:
+    """Serialize SubtitleCue or cue/line mappings to UTF-8 SRT text."""
+    blocks: list[str] = []
+    idx = 0
+    for i, item in enumerate(cues):
+        if isinstance(item, SubtitleCue):
+            start = item.start_sec
+            end = item.end_sec
+            orig = (item.en_text or item.text).strip()
+            trans = item.zh_text.strip()
+        else:
+            start = float(item.get("start_sec") if item.get("start_sec") is not None else item.get("time_sec", 0.0))
+            raw_end = item.get("end_sec")
+            if raw_end is None and i + 1 < len(cues):
+                nxt = cues[i + 1]
+                nxt_start = nxt.start_sec if isinstance(nxt, SubtitleCue) else float(nxt.get("start_sec") if nxt.get("start_sec") is not None else nxt.get("time_sec", start + 3.0))
+                end = max(start + 0.5, min(start + 6.0, nxt_start - 0.05))
+            else:
+                end = float(raw_end if raw_end is not None else start + 3.0)
+            orig = str(item.get("original") or item.get("en_text") or item.get("text") or "").strip()
+            trans = str(item.get("translation") or item.get("zh_text") or "").strip()
+
+        if end <= start:
+            end = start + 2.0
+        if mode == "translated":
+            body = trans or orig
+        elif mode == "original":
+            body = orig or trans
+        else:
+            if orig and trans and trans != orig:
+                body = f"{orig}\n{trans}"
+            else:
+                body = orig or trans
+        if not body:
+            continue
+        idx += 1
+        blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{body}")
+    return ("\n\n".join(blocks) + "\n") if blocks else ""
+
+
+def subtitle_cues_to_lyric_lines(cues: Sequence[SubtitleCue]) -> list[LyricLine]:
+    """Convert parsed SubtitleCue list into LyricLine entries for UI timeline & translation."""
+    lines: list[LyricLine] = []
+    for cue in cues:
+        if cue.en_text and cue.zh_text:
+            original, translation = cue.en_text, cue.zh_text
+        else:
+            original, translation = cue.text, ""
+        if not original.strip():
+            continue
+        lines.append(
+            LyricLine(
+                time_sec=cue.start_sec,
+                original=original,
+                translation=translation,
+                note=format_timestamp(cue.start_sec),
+            )
+        )
+    return lines
+
+
+def pick_best_sidecar_subtitle(sub_paths: Sequence[str | Path]) -> Path | None:
+    """Choose the best sidecar subtitle file (preferring bilingual, then .srt/.vtt/.ass)."""
+    if not sub_paths:
+        return None
+
+    def _score(raw: str | Path) -> tuple[int, int, str]:
+        p = Path(raw)
+        low = p.stem.lower()
+        bilingual = 0 if any(tag in low for tag in ("zh-en", "en-zh", "bilingual", "dual", "chs&eng", "eng&chs")) else 1
+        ext_rank = {".srt": 0, ".vtt": 1, ".ass": 2, ".ssa": 3}.get(p.suffix.lower(), 4)
+        return (bilingual, ext_rank, p.name.lower())
+
+    return Path(min(sub_paths, key=_score))
+
+
+def probe_embedded_subtitle_streams(media_path: Path) -> list[dict[str, Any]]:
+    """List text-based embedded subtitle streams inside a container via ffprobe."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin or not media_path.is_file():
+        return []
+    try:
+        res = subprocess.run(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-select_streams",
+                "s",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+                "-of",
+                "json",
+                str(media_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if res.returncode != 0 or not res.stdout:
+        return []
+    try:
+        parsed = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return []
+    out: list[dict[str, Any]] = []
+    for stream in parsed.get("streams") or []:
+        if not isinstance(stream, dict):
+            continue
+        codec = str(stream.get("codec_name") or "").lower()
+        if codec not in _TEXT_SUB_CODECS:
+            continue
+        idx = stream.get("index")
+        if not isinstance(idx, int):
+            continue
+        tags = stream.get("tags") or {}
+        disp = stream.get("disposition") or {}
+        out.append(
+            {
+                "index": idx,
+                "codec": codec,
+                "language": str(tags.get("language") or "und"),
+                "title": str(tags.get("title") or ""),
+                "default": bool(disp.get("default") == 1),
+                "forced": bool(disp.get("forced") == 1),
+            }
+        )
+    return out
+
+
+def extract_embedded_subtitle_srt(
+    media_path: Path,
+    *,
+    stream_index: int | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Extract a native embedded text subtitle stream as SRT using ffmpeg."""
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin or not media_path.is_file():
+        return None, None
+    streams = probe_embedded_subtitle_streams(media_path)
+    if not streams:
+        return None, None
+
+    chosen: dict[str, Any] | None = None
+    if stream_index is not None:
+        chosen = next((s for s in streams if s["index"] == stream_index), None)
+    if chosen is None:
+        def _stream_rank(s: dict[str, Any]) -> tuple[int, int, int, int]:
+            lang = str(s.get("language") or "").lower()
+            is_forced = 1 if s.get("forced") else 0
+            lang_rank = 0 if lang in {"eng", "en"} else (1 if lang in {"chi", "zho", "zh", "chs", "cht"} else 2)
+            not_default = 0 if s.get("default") else 1
+            return (is_forced, lang_rank, not_default, int(s["index"]))
+
+        chosen = min(streams, key=_stream_rank)
+
+    try:
+        res = subprocess.run(
+            [
+                ffmpeg_bin,
+                "-v",
+                "error",
+                "-nostdin",
+                "-i",
+                str(media_path),
+                "-map",
+                f"0:{chosen['index']}",
+                "-f",
+                "srt",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=45,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if res.returncode != 0 or not res.stdout:
+        return None, None
+    srt_text = res.stdout.decode("utf-8", errors="replace").strip()
+    if not srt_text:
+        return None, None
+    return srt_text + "\n", chosen

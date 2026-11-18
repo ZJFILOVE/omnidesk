@@ -86,3 +86,31 @@ it('switches translation backends without reusing gateway model IDs', async () =
   await waitFor(() => expect(screen.getByText('你好')).toBeTruthy());
   expect(callCapability).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ backend: 'agy', models: ['agy-model'] }) }));
 });
+
+it('renders subtitle translation, native extraction, and save-as-SRT controls for fnOS NAS items', async () => {
+  const { MediaInspector } = await import('../../workbenches/panels/MediaInspector');
+  const nasItem = {
+    ...MEDIA_ITEMS.find(item => item.kind === 'nas')!,
+    lyrics: [{ timeSec: 1, original: 'Yes, chef!', translation: '' }],
+  };
+  render(
+    <MediaInspector
+      item={nasItem}
+      playing={false}
+      currentSec={0}
+      activeLyricIndex={0}
+      nextSponsorSegment={null}
+      inEphemeralQueue={false}
+      activeFocusId=""
+      onFocus={noop}
+      onTogglePlay={noop}
+      onSeek={noop}
+      onSkipSponsor={noop}
+      onQueueEphemeral={noop}
+      onStatusChange={noop}
+    />,
+  );
+  expect(screen.getByRole('button', { name: '翻译字幕' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '提取原生字幕' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '保存为 SRT' })).toBeTruthy();
+});

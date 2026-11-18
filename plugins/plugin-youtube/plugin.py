@@ -26,7 +26,7 @@ if __package__:
         resolve_executable, resolve_safe_cache_dir, safe_cache_file, url_origin, validate_channel_id, validate_playlist_id,
     )
     from .yt_subtitles import cues_to_lyric_lines, extract_subtitle_tracks
-    from .yt_translate import fetch_subtitles_flow
+    from .yt_translate import fetch_subtitles_flow, save_srt_flow
     from .yt_workspace_ui import (
         SUPPORTED_ACTIONS,
         build_ui_schema,
@@ -45,7 +45,7 @@ else:
         resolve_executable, resolve_safe_cache_dir, safe_cache_file, url_origin, validate_channel_id, validate_playlist_id,
     )
     from yt_subtitles import cues_to_lyric_lines, extract_subtitle_tracks
-    from yt_translate import fetch_subtitles_flow
+    from yt_translate import fetch_subtitles_flow, save_srt_flow
     from yt_workspace_ui import (
         SUPPORTED_ACTIONS,
         build_ui_schema,
@@ -63,7 +63,11 @@ class YouTubePlugin(BasePlugin):
         allow_loopback_http: bool = False,
     ) -> None:
         self.allow_loopback_http = allow_loopback_http
-        self.api_client = YouTubeApiClient(api_base_url=api_base_url, allow_loopback_http=allow_loopback_http)
+        self.api_client = YouTubeApiClient(
+            api_base_url=api_base_url,
+            allow_loopback_http=allow_loopback_http,
+            proxy_provider=self.proxy,
+        )
         self.media_source = YouTubeMediaSource(self)
         self._last_action_status = "ready"
         self._tab_status = ""
@@ -143,6 +147,9 @@ class YouTubePlugin(BasePlugin):
 
     def cache_dir_config(self) -> str:
         return "" if self.ctx is None else str(self.ctx.get_config("cache_dir", "") or "").strip()
+
+    def proxy(self) -> str:
+        return "" if self.ctx is None else str(self.ctx.get_config("proxy", "") or "").strip()
 
     def timeout_sec(self) -> float:
         if self.ctx is None:
@@ -241,6 +248,7 @@ class YouTubePlugin(BasePlugin):
             "open_media": self.open_media,
             "list_subtitles": self.list_subtitles,
             "fetch_subtitles": self.fetch_subtitles,
+            "save_srt": self.save_srt,
             "list_subscriptions": self.list_subscriptions,
             "sync_subscriptions": self.sync_subscriptions,
             "fetch_chapters": self.fetch_chapters,
@@ -334,6 +342,15 @@ class YouTubePlugin(BasePlugin):
             return bad or self._fail("无效的视频标识", error_code="invalid_argument")
         return await fetch_subtitles_flow(self, req, vid)
 
+    async def save_srt(self, req: Mapping[str, Any]) -> CapabilityResult:
+        """Save YouTube subtitle cues (with optional translations) as a cached .srt file."""
+        if self.ctx is None:
+            return self._fail("插件尚未加载", error_code="not_configured")
+        vid, bad = self._extract_target_video_id(req)
+        if bad is not None or vid is None:
+            return bad or self._fail("无效的视频标识", error_code="invalid_argument")
+        return await save_srt_flow(self, req, vid)
+
     async def fetch_lyrics_for_item(self, item_id: str) -> list[LyricLine]:
         """Bridge fetch_subtitles into MediaSource.fetch_lyrics."""
         res = await self.fetch_subtitles({"video_id": item_id})
@@ -378,10 +395,10 @@ class YouTubePlugin(BasePlugin):
         """Sync recent videos across configured OAuth subscriptions, channels, and playlists."""
         if self.ctx is None:
             return self._fail("插件尚未加载", error_code="not_configured")
-        list_res = await self.list_subscriptions(req)
-        using_cookie_feed = False
-        if not list_res.ok:
-            if list_res.data.get("error_code") == "not_configured" and await self.media_source._has_session_cookie():
+        using_cookie_feed = await self.media_source._has_session_cookie()
+        list_res = None if using_cookie_feed else await self.list_subscriptions(req)
+        if not using_cookie_feed and list_res is not None and not list_res.ok:
+            if list_res.data.get("error_code") in {"not_configured", "permission_denied"} and await self.media_source._has_session_cookie():
                 using_cookie_feed = True
             else:
                 return list_res

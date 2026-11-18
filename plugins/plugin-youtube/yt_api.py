@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from omnidesk_sdk import ChapterSegment
@@ -71,9 +71,16 @@ def parse_description_chapters(description: str, duration_sec: float = 0.0) -> l
 class YouTubeApiClient:
     """Thin YouTube Data API v3 client backed by safe HTTPS/loopback requests."""
 
-    def __init__(self, *, api_base_url: str = YOUTUBE_API_BASE_URL, allow_loopback_http: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        api_base_url: str = YOUTUBE_API_BASE_URL,
+        allow_loopback_http: bool = False,
+        proxy_provider: Callable[[], str] | None = None,
+    ) -> None:
         self.api_base_url = api_base_url.rstrip("/")
         self.allow_loopback_http = allow_loopback_http
+        self._proxy_provider = proxy_provider
 
     def _allowed_origins(self) -> set[str]:
         return {url_origin(self.api_base_url)} if self.api_base_url.startswith("http://") else set()
@@ -91,14 +98,28 @@ class YouTubeApiClient:
         if api_key:
             hdrs["X-Goog-Api-Key"] = api_key
         secrets = [s for s in (api_key, oauth_token) if s]
-        return await http_get_json(
+        proxy = self._proxy_provider() if self._proxy_provider is not None else ""
+        data, err = await http_get_json(
             url,
             headers=hdrs,
             timeout_sec=timeout_sec,
             extra_secrets=secrets,
             allow_loopback_http=self.allow_loopback_http,
             allowed_loopback_origins=self._allowed_origins(),
+            proxy=proxy,
         )
+        if err is not None and err.get("http_status") == 401 and oauth_token and api_key and endpoint.lstrip("/") != "subscriptions":
+            hdrs.pop("Authorization", None)
+            return await http_get_json(
+                url,
+                headers=hdrs,
+                timeout_sec=timeout_sec,
+                extra_secrets=secrets,
+                allow_loopback_http=self.allow_loopback_http,
+                allowed_loopback_origins=self._allowed_origins(),
+                proxy=proxy,
+            )
+        return data, err
 
     async def enrich_videos(
         self, video_ids: list[str], *, api_key: str = "", oauth_token: str = "", timeout_sec: float = 15.0

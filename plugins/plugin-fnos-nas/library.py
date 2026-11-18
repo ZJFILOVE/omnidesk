@@ -18,11 +18,31 @@ from typing import Any
 from omnidesk_sdk import ChapterSegment, LyricLine, MediaItem, MediaKind, MediaSource
 
 if __package__:
-    from .safety import MAX_METADATA_BYTES, SUBTITLE_EXTENSIONS, MountValidationError, is_safe_scan_entry, read_text_bounded, validate_mount_root
-    from .subtitles import extract_episode_info, is_bilingual_subtitle_file, parse_lrc, strip_subtitle_lang_suffix
+    from .safety import MAX_METADATA_BYTES, MAX_SUBTITLE_BYTES, SUBTITLE_EXTENSIONS, MountValidationError, is_safe_scan_entry, read_text_bounded, validate_mount_root
+    from .subtitles import (
+        extract_embedded_subtitle_srt,
+        extract_episode_info,
+        is_bilingual_subtitle_file,
+        parse_lrc,
+        parse_srt_or_vtt,
+        parse_subtitle_text,
+        pick_best_sidecar_subtitle,
+        strip_subtitle_lang_suffix,
+        subtitle_cues_to_lyric_lines,
+    )
 else:
-    from safety import MAX_METADATA_BYTES, SUBTITLE_EXTENSIONS, MountValidationError, is_safe_scan_entry, read_text_bounded, validate_mount_root
-    from subtitles import extract_episode_info, is_bilingual_subtitle_file, parse_lrc, strip_subtitle_lang_suffix
+    from safety import MAX_METADATA_BYTES, MAX_SUBTITLE_BYTES, SUBTITLE_EXTENSIONS, MountValidationError, is_safe_scan_entry, read_text_bounded, validate_mount_root
+    from subtitles import (
+        extract_embedded_subtitle_srt,
+        extract_episode_info,
+        is_bilingual_subtitle_file,
+        parse_lrc,
+        parse_srt_or_vtt,
+        parse_subtitle_text,
+        pick_best_sidecar_subtitle,
+        strip_subtitle_lang_suffix,
+        subtitle_cues_to_lyric_lines,
+    )
 
 CATEGORY_ORDER: tuple[str, ...] = ("电影", "剧集", "音乐", "书籍")
 VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mkv", ".mp4", ".m4v", ".mov", ".avi", ".ts", ".m2ts", ".webm", ".wmv", ".iso"})
@@ -520,10 +540,28 @@ class FnosMediaSource(MediaSource):
     async def fetch_lyrics(self, item_id: str) -> list[LyricLine]:
         snap = self._snapshot_provider(False)
         rec = snap.records_by_id.get(item_id)
-        if not rec or snap.mount_root is None or not rec.get("lrc_path"):
+        if not rec or snap.mount_root is None:
             return []
-        try:
-            raw = read_text_bounded(Path(rec["lrc_path"]), MAX_METADATA_BYTES, root_guard=snap.mount_root)
-        except MountValidationError:
-            return []
-        return parse_lrc(raw)
+        if rec.get("lrc_path"):
+            try:
+                raw = read_text_bounded(Path(rec["lrc_path"]), MAX_METADATA_BYTES, root_guard=snap.mount_root)
+                return parse_lrc(raw)
+            except MountValidationError:
+                return []
+
+        best_sub = pick_best_sidecar_subtitle(rec.get("subtitles") or [])
+        if best_sub is not None:
+            try:
+                raw = read_text_bounded(best_sub, MAX_SUBTITLE_BYTES, root_guard=snap.mount_root)
+                return subtitle_cues_to_lyric_lines(parse_subtitle_text(raw, best_sub.suffix))
+            except MountValidationError:
+                pass
+
+        media_path_raw = str(rec.get("path") or "").strip()
+        if media_path_raw and rec.get("category") in {"电影", "剧集"}:
+            media_path = Path(media_path_raw)
+            if is_safe_scan_entry(snap.mount_root, media_path) and not media_path.is_symlink():
+                srt_text, _ = extract_embedded_subtitle_srt(media_path)
+                if srt_text:
+                    return subtitle_cues_to_lyric_lines(parse_srt_or_vtt(srt_text))
+        return []

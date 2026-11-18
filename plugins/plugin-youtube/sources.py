@@ -10,7 +10,7 @@ from omnidesk_sdk import ChapterSegment, LyricLine, MediaItem, MediaSource, Plug
 if __package__:
     from .yt_api import YouTubeApiClient, parse_description_chapters
     from .yt_auth import resolve_cookie, session_cookie_present
-    from .yt_dlp import fetch_video_info, run_ytdlp_json
+    from .yt_dlp import fetch_video_info, resolve_executable, run_ytdlp_json
     from .yt_library import load_items
     from .yt_mappers import (
         map_api_item_to_media_item,
@@ -23,7 +23,7 @@ if __package__:
 else:
     from yt_api import YouTubeApiClient, parse_description_chapters
     from yt_auth import resolve_cookie, session_cookie_present
-    from yt_dlp import fetch_video_info, run_ytdlp_json
+    from yt_dlp import fetch_video_info, resolve_executable, run_ytdlp_json
     from yt_library import load_items
     from yt_mappers import (
         map_api_item_to_media_item,
@@ -135,12 +135,13 @@ class YouTubeMediaSource(MediaSource):
                 return []
             if api_key or oauth:
                 raw_items, next_token, err = await api.fetch_playlist_videos(pid, api_key=api_key, oauth_token=oauth, max_results=per_page, page_token=token, timeout_sec=timeout_sec)
-                if err is not None:
+                if err is None:
+                    if next_token:
+                        self._page_tokens[(*token_key, page + 1)] = next_token
+                    return self._map_api_items(raw_items, category=category)
+                if err.get("error_code") not in {"permission_denied", "quota_exceeded"} or not resolve_executable(self._plugin.ytdlp_bin())[0]:
                     self.last_error = err
                     return []
-                if next_token:
-                    self._page_tokens[(*token_key, page + 1)] = next_token
-                return self._map_api_items(raw_items, category=category)
             return await self._fetch_via_ytdlp_list(f"https://www.youtube.com/playlist?list={pid}", category=category, start=(page - 1) * per_page + 1, end=page * per_page)
 
         if target_type == "channel":
@@ -155,12 +156,13 @@ class YouTubeMediaSource(MediaSource):
                         raw_items, next_token, err = await api.search_videos("", api_key=api_key, oauth_token=oauth, region=region, max_results=per_page, page_token=token, channel_id=cid, timeout_sec=timeout_sec)
                 else:
                     raw_items, next_token, err = await api.search_videos(cid, api_key=api_key, oauth_token=oauth, region=region, max_results=per_page, page_token=token, timeout_sec=timeout_sec)
-                if err is not None:
+                if err is None:
+                    if next_token:
+                        self._page_tokens[(*token_key, page + 1)] = next_token
+                    return self._map_api_items(raw_items, category=category)
+                if err.get("error_code") not in {"permission_denied", "quota_exceeded"} or not resolve_executable(self._plugin.ytdlp_bin())[0]:
                     self.last_error = err
                     return []
-                if next_token:
-                    self._page_tokens[(*token_key, page + 1)] = next_token
-                return self._map_api_items(raw_items, category=category)
             url = f"https://www.youtube.com/{cid}/videos" if cid.startswith("@") else f"https://www.youtube.com/channel/{cid}/videos"
             return await self._fetch_via_ytdlp_list(url, category=category, start=(page - 1) * per_page + 1, end=page * per_page)
         return []
@@ -226,26 +228,31 @@ class YouTubeMediaSource(MediaSource):
             else:
                 items = await self._fetch_via_ytdlp_list(f"ytsearch{page * per_page}:{q}", category=cat, start=(page - 1) * per_page + 1, end=page * per_page)
         elif cat == "subscriptions":
-            oauth = self._plugin.oauth_token()
             channel_ids, playlist_ids = list(self._plugin.configured_channel_ids()), list(self._plugin.configured_playlist_ids())
+            has_cookie = await self._has_session_cookie()
+            if has_cookie:
+                cookie_items = await self._fetch_via_ytdlp_list(
+                    "https://www.youtube.com/feed/subscriptions",
+                    category=cat,
+                    start=(page - 1) * per_page + 1,
+                    end=page * per_page,
+                )
+                if cookie_items:
+                    self.remember_items(cookie_items)
+                    return cookie_items
+            oauth = self._plugin.oauth_token()
             if not oauth and not channel_ids and not playlist_ids:
-                if await self._has_session_cookie():
-                    items = await self._fetch_via_ytdlp_list(
-                        "https://www.youtube.com/feed/subscriptions",
-                        category=cat,
-                        start=(page - 1) * per_page + 1,
-                        end=page * per_page,
-                    )
-                    if items:
-                        self.remember_items(items)
-                    return items
                 return []
-            if oauth:
+            if oauth and not has_cookie:
                 subs, err = await self._plugin.api_client.fetch_subscriptions(oauth_token=oauth, api_key=self._plugin.api_key(), timeout_sec=self._plugin.timeout_sec())
                 if err is not None:
-                    self.last_error = err
-                    return []
-                channel_ids.extend(s["channel_id"] for s in subs[:5] if s.get("channel_id"))
+                    if err.get("error_code") in {"permission_denied", "quota_exceeded"} and (channel_ids or playlist_ids):
+                        pass
+                    else:
+                        self.last_error = err
+                        return []
+                else:
+                    channel_ids.extend(s["channel_id"] for s in subs[:5] if s.get("channel_id"))
             for cid in dict.fromkeys(channel_ids):
                 items.extend(await self.fetch_from_target("channel", cid, category=cat, per_page=max(5, per_page // max(1, len(channel_ids))), page=page))
             for pid in dict.fromkeys(playlist_ids):
@@ -285,6 +292,18 @@ class YouTubeMediaSource(MediaSource):
                     await self.fetch_from_target("playlist", pid, category=cat, per_page=per_page, page=page)
                 )
         elif cat in {"trending", "podcast"}:
+            has_cookie = cat == "trending" and await self._has_session_cookie()
+            if has_cookie:
+                items = await self._fetch_via_ytdlp_list(
+                    "https://www.youtube.com/",
+                    category=cat,
+                    start=(page - 1) * per_page + 1,
+                    end=page * per_page,
+                )
+                if items:
+                    self.remember_items(items)
+                    return items
+            api_handled = False
             if cat == "trending" and (self._plugin.api_key() or self._plugin.oauth_token()):
                 if page == 1 or force_refresh:
                     self._page_tokens = {k: v for k, v in self._page_tokens.items() if k[:2] != (cat, "")}
@@ -299,13 +318,15 @@ class YouTubeMediaSource(MediaSource):
                     page_token=token,
                     timeout_sec=self._plugin.timeout_sec(),
                 )
-                if err is not None:
+                if err is None:
+                    if next_tok:
+                        self._page_tokens[(cat, "", page + 1)] = next_tok
+                    items = self._map_api_items(raw_items, category=cat)
+                    api_handled = True
+                elif err.get("error_code") not in {"permission_denied", "quota_exceeded"} or not resolve_executable(self._plugin.ytdlp_bin())[0]:
                     self.last_error = err
                     return []
-                if next_tok:
-                    self._page_tokens[(cat, "", page + 1)] = next_tok
-                items = self._map_api_items(raw_items, category=cat)
-            else:
+            if not api_handled:
                 if cat == "trending" and await self._has_session_cookie():
                     items = await self._fetch_via_ytdlp_list(
                         "https://www.youtube.com/",

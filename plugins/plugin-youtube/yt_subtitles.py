@@ -223,6 +223,7 @@ async def download_and_parse_track(
     extra_secrets: Iterable[str] = (),
     allow_loopback_http: bool = False,
     allowed_loopback_origins: Iterable[str] = (),
+    proxy: str = "",
 ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Download a subtitle track URL via HTTPS and parse it as VTT or SRT."""
     raw_bytes, err = await http_get_bytes(
@@ -231,6 +232,7 @@ async def download_and_parse_track(
         extra_secrets=extra_secrets,
         allow_loopback_http=allow_loopback_http,
         allowed_loopback_origins=allowed_loopback_origins,
+        proxy=proxy,
     )
     if err is not None or raw_bytes is None:
         return None, err
@@ -256,3 +258,72 @@ def cues_to_lyric_lines(cues: Iterable[Mapping[str, Any]]) -> list[LyricLine]:
                 )
             )
     return lines
+
+
+def format_srt_timestamp(ms: int) -> str:
+    """Format milliseconds as SRT timestamp ``HH:MM:SS,mmm``."""
+    safe = max(0, int(ms))
+    h, rem = divmod(safe, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, millis = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{millis:03d}"
+
+
+def cues_to_srt(cues: Iterable[Mapping[str, Any]], *, mode: str = "bilingual") -> str:
+    """Serialize normalized subtitle cues or lyric lines to UTF-8 SRT text."""
+    cue_list = list(cues)
+    blocks: list[str] = []
+    idx = 0
+    for i, cue in enumerate(cue_list):
+        start_ms = cue.get("start_ms")
+        if start_ms is None:
+            start_ms = int(round(float(cue.get("start_sec") if cue.get("start_sec") is not None else cue.get("time_sec", 0.0)) * 1000))
+        end_ms = cue.get("end_ms")
+        if end_ms is None:
+            raw_end_sec = cue.get("end_sec")
+            if raw_end_sec is not None:
+                end_ms = int(round(float(raw_end_sec) * 1000))
+            elif i + 1 < len(cue_list):
+                nxt = cue_list[i + 1]
+                nxt_ms = nxt.get("start_ms")
+                if nxt_ms is None:
+                    nxt_ms = int(round(float(nxt.get("start_sec") if nxt.get("start_sec") is not None else nxt.get("time_sec", 0.0)) * 1000))
+                end_ms = max(int(start_ms) + 500, min(int(start_ms) + 6000, int(nxt_ms) - 50))
+            else:
+                end_ms = int(start_ms) + 3000
+        if int(end_ms) <= int(start_ms):
+            end_ms = int(start_ms) + 2000
+
+        orig = str(cue.get("original") or cue.get("text") or "").strip()
+        trans = str(cue.get("translation") or "").strip()
+        if mode == "translated":
+            body = trans or orig
+        elif mode == "original":
+            body = orig or trans
+        else:
+            body = f"{orig}\n{trans}" if (orig and trans and trans != orig) else (orig or trans)
+        if not body:
+            continue
+        idx += 1
+        blocks.append(f"{idx}\n{format_srt_timestamp(int(start_ms))} --> {format_srt_timestamp(int(end_ms))}\n{body}")
+    return ("\n\n".join(blocks) + "\n") if blocks else ""
+
+
+_CJK_LINE_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def parse_bilingual_srt(text: str) -> list[dict[str, Any]]:
+    """Parse an SRT file into cues, splitting bilingual lines into original + translation."""
+    cues = parse_srt(text)
+    for cue in cues:
+        lines = [ln.strip() for ln in str(cue.get("original") or "").splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            cjk = [ln for ln in lines if _CJK_LINE_RE.search(ln)]
+            non_cjk = [ln for ln in lines if not _CJK_LINE_RE.search(ln)]
+            if cjk and non_cjk:
+                orig = " ".join(non_cjk)
+                trans = " ".join(cjk)
+                cue["original"] = orig
+                cue["text"] = orig
+                cue["translation"] = trans
+    return cues

@@ -303,14 +303,15 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
 
   useEffect(() => {
     if (!mpv.embedded) return undefined;
-    const shouldRender = Boolean(isActive && selectedItem?.kind === 'video' && (!libraryLayout || showPlayer));
+    const isVideoItem = Boolean(selectedItem && selectedItem.kind !== 'music');
+    const shouldRender = Boolean(isActive && isVideoItem && (!libraryLayout || showPlayer));
     void mpvEmbedSetActive(shouldRender);
     return () => {
       if (shouldRender) {
         void mpvEmbedSetActive(false);
       }
     };
-  }, [isActive, mpv.embedded, selectedItem?.kind, libraryLayout, showPlayer]);
+  }, [isActive, mpv.embedded, selectedItem, libraryLayout, showPlayer]);
 
   useEffect(() => {
     if (!onContextChange) return;
@@ -641,7 +642,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                 playbackBackend={mpv.embedded ? 'libmpv' : mpv.enabled ? 'mpv' : 'preview'}
                 playbackStats={mpv.state}
                 videoSurface={
-                  selectedItem.kind === 'video' && mpv.embedded ? (
+                  selectedItem.kind !== 'music' && mpv.embedded ? (
                     <MpvCanvas active={mpv.embedded && isActive} fps={mpv.state?.fps} />
                   ) : undefined
                 }

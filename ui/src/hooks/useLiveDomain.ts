@@ -243,6 +243,22 @@ export function toMediaItem(raw: unknown): MediaItem | null {
     str(extra.song_id) ||
     playUrl.match(/music\.apple\.com\/[a-z]{2}\/song\/(?:[^/]+\/)?(\d+)/)?.[1] ||
     '';
+  const nasSubtitles = Array.isArray(extra.subtitles) ? extra.subtitles : [];
+  const nasPath = str(extra.path, str(extra.relative_path));
+  const nasMeta =
+    kind === 'nas' && (nasPath || str(item.source_id) === 'plugin-fnos-nas')
+      ? {
+          codec: str(extra.format, 'MKV').toUpperCase(),
+          resolution: str(item.quality_label, 'NAS'),
+          path: nasPath,
+          subtitleStatus:
+            nasSubtitles.length > 0
+              ? `已发现 ${nasSubtitles.length} 条外挂字幕`
+              : '未发现外挂字幕（可提取内嵌字幕或用 SubHunter 检索）',
+          imdbRating: str(extra.imdb_id) || str(extra.episode_code) || 'fnOS NAS',
+        }
+      : undefined;
+
   return {
     id,
     sourceId: str(item.source_id, 'media.source.v1'),
@@ -272,6 +288,7 @@ export function toMediaItem(raw: unknown): MediaItem | null {
     summary: str(item.summary),
     listeningCue: str(item.listening_cue) || undefined,
     appleMusicSongId: appleMusicSongId || undefined,
+    nasMeta,
     chapters: arr(item.chapters).map((entry, index) => {
       const ch = dict(entry);
       return {

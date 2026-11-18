@@ -27,6 +27,7 @@ import {
   focusableInputProps,
 } from '../../components/WorkbenchLayout';
 import type { ChapterSegment, MediaItem } from '../../data/mock';
+import { extractNasEmbeddedSubtitles, saveItemSubtitlesAsSrt } from '../mediaActions';
 import { SubHunterAction } from './SubHunterAction';
 
 export function formatMediaTime(sec: number): string {
@@ -113,6 +114,14 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [showVideoSubtitle, setShowVideoSubtitle] = useState(true);
+  const activeSubtitleLine =
+    !isMusic && activeLyricIndex >= 0 && item.lyrics?.[activeLyricIndex]
+      ? item.lyrics[activeLyricIndex]
+      : null;
+  const activeSubtitleTranslation = activeSubtitleLine
+    ? (translations[item.id]?.[String(activeLyricIndex)] ?? activeSubtitleLine.translation ?? '').trim()
+    : '';
   const toggleVideoFullscreen = () => {
     setVideoFullscreen((prev) => {
       const next = !prev;
@@ -304,6 +313,21 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   <span className="rounded-full bg-white/92 px-3 py-0.5 font-mono text-[13.5px] font-semibold text-black">
                     {playing ? 'PLAYING' : 'PAUSED'}
                   </span>
+                  {item.lyrics?.length ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowVideoSubtitle((prev) => !prev)}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      aria-label={showVideoSubtitle ? '隐藏视频字幕' : '显示视频字幕'}
+                      aria-pressed={showVideoSubtitle}
+                      title={showVideoSubtitle ? '隐藏画面字幕' : '显示画面字幕'}
+                      className={`inline-flex cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 font-mono text-[12px] text-white transition-colors ${
+                        showVideoSubtitle ? 'bg-[var(--domain-media)]' : 'bg-black/55 hover:bg-black/80'
+                      }`}
+                    >
+                      <span>字幕</span>
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     onClick={() => setShowStats((prev) => !prev)}
@@ -371,6 +395,32 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                     {(playbackStats?.cacheDurationSec ?? 0).toFixed(1)}s · {formatSpeed(playbackStats?.speed ?? speed)}
                   </span>
                 </div>
+              </div>
+            ) : null}
+
+            {showVideoSubtitle && activeSubtitleLine ? (
+              <div
+                data-testid="video-subtitle-overlay"
+                className={`pointer-events-none mt-auto self-center rounded-xl bg-black/75 text-center shadow-lg backdrop-blur-xs ${
+                  videoFullscreen ? 'mb-4 max-w-[85%] px-5 py-2.5' : 'mb-2 max-w-[92%] px-4 py-2'
+                }`}
+              >
+                <div
+                  className={`leading-snug font-semibold text-white drop-shadow-xs ${
+                    videoFullscreen ? 'text-[22px] sm:text-[26px]' : 'text-[15px] sm:text-[17px]'
+                  }`}
+                >
+                  {activeSubtitleLine.original}
+                </div>
+                {activeSubtitleTranslation && activeSubtitleTranslation !== activeSubtitleLine.original ? (
+                  <div
+                    className={`mt-0.5 leading-snug text-amber-200/95 drop-shadow-xs ${
+                      videoFullscreen ? 'text-[18px] sm:text-[21px]' : 'text-[13.5px] sm:text-[15px]'
+                    }`}
+                  >
+                    {activeSubtitleTranslation}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -608,14 +658,57 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
       </p>
 
       {/* Synchronized lyrics and video subtitles share the same cue timeline. */}
-      {item.kind === 'music' || item.kind === 'video' ? (
+      {item.kind === 'music' || item.kind === 'video' || item.kind === 'nas' ? (
         <div className="flex flex-col gap-5">
           <div className="flex flex-wrap items-center gap-3">
-            <TranslationButton label={isMusic ? '翻译歌词' : '翻译字幕'} disabled={lyricsLoading} request={{ title: `${item.title} · ${isMusic ? '歌词' : '字幕'}`,
-              segments: (item.lyrics ?? []).map((line, index) => ({ id: String(index), text: line.original })),
-              onTranslated: results => setTranslations(previous => ({ ...previous, [item.id]: Object.fromEntries(results.map(result => [result.id, result.translation])) })),
-            }} />
+            <TranslationButton
+              label={isMusic ? '翻译歌词' : '翻译字幕'}
+              disabled={lyricsLoading}
+              request={{
+                title: `${item.title} · ${isMusic ? '歌词' : '字幕'}`,
+                segments: (item.lyrics ?? []).map((line, index) => ({ id: String(index), text: line.original })),
+                onTranslated: results => {
+                  const mapped = Object.fromEntries(results.map(result => [result.id, result.translation]));
+                  setTranslations(previous => ({ ...previous, [item.id]: mapped }));
+                  if (!isMusic && item.lyrics?.length) {
+                    void saveItemSubtitlesAsSrt(item, item.lyrics, mapped).then(res => {
+                      if (res.ok) onStatusChange(res.message);
+                    });
+                  }
+                },
+              }}
+            />
             {isMusic && onReloadLyrics ? <button type="button" disabled={lyricsLoading} className="min-h-11 rounded-lg px-3 text-sm hover:bg-[var(--hover-fill)] disabled:opacity-40" onClick={onReloadLyrics}>刷新歌词</button> : null}
+            {item.kind === 'nas' ? (
+              <button
+                type="button"
+                disabled={lyricsLoading}
+                className="min-h-11 rounded-lg border border-[var(--border-line)] px-3 text-sm hover:bg-[var(--hover-fill)] disabled:opacity-40"
+                onClick={() => {
+                  onStatusChange('正在提取飞牛 NAS 视频原生内嵌字幕…');
+                  void extractNasEmbeddedSubtitles(item).then(res => {
+                    onStatusChange(res.message);
+                    if (res.ok) onReloadLyrics?.();
+                  });
+                }}
+              >
+                提取原生字幕
+              </button>
+            ) : null}
+            {!isMusic && item.lyrics?.length ? (
+              <button
+                type="button"
+                disabled={lyricsLoading}
+                className="min-h-11 rounded-lg border border-[var(--border-line)] px-3 text-sm hover:bg-[var(--hover-fill)] disabled:opacity-40"
+                onClick={() => {
+                  void saveItemSubtitlesAsSrt(item, item.lyrics ?? [], translations[item.id] ?? {}).then(res => {
+                    onStatusChange(res.message);
+                  });
+                }}
+              >
+                保存为 SRT
+              </button>
+            ) : null}
             {!item.lyrics?.length && !lyricsLoading ? <span className="text-sm text-[var(--text-muted)]">取得原文后即可翻译</span> : null}
           </div>
           {item.listeningCue ? (
@@ -716,6 +809,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 activeFocusId={activeFocusId}
                 onFocus={onFocus}
                 onStatusChange={onStatusChange}
+                onSubtitlesReady={onReloadLyrics}
               />
             }
           />

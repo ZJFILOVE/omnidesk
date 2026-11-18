@@ -19,7 +19,13 @@ if __package__:
         safe_cache_file,
         validate_lang,
     )
-    from .yt_subtitles import download_and_parse_track, extract_subtitle_tracks, select_best_track
+    from .yt_subtitles import (
+        cues_to_srt,
+        download_and_parse_track,
+        extract_subtitle_tracks,
+        parse_bilingual_srt,
+        select_best_track,
+    )
 else:
     from yt_http import atomic_write_json
     from yt_security import (
@@ -29,7 +35,13 @@ else:
         safe_cache_file,
         validate_lang,
     )
-    from yt_subtitles import download_and_parse_track, extract_subtitle_tracks, select_best_track
+    from yt_subtitles import (
+        cues_to_srt,
+        download_and_parse_track,
+        extract_subtitle_tracks,
+        parse_bilingual_srt,
+        select_best_track,
+    )
 
 
 def _parse_translation_response(data: Mapping[str, Any], expected_count: int) -> list[str] | None:
@@ -156,6 +168,62 @@ def resolve_subtitle_cache_path(
     return safe_cache_file(root, "subtitles", f"{video_id}.{validate_lang(lang)}.{validate_lang(target_lang or 'none')}.json")
 
 
+def resolve_srt_cache_path(
+    ctx: PluginContext, configured_cache_dir: str, video_id: str, lang: str, target_lang: str
+) -> Path:
+    """Resolve safe SRT cache path inside configured or default cache directory."""
+    root = resolve_safe_cache_dir(configured_cache_dir, default_cache_root(ctx))
+    return safe_cache_file(root, "subtitles", f"{video_id}.{validate_lang(lang)}.{validate_lang(target_lang or 'none')}.srt")
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Atomically write UTF-8 text via sibling temporary file + os.replace."""
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def read_cached_srt(srt_path: Path, *, video_id: str, lang: str, target_lang: str) -> dict[str, Any] | None:
+    """Read cached SRT subtitle file if valid and non-empty."""
+    if srt_path.is_symlink() or not srt_path.is_file():
+        return None
+    try:
+        raw = srt_path.read_text(encoding="utf-8")
+        cues = parse_bilingual_srt(raw)
+    except (OSError, ValueError):
+        return None
+    has_trans = any(bool(c.get("translation")) for c in cues)
+    return {
+        "video_id": video_id,
+        "lang": lang,
+        "target_lang": target_lang if has_trans else "",
+        "source_type": "srt_cache",
+        "format": "srt",
+        "bilingual": has_trans,
+        "translated": has_trans,
+        "translation_degraded": False,
+        "degraded_reason": "",
+        "cached": True,
+        "srt_path": str(srt_path),
+        "cues": cues,
+        "count": len(cues),
+    }
+
+
 def read_cached_subtitles(cache_path: Path) -> dict[str, Any] | None:
     """Read cached bilingual subtitle JSON if valid and not a symlink."""
     if cache_path.is_symlink() or not cache_path.is_file():
@@ -189,14 +257,30 @@ async def fetch_subtitles_flow(
         cache_path = resolve_subtitle_cache_path(
             ctx, plugin.cache_dir_config(), vid, raw_lang or "auto", raw_target if bilingual else "mono"
         )
+        srt_cache_path = resolve_srt_cache_path(
+            ctx, plugin.cache_dir_config(), vid, raw_lang or "auto", raw_target if bilingual else "mono"
+        )
+        bilingual_srt_path = resolve_srt_cache_path(
+            ctx, plugin.cache_dir_config(), vid, raw_lang or "auto", raw_target or "zh-CN"
+        )
     except (ValueError, YouTubePathSafetyError) as exc:
         code = "path_safety" if isinstance(exc, YouTubePathSafetyError) else "invalid_argument"
         return plugin._fail(str(exc), error_code=code)
 
-    if bilingual and not force_refresh:
-        cached = read_cached_subtitles(cache_path)
-        if cached is not None and cached.get("translated"):
-            return CapabilityResult.ok({**cached, "cached": True, "cache_path": str(cache_path)})
+    if not force_refresh:
+        if bilingual:
+            cached = read_cached_subtitles(cache_path)
+            if cached is not None and cached.get("translated"):
+                return CapabilityResult.ok({**cached, "cached": True, "cache_path": str(cache_path)})
+        for candidate_srt in (bilingual_srt_path, srt_cache_path):
+            cached_srt = read_cached_srt(
+                candidate_srt,
+                video_id=vid,
+                lang=raw_lang or "auto",
+                target_lang=raw_target or "zh-CN",
+            )
+            if cached_srt is not None and (not bilingual or cached_srt.get("translated")):
+                return CapabilityResult.ok(cached_srt)
 
     info, err_res = await plugin._load_video_info_for_subs(req, vid)
     if err_res is not None or info is None:
@@ -216,6 +300,7 @@ async def fetch_subtitles_flow(
             extra_secrets=plugin.secret_values(),
             allow_loopback_http=plugin.allow_loopback_http,
             allowed_loopback_origins=plugin.allowed_loopback_origins(),
+            proxy=plugin.proxy() if hasattr(plugin, "proxy") else "",
         )
         if dl_err is not None or cues is None:
             err_copy = dict(dl_err or {})
@@ -262,4 +347,46 @@ async def fetch_subtitles_flow(
     if translated:
         atomic_write_json(cache_path, result_payload)
         result_payload["cache_path"] = str(cache_path)
+    srt_text = cues_to_srt(cues, mode="bilingual" if translated else "original")
+    if srt_text:
+        atomic_write_text(srt_cache_path, srt_text)
+        result_payload["srt_path"] = str(srt_cache_path)
     return CapabilityResult.ok(result_payload)
+
+
+async def save_srt_flow(
+    plugin: Any,
+    req: Mapping[str, Any],
+    vid: str,
+) -> CapabilityResult:
+    """Persist YouTube subtitle cues/lines (including UI translations) as a reusable .srt file."""
+    ctx: PluginContext = plugin.ctx
+    raw_lang = str(req.get("lang") or "auto").strip() or "auto"
+    raw_target = str(req.get("target_lang") or plugin.target_lang() or "zh-CN").strip() or "zh-CN"
+    mode = str(req.get("mode") or "bilingual").strip().lower()
+    raw_cues = req.get("cues") or req.get("lines") or []
+    if not isinstance(raw_cues, list) or not raw_cues:
+        return plugin._fail("save_srt 需要提供 cues 或 lines", error_code="invalid_argument")
+
+    try:
+        validate_lang(raw_lang)
+        validate_lang(raw_target)
+        has_translation = any(isinstance(c, Mapping) and str(c.get("translation") or "").strip() for c in raw_cues)
+        srt_path = resolve_srt_cache_path(
+            ctx, plugin.cache_dir_config(), vid, raw_lang, raw_target if has_translation else "mono"
+        )
+    except (ValueError, YouTubePathSafetyError) as exc:
+        code = "path_safety" if isinstance(exc, YouTubePathSafetyError) else "invalid_argument"
+        return plugin._fail(str(exc), error_code=code)
+
+    srt_text = cues_to_srt(raw_cues, mode=mode)
+    if not srt_text.strip():
+        return plugin._fail("字幕内容为空，无法保存 SRT", error_code="invalid_argument")
+    atomic_write_text(srt_path, srt_text)
+    return CapabilityResult.ok({
+        "video_id": vid,
+        "srt_path": str(srt_path),
+        "srt": srt_text,
+        "count": len(raw_cues),
+        "bilingual": has_translation,
+    })

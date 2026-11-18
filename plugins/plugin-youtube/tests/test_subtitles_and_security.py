@@ -233,3 +233,138 @@ async def test_core_plugin_manager_coexistence_and_unload_cleanup(tmp_path: Path
     assert mgr.domains.list_sources(plugin_id="plugin-youtube") == []
     assert mgr.workspace_tabs(domain="media") == []
     assert mgr.bus.subscription_count(plugin_id="plugin-youtube") == 0
+
+
+@pytest.mark.asyncio
+async def test_youtube_save_srt_and_reload_from_srt_cache(tmp_path: Path) -> None:
+    module = _load_plugin_module()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    plugin = module.create_plugin()
+    ctx = PluginContext(
+        manifest["id"],
+        plugin_dir=PLUGIN_DIR,
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "cfg",
+        config_schema=manifest["config_schema"],
+    )
+    ctx.set_config("cache_dir", str(tmp_path / "cache"))
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    save_res = await ctx.capabilities.call(
+        "media.youtube.v1",
+        {
+            "action": "save_srt",
+            "video_id": "kCc8FmEb1nY",
+            "lang": "en",
+            "target_lang": "zh-CN",
+            "lines": [
+                {"time_sec": 1.0, "original": "Hello world", "translation": "你好世界"},
+                {"time_sec": 4.0, "original": "Next line", "translation": "下一行"},
+            ],
+        },
+    )
+    assert save_res.ok is True
+    srt_path = Path(save_res.data["srt_path"])
+    assert srt_path.exists()
+    assert "Hello world\n你好世界" in srt_path.read_text(encoding="utf-8")
+
+    # Reload without network info: must load directly from cached .srt
+    reload_res = await ctx.capabilities.call(
+        "media.youtube.v1",
+        {"action": "fetch_subtitles", "video_id": "kCc8FmEb1nY", "lang": "en", "target_lang": "zh-CN", "bilingual": False},
+    )
+    assert reload_res.ok is True
+    assert reload_res.data["cached"] is True
+    assert reload_res.data["source_type"] == "srt_cache"
+    assert reload_res.data["cues"][0]["original"] == "Hello world"
+    assert reload_res.data["cues"][0]["translation"] == "你好世界"
+
+    await invoke_lifecycle_hook(plugin.on_unload)
+    await ctx.acleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_get_bytes_uses_proxy_and_retries_once_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+    from types import SimpleNamespace
+    import yt_http
+
+    seen_proxies: list[dict[str, str]] = []
+    seen_ua: list[str] = []
+    attempts = 0
+
+    class _Resp:
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def read(self, _: int) -> bytes:
+            return b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n"
+
+    def _fake_build_opener(*handlers: Any) -> Any:
+        for h in handlers:
+            if isinstance(h, urllib.request.ProxyHandler):
+                seen_proxies.append(dict(h.proxies))
+
+        def _open(req: urllib.request.Request, timeout: float = 0.0) -> _Resp:
+            nonlocal attempts
+            attempts += 1
+            seen_ua.append(str(req.get_header("User-agent") or ""))
+            if attempts == 1:
+                raise TimeoutError("timed out")
+            return _Resp()
+
+        return SimpleNamespace(open=_open)
+
+    monkeypatch.setattr(yt_http.urllib.request, "build_opener", _fake_build_opener)
+
+    data, err = await yt_http.http_get_bytes(
+        "https://www.youtube.com/api/timedtext?v=test",
+        timeout_sec=5.0,
+        proxy="http://127.0.0.1:7891",
+    )
+    assert err is None and data is not None and b"WEBVTT" in data
+    assert attempts == 2
+    assert seen_proxies == [
+        {"http": "http://127.0.0.1:7891", "https": "http://127.0.0.1:7891"},
+        {"http": "http://127.0.0.1:7891", "https": "http://127.0.0.1:7891"},
+    ]
+    assert all("Mozilla/5.0" in ua for ua in seen_ua)
+
+
+@pytest.mark.asyncio
+async def test_fetch_subtitles_passes_configured_proxy_to_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_plugin_module()
+    sub_mod = importlib.import_module("yt_subtitles")
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+
+    seen_proxy: list[str] = []
+
+    async def _fake_http_get_bytes(url: str, **kwargs: Any) -> tuple[bytes | None, dict[str, Any] | None]:
+        seen_proxy.append(str(kwargs.get("proxy") or ""))
+        return b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nProxied line\n", None
+
+    monkeypatch.setattr(sub_mod, "http_get_bytes", _fake_http_get_bytes)
+
+    plugin = module.YouTubePlugin()
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, config_dir=tmp_path / "cfg", config_schema=manifest["config_schema"])
+    ctx.set_config({"cache_dir": str(tmp_path / "cache"), "proxy": "http://127.0.0.1:7891"})
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    res = await ctx.capabilities.call(
+        "media.youtube.v1",
+        {
+            "action": "fetch_subtitles",
+            "video_id": "ProxySub001",
+            "bilingual": False,
+            "info": {"id": "ProxySub001", "subtitles": {"en": [{"ext": "vtt", "url": "https://www.youtube.com/api/timedtext?v=ProxySub001"}]}},
+        },
+    )
+    assert res.ok is True
+    assert res.data["cues"][0]["original"] == "Proxied line"
+    assert seen_proxy == ["http://127.0.0.1:7891"]
+
+    await invoke_lifecycle_hook(plugin.on_unload)
+    await ctx.acleanup()

@@ -46,10 +46,11 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
   const songId = item?.appleMusicSongId ?? '';
   const youtube = item?.kind === 'video' && (item.sourceId === 'plugin-youtube' || item.streamResolver?.providerPluginId === 'plugin-youtube');
   const videoId = youtube ? String(item?.streamResolver?.payload?.video_id ?? item?.streamResolver?.payload?.item_id ?? item?.id ?? '') : '';
+  const nasId = item?.kind === 'nas' || item?.sourceId === 'plugin-fnos-nas' ? (item?.id ?? '') : '';
   const kind = item?.kind;
 
   useEffect(() => {
-    if ((!songId && !videoId) || !isTauriAvailable()) {
+    if ((!songId && !videoId && !nasId) || !isTauriAvailable()) {
       setLines([]);
       setLoading(false);
       setMessage(kind === 'music' ? '当前曲目没有可查询的 Apple Music 编号' : '');
@@ -59,17 +60,36 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
     let cancelled = false;
     setLines([]);
     setLoading(true);
-    const label = videoId ? '字幕' : '歌词';
-    setMessage(videoId ? '正在拉取 YouTube 原始字幕…' : '正在从 Apple Music / Adam 拉取歌词…');
-    const fetch = videoId ? callCapability<LyricsPayload>({ capability: 'media.youtube.v1', providerPluginId: 'plugin-youtube',
-      payload: { action: 'fetch_subtitles', video_id: videoId, bilingual: false }, timeoutMs: 60000,
-    }) : invokeDomain<LyricsPayload>({
-      domain: 'media',
-      sourceId: 'plugin-music',
-      method: 'fetch_lyrics',
-      payload: { item_id: songId },
-      timeoutMs: 45000,
-    });
+    const label = videoId || nasId ? '字幕' : '歌词';
+    setMessage(
+      videoId
+        ? '正在拉取 YouTube 原始字幕…'
+        : nasId
+          ? '正在加载飞牛 NAS 字幕（外挂 / 原生内嵌）…'
+          : '正在从 Apple Music / Adam 拉取歌词…',
+    );
+    const fetch = videoId
+      ? callCapability<LyricsPayload>({
+          capability: 'media.youtube.v1',
+          providerPluginId: 'plugin-youtube',
+          payload: { action: 'fetch_subtitles', video_id: videoId, bilingual: false },
+          timeoutMs: 60000,
+        })
+      : nasId
+        ? invokeDomain<LyricsPayload>({
+            domain: 'media',
+            sourceId: 'plugin-fnos-nas',
+            method: 'fetch_lyrics',
+            payload: { item_id: nasId },
+            timeoutMs: 45000,
+          })
+        : invokeDomain<LyricsPayload>({
+            domain: 'media',
+            sourceId: 'plugin-music',
+            method: 'fetch_lyrics',
+            payload: { item_id: songId },
+            timeoutMs: 45000,
+          });
     void fetch
       .then((result) => {
         if (cancelled) return;
@@ -85,10 +105,12 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
         setLines(parsed);
         setMessage(
           parsed.length > 0
-            ? `${parsed.length} 行${label} · 来源 ${videoId ? 'YouTube' : 'Apple Music / Adam / LRCLIB'}`
+            ? `${parsed.length} 行${label} · 来源 ${videoId ? 'YouTube' : nasId ? 'fnOS NAS / SRT' : 'Apple Music / Adam / LRCLIB'}`
             : !Array.isArray(result.data) && result.data?.reason === 'no_lyrics_available'
               ? '该曲目没有可用歌词（已尝试本地缓存、Adam 原生歌词与 LRCLIB）'
-              : `没有可用${label}`,
+              : nasId
+                ? '暂无外挂或内嵌字幕，可使用 SubHunter 检索或提取原生字幕'
+                : `没有可用${label}`,
         );
         const untranslated = parsed
           .map((line, index) => ({ id: String(index), text: line.original, hasTranslation: Boolean(line.translation) }))
@@ -132,7 +154,7 @@ export function useMediaLyrics(item: MediaItem | undefined): MediaLyricsState {
     return () => {
       cancelled = true;
     };
-  }, [songId, videoId, kind, revision]);
+  }, [songId, videoId, nasId, kind, revision]);
 
   return { lines, loading, message, reload: () => setRevision(value => value + 1) };
 }
