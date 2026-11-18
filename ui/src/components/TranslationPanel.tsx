@@ -81,7 +81,7 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
     if (currentList.includes(selectedId)) return;
     setSettings({ ...settings, [modelKey]: [...currentList, selectedId].join(', ') });
   };
-  const execute = async (saveOnly: boolean) => {
+  const execute = async (saveOnly: boolean, force = false) => {
     if (busy) return;
     const current = version.current;
     setBusy(true); setError(''); setNotice('');
@@ -97,16 +97,17 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
       }
       // Keep IDs and cue boundaries intact when translating from a reader.
       const segments = request?.segments ?? text.split(/\n\s*\n/).filter(value => value.trim()).map((value, index) => ({ id: String(index), text: value }));
-      const result = await callCapability<{ results: TranslationResult[] }>({ capability: 'llm.translate.v1', providerPluginId: 'plugin-magpie-agent',
+      const result = await callCapability<{ results: TranslationResult[]; cache_hits?: number }>({ capability: 'llm.translate.v1', providerPluginId: 'plugin-magpie-agent',
         timeoutMs: 300000, payload: { action: 'translate', segments, target_lang: language, context: request?.title ?? '',
           backend: settings.translation_backend, models: settings[modelKey].split(',').map(value => value.trim()).filter(Boolean),
-          concurrency: settings.translation_concurrency, batch_size: settings.translation_batch_size } });
+          concurrency: settings.translation_concurrency, batch_size: settings.translation_batch_size, ...(force ? { force: true } : {}) } });
       if (current !== version.current) return;
       if (!result.ok) { setError(formatRpcError(result.error)); return; }
       if (!Array.isArray(result.data.results) || result.data.results.length !== segments.length) { setError('译文段数与原文不一致，请重试。'); return; }
       setResults(result.data.results);
       request?.onTranslated?.(result.data.results);
-      setNotice(`已翻译 ${segments.length} 段${request?.onTranslated ? '，译文已显示在原界面' : ''}。`);
+      const hits = result.data.cache_hits ?? 0;
+      setNotice(`已翻译 ${segments.length} 段${hits > 0 ? `（命中缓存 ${hits} 段）` : ''}${request?.onTranslated ? '，译文已显示在原界面' : ''}。`);
     } catch (err) { if (current === version.current) setError(String(err)); }
     finally { if (current === version.current) setBusy(false); }
   };
@@ -183,7 +184,8 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-sm">目标语言<select aria-label="翻译目标语言" disabled={busy} className={inputClass} value={language} onChange={event => setLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></label>
           <button type="button" disabled={busy || loading || !isTauriAvailable()} onClick={() => void execute(true)} className="min-h-11 rounded-lg border border-[var(--border-line)] px-4 disabled:opacity-40">保存翻译配置</button>
-          <button type="button" disabled={busy || loading || !text.trim() || !isTauriAvailable()} onClick={() => void execute(false)} className="min-h-11 rounded-lg bg-[var(--bg-soft)] px-4 font-semibold disabled:opacity-40">{busy ? '正在处理…' : results.length ? '重新翻译' : '开始翻译'}</button>
+          <button type="button" disabled={busy || loading || !text.trim() || !isTauriAvailable()} onClick={() => void execute(false, false)} className="min-h-11 rounded-lg bg-[var(--bg-soft)] px-4 font-semibold disabled:opacity-40">{busy ? '正在处理…' : results.length ? '重新翻译' : '开始翻译'}</button>
+          {results.length > 0 && <button type="button" disabled={busy || loading || !text.trim() || !isTauriAvailable()} onClick={() => void execute(false, true)} className="min-h-11 rounded-lg border border-[var(--border-line)] px-4 text-sm disabled:opacity-40">忽略缓存重译</button>}
         </div>
         {error && <p role="alert" className="rounded-lg bg-[var(--status-err-bg)] p-3 text-[var(--status-err-fg)]">{error}</p>}
         <p role="status" aria-live="polite" className="text-sm text-[var(--text-muted)]">{busy ? '正在按并发配置翻译，完成后自动回填。' : loading ? '正在读取翻译配置…' : notice}</p>

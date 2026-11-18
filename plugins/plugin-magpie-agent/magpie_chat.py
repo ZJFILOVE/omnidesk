@@ -124,26 +124,24 @@ def _build_batch_translate_request(
     req: Mapping[str, Any],
 ) -> dict[str, Any]:
     payload_segments: list[dict[str, Any]] = []
-    for i, seg in enumerate(segments):
+    for seg in segments:
         entry: dict[str, Any] = {"text": seg["text"]}
-        seg_ctx = seg.get("context") or shared_ctx
-        before = seg.get("context_before") or (segments[i - 1]["text"] if i > 0 else before_global)
-        after = (
-            seg.get("context_after")
-            or (segments[i + 1]["text"] if i + 1 < len(segments) else after_global)
-        )
-        if seg_ctx:
-            entry["context"] = seg_ctx
-        if before:
-            entry["context_before"] = before
-        if after:
-            entry["context_after"] = after
+        if seg.get("context") and seg.get("context") != shared_ctx:
+            entry["context"] = seg["context"]
         payload_segments.append(entry)
-    payload = {
+    payload: dict[str, Any] = {
         "source_language": source_lang,
         "target_language": target_lang,
         "segments": payload_segments,
     }
+    if shared_ctx:
+        payload["context"] = shared_ctx
+    batch_before = (segments[0].get("context_before") if segments else "") or before_global
+    batch_after = (segments[-1].get("context_after") if segments else "") or after_global
+    if batch_before:
+        payload["context_before"] = batch_before
+    if batch_after:
+        payload["context_after"] = batch_after
     user_lines = [
         "Translate the `text` field of every segment.",
         f"Return ONLY a JSON array of {len(segments)} translated strings in the same order.",

@@ -311,21 +311,33 @@ export function useAiWorkbenchController(lastBusEvent?: BusEventEnvelope | null)
         return;
       }
 
+      const isBuiltin = agentSelection.agent.id === 'builtin';
       const payload: LlmChatRequestPayload = {
         system_prompt: `你是 OmniDesk AI 工作台助手（mode=${effectiveMode}, repeat_policy=${repeatPolicy}）。严禁编造未核验的曲目、DOI 或链接。`,
         messages: [...priorHistory, { role: 'user', content: text }],
         reasoning_effort: route.effort,
-        route_override: route.activeGroup.startsWith('group/')
-          ? route.activeGroup
-          : `group/${route.activeGroup}`,
+        ...(isBuiltin
+          ? {
+              route_override: route.activeGroup.startsWith('group/')
+                ? route.activeGroup
+                : `group/${route.activeGroup}`,
+            }
+          : {}),
         stream: false,
         timeout_ms: 60000,
       };
 
       const res = await callCapability<LlmChatResponseData>({
-        capability: agentSelection.agent.id === 'builtin' ? 'llm.chat.v1' : 'ai.agent.v1',
+        capability: isBuiltin ? 'llm.chat.v1' : 'ai.agent.v1',
         providerPluginId: agentSelection.agent.provider,
-        payload: { ...payload, agent_id: agentSelection.agent.id, prompt: text, messages: agentSelection.agent.id === 'builtin' ? payload.messages : priorHistory, timeout_ms: 300000 },
+        payload: {
+          ...payload,
+          agent_id: agentSelection.agent.id,
+          ...(!isBuiltin && agentSelection.model ? { model: agentSelection.model } : {}),
+          prompt: text,
+          messages: isBuiltin ? payload.messages : priorHistory,
+          timeout_ms: 300000,
+        },
         timeoutMs: 300000,
       });
       if (!mountedRef.current) return;

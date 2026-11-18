@@ -64,7 +64,7 @@ async def chat(req: Mapping[str, Any], *, ctx: Any, stream: Any = None) -> Capab
     binary = codex_binary(str(ctx.get_config("codex_bin", "") or ""))
     if not binary:
         return CapabilityResult.fail("未找到 Codex CLI", error_code="agent_unavailable")
-    model = str(ctx.get_config("codex_model", "") or "").strip()
+    model = str(req.get("model") or ctx.get_config("codex_model", "") or "").strip()
     try:
         with tempfile.TemporaryDirectory(prefix="omnidesk-agent-") as directory:
             args, env = command(binary, directory, model=model)

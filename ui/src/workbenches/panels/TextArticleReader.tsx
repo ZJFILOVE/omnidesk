@@ -1,4 +1,5 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { callCapability, isTauriAvailable } from '../../api';
 import { TranslationButton } from '../../components/TranslationContext';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
 import { ArticleImage } from '../../components/ArticleImage';
@@ -62,6 +63,30 @@ export const TextArticleReader: React.FC<TextArticleReaderProps> = ({
   const showZh = bilingualMode === 'bilingual' || bilingualMode === 'zh';
   const blocksRef = useRef<HTMLDivElement | null>(null);
   const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
+
+  useEffect(() => {
+    if (!isTauriAvailable()) return;
+    const segments = article.blocks
+      .filter((block) => block.kind !== 'image' && block.kind !== 'code' && block.kind !== 'formula' && block.original.trim())
+      .map((block) => ({ id: block.id, text: block.original }));
+    if (segments.length === 0) return;
+    let cancelled = false;
+    void Promise.resolve(callCapability<{ results?: Array<{ id: string; translation: string }> }>({
+      capability: 'llm.translate.v1',
+      providerPluginId: 'plugin-magpie-agent',
+      payload: { action: 'cache_lookup', segments, target_lang: 'zh-CN' },
+    })).then((res) => {
+      if (cancelled || !res?.ok || !Array.isArray(res.data?.results) || res.data.results.length === 0) return;
+      setTranslations((prev) => ({
+        ...prev,
+        [article.id]: {
+          ...prev[article.id],
+          ...Object.fromEntries(res.data.results!.map((item) => [item.id, item.translation])),
+        },
+      }));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [article.blocks, article.id]);
 
   const renderBlock = (block: ArticleBlock) => {
     block = { ...block, translated: translations[article.id]?.[block.id] ?? block.translated };

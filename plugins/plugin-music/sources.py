@@ -107,6 +107,7 @@ class AppleMusicMediaSource(MediaSource):
         self._translate_lines = translate_lines
         self._fetch_metadata = fetch_metadata
         self._adam_feed = adam_feed
+        self._adam_track_cache: dict[str, tuple[str, str, str, float]] = {}
         self.last_translation_error = ""
         self.last_translated_count = 0
 
@@ -204,7 +205,10 @@ class AppleMusicMediaSource(MediaSource):
             return lines
         texts = [lines[index].original for index in missing]
         try:
-            translated, error = await self._translate_lines(texts, title)
+            translated, error = await asyncio.wait_for(self._translate_lines(texts, title), timeout=15.0)
+        except TimeoutError:
+            self.last_translation_error = "translation_timeout"
+            return lines
         except Exception as exc:
             self.last_translation_error = f"translation_failed:{type(exc).__name__}"
             return lines
@@ -306,6 +310,8 @@ class AppleMusicMediaSource(MediaSource):
             duration = float(cached.get("duration_sec") or cached.get("duration") or 0.0)
         except (TypeError, ValueError):
             duration = 0.0
+        if not title and song_id in self._adam_track_cache:
+            return self._adam_track_cache[song_id]
         return title, artist, album, duration
 
     async def _fetch_online_lyrics(
@@ -538,7 +544,17 @@ class AppleMusicMediaSource(MediaSource):
             return []
         cat = (category or "").strip()
         if cat in ADAM_CATEGORIES and self._adam_feed:
-            return await self._adam_feed(cat, query, page)
+            adam_items = await self._adam_feed(cat, query, page)
+            for item in adam_items:
+                sid = str(item.extra.get("apple_music_song_id") or normalize_song_id(item.id))
+                if sid and item.kind == "music" and "collection" not in item.extra:
+                    self._adam_track_cache[sid] = (
+                        item.title,
+                        item.creator,
+                        item.subtitle,
+                        float(item.duration_sec or 0.0),
+                    )
+            return adam_items
         catalog_cache = self._catalog_cache()
         items: list[MediaItem] = []
 

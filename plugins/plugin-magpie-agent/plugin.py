@@ -33,6 +33,7 @@ _router_actions = _import_sibling("magpie_router_actions")
 _gateway_mod = _import_sibling("magpie_gateway")
 _chat_mod = _import_sibling("magpie_chat")
 _translation_mod = _import_sibling("magpie_translation")
+_tr_cache_mod = _import_sibling("translation_cache")
 _agent_mod = _import_sibling("magpie_agent_actions")
 _runtime_mod = _import_sibling("agent_runtime")
 _cli_mod = _import_sibling("cli_chat")
@@ -312,6 +313,21 @@ class MagpieAgentPlugin(BasePlugin):
                 "translation_batch_size": self.ctx.get_config("translation_batch_size", 4),
             })
         payload = dict(req)
+        tr_cache = _tr_cache_mod.TranslationCache(self.ctx.data_dir / "translation_cache.json") if self.ctx is not None else None
+        target_lang = str(payload.get("target_lang") or "zh-CN").strip() or "zh-CN"
+        source_lang = str(payload.get("source_lang") or "auto").strip() or "auto"
+        is_batch, all_segments, seg_err = _chat_mod._normalize_translate_segments(payload)
+        if req.get("action") == "cache_lookup":
+            if seg_err or tr_cache is None:
+                return CapabilityResult.ok({"results": [], "cache_hits": 0})
+            hits = tr_cache.lookup(target_lang=target_lang, source_lang=source_lang, texts=[s["text"] for s in all_segments])
+            cached_results = [
+                {"index": i, "id": seg["id"], "source": seg["text"], "translation": hits[i], "cached": True}
+                for i, seg in enumerate(all_segments)
+                if i in hits
+            ]
+            return CapabilityResult.ok({"results": cached_results, "cache_hits": len(cached_results)})
+
         backend = payload.get("backend") or (self.ctx.get_config("translation_backend", "magpie") if self.ctx else "magpie")
         if backend not in ("magpie", "codex", "agy"):
             return CapabilityResult.fail("未知翻译后端", error_code="invalid_argument")
@@ -337,7 +353,69 @@ class MagpieAgentPlugin(BasePlugin):
                         secret=secret if translation_url.rstrip("/") == current_url.rstrip("/") else None,
                     )
             return await _chat_mod.handle_translate(batch, call_chat=chat_caller, secret=secret)
-        return await _translation_mod.translate_with_pool(payload, translate=translate, normalize=_chat_mod._normalize_translate_segments)
+
+        force = payload.pop("force", False) is True
+        if seg_err or tr_cache is None or force:
+            res = await _translation_mod.translate_with_pool(payload, translate=translate, normalize=_chat_mod._normalize_translate_segments)
+            if res.ok and tr_cache is not None and not seg_err and isinstance(res.data, dict):
+                if is_batch:
+                    pairs = [(all_segments[i]["text"], r["translation"]) for i, r in enumerate(res.data.get("results", [])) if i < len(all_segments)]
+                else:
+                    pairs = [(all_segments[0]["text"], str(res.data.get("translation") or ""))]
+                tr_cache.store(target_lang=target_lang, source_lang=source_lang, pairs=pairs)
+            return res
+
+        hits = tr_cache.lookup(target_lang=target_lang, source_lang=source_lang, texts=[s["text"] for s in all_segments])
+        if len(hits) == len(all_segments):
+            if not is_batch:
+                tr_text = hits[0]
+                return CapabilityResult.ok({"translation": tr_text, "source": all_segments[0]["text"], "served_model": "cache", "cache_hits": 1})
+            merged = [{"index": i, "id": seg["id"], "source": seg["text"], "translation": hits[i], "served_model": "cache", "cached": True} for i, seg in enumerate(all_segments)]
+            return CapabilityResult.ok({
+                "results": merged,
+                "translations": [m["translation"] for m in merged],
+                "count": len(merged),
+                "cache_hits": len(merged),
+                "served_model": "cache",
+                "model": "cache",
+            })
+
+        missing_indices = [i for i in range(len(all_segments)) if i not in hits]
+        miss_payload = {k: v for k, v in payload.items() if k not in {"text", "texts", "segments", "items"}}
+        if is_batch:
+            miss_payload["segments"] = [all_segments[i] for i in missing_indices]
+        else:
+            miss_payload["text"] = all_segments[0]["text"]
+        res = await _translation_mod.translate_with_pool(miss_payload, translate=translate, normalize=_chat_mod._normalize_translate_segments)
+        if not res.ok:
+            return res
+        if not is_batch:
+            tr_text = str(res.data.get("translation") or "") if isinstance(res.data, dict) else ""
+            tr_cache.store(target_lang=target_lang, source_lang=source_lang, pairs=[(all_segments[0]["text"], tr_text)])
+            return res
+        miss_results = res.data.get("results", []) if isinstance(res.data, dict) else []
+        if len(miss_results) != len(missing_indices):
+            return CapabilityResult.fail("翻译返回段数不匹配，请重试", error_code="parse_error")
+        new_pairs: list[tuple[str, str]] = []
+        translated_by_idx: dict[int, dict[str, Any]] = {}
+        for orig_idx, item in zip(missing_indices, miss_results):
+            translated_by_idx[orig_idx] = dict(item)
+            new_pairs.append((all_segments[orig_idx]["text"], str(item.get("translation") or "")))
+        tr_cache.store(target_lang=target_lang, source_lang=source_lang, pairs=new_pairs)
+        merged = []
+        for i, seg in enumerate(all_segments):
+            if i in hits:
+                merged.append({"index": i, "id": seg["id"], "source": seg["text"], "translation": hits[i], "served_model": "cache", "cached": True})
+            else:
+                item = translated_by_idx[i]
+                merged.append({**item, "index": i, "id": seg["id"]})
+        return CapabilityResult.ok({
+            **res.data,
+            "results": merged,
+            "translations": [m["translation"] for m in merged],
+            "count": len(merged),
+            "cache_hits": len(hits),
+        })
 
     async def handle_agent_stream(self, req: Mapping[str, Any], stream: Any = None) -> CapabilityResult:
         """Handle `ai.agent.v1` domain-contextual actions backed by `llm.chat.v1`."""

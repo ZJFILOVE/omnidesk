@@ -95,7 +95,9 @@ async def chat(req, *, ctx, backend, stream=None, translation=False):
     executable = binary(backend, str(ctx.get_config(f'{backend}_bin', '') or ''))
     if not executable:
         return CapabilityResult.fail(f'未找到 {backend.upper()} CLI，请先安装并登录', error_code='agent_unavailable')
-    model = str(req.get('model') or req.get('route_override') or ('' if translation else ctx.get_config(f'{backend}_model', '')) or '').strip()
+    raw_override = str(req.get('route_override') or '').strip()
+    override_model = '' if raw_override.startswith('group/') else raw_override
+    model = str(req.get('model') or override_model or ('' if translation else ctx.get_config(f'{backend}_model', '')) or '').strip()
     try:
         with tempfile.TemporaryDirectory(prefix=f'omnidesk-{backend}-') as directory:
             args, env = command(backend, executable, directory, model)

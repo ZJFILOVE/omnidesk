@@ -265,3 +265,52 @@ def test_secrets_never_leak_and_plugin_manager_verifies_manifest_and_lifecycle(t
         "apple_music_user_token",
         "apple_music_cookie",
     }
+
+
+def test_finalize_lyrics_returns_original_lines_when_translation_times_out(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import asyncio
+    from omnidesk_sdk import LyricLine, MediaItem
+    from sources import AppleMusicMediaSource
+
+    async def slow_translate(texts: list[str], title: str) -> tuple[list[str] | None, str]:
+        await asyncio.sleep(5.0)
+        return ["翻译"], ""
+
+    async def fake_adam_feed(cat: str, query: str, page: int) -> list[MediaItem]:
+        return [
+            MediaItem(
+                id="adam:songs:1440873510",
+                source_id="plugin-music",
+                kind="music",
+                title="State of Grace",
+                creator="Taylor Swift",
+                subtitle="Red",
+                duration_sec=295.0,
+                extra={"apple_music_song_id": "1440873510"},
+            )
+        ]
+
+    source = AppleMusicMediaSource(
+        get_config=lambda: {"auto_translate_lyrics": True},
+        get_data_dir=lambda: tmp_path,
+        translate_lines=slow_translate,
+        adam_feed=fake_adam_feed,
+    )
+
+    items = run_async(source.fetch_items("search", "State of Grace", 1))
+    assert len(items) == 1
+    assert source._resolve_track_metadata("1440873510") == ("State of Grace", "Taylor Swift", "Red", 295.0)
+
+    real_wait_for = asyncio.wait_for
+
+    async def fast_wait_for(coro, timeout=None):
+        return await real_wait_for(coro, timeout=0.05)
+
+    monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+    lines = [LyricLine(time_sec=1.0, original="I'm walking fast through the traffic lights", translation="")]
+    result = run_async(source._finalize_lyrics("1440873510", lines, "State of Grace"))
+    assert len(result) == 1
+    assert result[0].original == "I'm walking fast through the traffic lights"
+    assert source.last_translation_error == "translation_timeout"
