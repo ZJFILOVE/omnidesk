@@ -32,6 +32,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
   onFocus,
   focusedItemId,
   searchTrigger,
+  coreOnline,
   pluginHealthMap,
   onContextChange,
 }) => {
@@ -41,7 +42,7 @@ export const PluginStore: React.FC<WorkbenchViewProps> = ({
     onFocus,
     focusedItemId,
   );
-  const ctrl = usePluginStoreController(pluginHealthMap);
+  const ctrl = usePluginStoreController(pluginHealthMap, coreOnline);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {

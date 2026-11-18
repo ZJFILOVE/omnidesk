@@ -19,7 +19,10 @@ import {
 
 export type DomainFilter = 'all' | DomainKind;
 
-export function usePluginStoreController(pluginHealthMap?: Record<string, PluginHealthEntry>) {
+export function usePluginStoreController(
+  pluginHealthMap?: Record<string, PluginHealthEntry>,
+  coreOnline?: boolean,
+) {
   const [plugins, setPlugins] = useState<PluginItem[]>(INITIAL_PLUGINS);
   const [domainFilter, setDomainFilter] = useState<DomainFilter>('all');
   const [query, setQuery] = useState<string>('');
@@ -38,6 +41,7 @@ export function usePluginStoreController(pluginHealthMap?: Record<string, Plugin
       : { tone: 'info', text: '离线预览 · 只读示例模式' },
   );
   const mountedRef = useRef(true);
+  const loadedFromLiveCoreRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -89,12 +93,14 @@ export function usePluginStoreController(pluginHealthMap?: Record<string, Plugin
     }
 
     if (!res.data.core_online || res.data.degraded) {
+      loadedFromLiveCoreRef.current = false;
       setDegradedNotice(res.data.notice || 'Core 服务离线，当前为本地清单扫描只读视图');
       setFormMessage({
         tone: 'info',
         text: `已加载 ${mapped.length} 个本地清单（Core 离线降级：${res.data.source}）`,
       });
     } else {
+      loadedFromLiveCoreRef.current = true;
       setDegradedNotice(null);
       setFormMessage({
         tone: 'ok',
@@ -106,6 +112,12 @@ export function usePluginStoreController(pluginHealthMap?: Record<string, Plugin
   useEffect(() => {
     void loadPluginList();
   }, [loadPluginList]);
+
+  useEffect(() => {
+    if (coreOnline && !loadedFromLiveCoreRef.current) {
+      void loadPluginList();
+    }
+  }, [coreOnline, loadPluginList]);
 
   const effectivePlugins = useMemo(
     () => applyHealthUpdates(plugins, pluginHealthMap),

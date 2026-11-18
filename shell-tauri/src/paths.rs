@@ -215,13 +215,29 @@ impl OmnideskPaths {
                 return dirs;
             }
         }
+        if let Ok(raw) = std::env::var("OMNIDESK_REPO_ROOT") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                let repo_plugins = PathBuf::from(trimmed).join("plugins");
+                if repo_plugins.is_dir() && !dirs.contains(&repo_plugins) {
+                    dirs.push(repo_plugins);
+                }
+            }
+        }
         if let Ok(cwd) = std::env::current_dir() {
             let cwd_plugins = cwd.join("plugins");
-            if cwd_plugins.is_dir() {
+            if cwd_plugins.is_dir() && !dirs.contains(&cwd_plugins) {
                 dirs.push(cwd_plugins);
             } else if let Some(parent_plugins) = cwd.parent().map(|p| p.join("plugins")) {
-                if parent_plugins.is_dir() {
+                if parent_plugins.is_dir() && !dirs.contains(&parent_plugins) {
                     dirs.push(parent_plugins);
+                }
+            }
+        }
+        if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+            if let Some(repo_plugins) = Path::new(manifest_dir).parent().map(|p| p.join("plugins")) {
+                if repo_plugins.is_dir() && !dirs.contains(&repo_plugins) {
+                    dirs.push(repo_plugins);
                 }
             }
         }
