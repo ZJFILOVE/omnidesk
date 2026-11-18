@@ -37,6 +37,7 @@ _IMDB_ID_RE = re.compile(r"^tt\d{5,12}\Z")
 _TMDB_PREFIX_RE = re.compile(r"^(?:tmdb:)?(?:(movie|tv|series):)?(\d{1,12})\Z")
 _NEXT_DATA_RE = re.compile(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
 _LD_JSON_RE = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
+_IMDB_GRAPHQL_URL = "https://api.graphql.imdb.com/"
 _PUBLIC_CHART_PATHS: dict[str, str] = {
     "popular": "https://www.imdb.com/chart/moviemeter/",
     "top_rated": "https://www.imdb.com/chart/top/",
@@ -44,6 +45,23 @@ _PUBLIC_CHART_PATHS: dict[str, str] = {
     "tv_popular": "https://www.imdb.com/chart/tvmeter/",
     "tv_top_rated": "https://www.imdb.com/chart/toptv/",
 }
+_PUBLIC_GRAPHQL_CHART_TYPES: dict[str, str] = {
+    "popular": "MOST_POPULAR_MOVIES",
+    "top_rated": "TOP_RATED_MOVIES",
+    "upcoming": "MOST_POPULAR_MOVIES",
+    "tv_popular": "MOST_POPULAR_TV_SHOWS",
+    "tv_top_rated": "TOP_RATED_TV_SHOWS",
+}
+
+
+def optimize_poster_url(url: str) -> str:
+    """Rewrite full-resolution Amazon/IMDb poster URLs to lightweight thumbnails like v1."""
+    if not url or "media-amazon.com/images/" not in url:
+        return url
+    suffix = "._V1_.jpg"
+    if url.endswith(suffix):
+        return f"{url[:-len(suffix)]}._V1_QL75_UX320_.jpg"
+    return url
 
 
 class ImdbTmdbClient:
@@ -211,6 +229,58 @@ class ImdbTmdbClient:
             "Accept-Language": f"{self._language},zh;q=0.8,en;q=0.6",
         }
 
+    def _graphql_headers(self) -> dict[str, str]:
+        zh = self._language.lower().startswith("zh")
+        return {
+            **self._public_headers(),
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8" if zh else "en-US,en;q=0.9",
+            "x-imdb-user-language": "zh-CN" if zh else "en-US",
+            "x-imdb-user-country": "CN" if zh else "US",
+            "Origin": "https://www.imdb.com",
+            "Referer": "https://www.imdb.com/",
+        }
+
+    @staticmethod
+    def _parse_graphql_node(node: Mapping[str, Any], *, default_is_tv: bool) -> dict[str, Any] | None:
+        tt_id = str(node.get("id") or "").strip()
+        if not tt_id:
+            return None
+        title_text = ((node.get("titleText") or {}).get("text") or "") if isinstance(node.get("titleText"), Mapping) else ""
+        orig_text = ((node.get("originalTitleText") or {}).get("text") or "") if isinstance(node.get("originalTitleText"), Mapping) else ""
+        title_type = str(((node.get("titleType") or {}).get("id") or "") if isinstance(node.get("titleType"), Mapping) else "").lower()
+        is_tv = default_is_tv or ("series" in title_type or "tv" in title_type)
+        year = ((node.get("releaseYear") or {}).get("year")) if isinstance(node.get("releaseYear"), Mapping) else None
+        ratings = node.get("ratingsSummary") if isinstance(node.get("ratingsSummary"), Mapping) else {}
+        rating = ratings.get("aggregateRating")
+        vote_count = ratings.get("voteCount")
+        runtime_sec = ((node.get("runtime") or {}).get("seconds")) if isinstance(node.get("runtime"), Mapping) else None
+        runtime_min = max(1, round(int(runtime_sec) / 60)) if isinstance(runtime_sec, int) and runtime_sec > 0 else None
+        poster = optimize_poster_url(str(((node.get("primaryImage") or {}).get("url") or "") if isinstance(node.get("primaryImage"), Mapping) else ""))
+        plot = (((node.get("plot") or {}).get("plotText") or {}).get("plainText") or "") if isinstance(node.get("plot"), Mapping) else ""
+        raw_genres = ((node.get("titleGenres") or {}).get("genres") or []) if isinstance(node.get("titleGenres"), Mapping) else []
+        genres = [
+            str(g["genre"]["text"]).strip()
+            for g in raw_genres
+            if isinstance(g, Mapping) and isinstance(g.get("genre"), Mapping) and str(g["genre"].get("text") or "").strip()
+        ]
+        item: dict[str, Any] = {
+            "id": tt_id,
+            "imdb_id": tt_id,
+            "title": html_lib.unescape(str(title_text or orig_text or tt_id)),
+            "original_title": html_lib.unescape(str(orig_text or "")),
+            "year": year,
+            "rating": rating,
+            "vote_count": vote_count,
+            "runtime_minutes": runtime_min,
+            "media_type": "tv" if is_tv else "movie",
+            "poster": poster,
+            "overview": html_lib.unescape(str(plot)),
+            "genres": genres,
+        }
+        return item
+
     async def _fetch_public_items(self, norm_cat: str, clean_query: str, page: int) -> list[dict[str, Any]]:
         if norm_cat == "search":
             encoded = urllib.parse.quote(clean_query, safe="")
@@ -238,21 +308,67 @@ class ImdbTmdbClient:
                         "title": str(entry.get("l") or tt_id),
                         "year": entry.get("y"),
                         "media_type": mtype,
-                        "poster": str(img.get("imageUrl") or ""),
+                        "poster": optimize_poster_url(str(img.get("imageUrl") or "")),
                         "overview": str(entry.get("s") or ""),
                     }
                 )
             return out
 
+        is_tv = norm_cat.startswith("tv_")
+        gql_chart_type = _PUBLIC_GRAPHQL_CHART_TYPES.get(norm_cat, "MOST_POPULAR_MOVIES")
+        first_limit = min(250, max(50, page * 25))
+        gql_err: UpstreamClientError | None = None
+        try:
+            _, gql_payload = await self._http.request_json(
+                "POST",
+                _IMDB_GRAPHQL_URL,
+                headers=self._graphql_headers(),
+                json_body={
+                    "query": (
+                        f"query($first: Int!) {{ chartTitles(first: $first, chart: {{ chartType: {gql_chart_type} }}) "
+                        "{ edges { currentRank node { id titleText { text } originalTitleText { text } "
+                        "titleType { id } releaseYear { year endYear } ratingsSummary { aggregateRating voteCount } "
+                        "runtime { seconds } primaryImage { url } plot { plotText { plainText } } "
+                        "titleGenres { genres { genre { text } } } } } } }"
+                    ),
+                    "variables": {"first": first_limit},
+                },
+                allow_proxy_for_wan=True,
+            )
+            edges = (
+                gql_payload.get("data", {}).get("chartTitles", {}).get("edges", [])
+                if isinstance(gql_payload, Mapping)
+                else []
+            )
+            if isinstance(edges, list) and edges:
+                rows = [
+                    parsed
+                    for edge in edges
+                    if isinstance(edge, Mapping) and isinstance(edge.get("node"), Mapping)
+                    and (parsed := self._parse_graphql_node(edge["node"], default_is_tv=is_tv)) is not None
+                ]
+                if rows:
+                    start = (page - 1) * 25
+                    return rows[start : start + 25]
+        except UpstreamClientError as exc:
+            gql_err = exc
+
         chart_url = _PUBLIC_CHART_PATHS.get(norm_cat, _PUBLIC_CHART_PATHS["popular"])
-        _, _, body = await self._http.request_raw(
-            "GET",
-            chart_url,
-            headers={**self._public_headers(), "Accept": "text/html,application/xhtml+xml"},
-            allow_proxy_for_wan=True,
-        )
-        rows = self._parse_public_chart_html(body, is_tv=norm_cat.startswith("tv_"))
+        try:
+            _, _, body = await self._http.request_raw(
+                "GET",
+                chart_url,
+                headers={**self._public_headers(), "Accept": "text/html,application/xhtml+xml"},
+                allow_proxy_for_wan=True,
+            )
+        except UpstreamClientError:
+            if gql_err is not None:
+                raise gql_err from None
+            raise
+        rows = self._parse_public_chart_html(body, is_tv=is_tv)
         if not rows:
+            if gql_err is not None:
+                raise gql_err
             raise UpstreamClientError("upstream_error", "IMDb 公开榜单页面未解析到条目")
         start = (page - 1) * 25
         return rows[start : start + 25]
@@ -282,7 +398,7 @@ class ImdbTmdbClient:
                         title_text = ((node.get("titleText") or {}).get("text") or "") if isinstance(node.get("titleText"), Mapping) else ""
                         year = ((node.get("releaseYear") or {}).get("year")) if isinstance(node.get("releaseYear"), Mapping) else None
                         rating = ((node.get("ratingsSummary") or {}).get("aggregateRating")) if isinstance(node.get("ratingsSummary"), Mapping) else None
-                        poster = ((node.get("primaryImage") or {}).get("url") or "") if isinstance(node.get("primaryImage"), Mapping) else ""
+                        poster = optimize_poster_url(str(((node.get("primaryImage") or {}).get("url") or "") if isinstance(node.get("primaryImage"), Mapping) else ""))
                         plot = (((node.get("plot") or {}).get("plotText") or {}).get("plainText") or "") if isinstance(node.get("plot"), Mapping) else ""
                         parsed.append(
                             {
@@ -325,7 +441,7 @@ class ImdbTmdbClient:
                                 "title": html_lib.unescape(str(item.get("name") or tt_id)),
                                 "rating": rating_val,
                                 "media_type": "tv" if is_tv else "movie",
-                                "poster": str(item.get("image") or ""),
+                                "poster": optimize_poster_url(str(item.get("image") or "")),
                                 "overview": html_lib.unescape(str(item.get("description") or "")),
                             }
                         )
@@ -338,15 +454,68 @@ class ImdbTmdbClient:
     async def _fetch_public_detail(self, safe_id: str) -> dict[str, Any]:
         if not _IMDB_ID_RE.match(safe_id):
             raise UpstreamClientError("not_found", f"公开 IMDb 详情仅支持 tt 编号，收到: {safe_id}")
+        gql_err: UpstreamClientError | None = None
+        try:
+            _, gql_payload = await self._http.request_json(
+                "POST",
+                _IMDB_GRAPHQL_URL,
+                headers=self._graphql_headers(),
+                json_body={
+                    "query": (
+                        "query($id: ID!) { title(id: $id) { id titleText { text } originalTitleText { text } "
+                        "titleType { id } releaseYear { year endYear } ratingsSummary { aggregateRating voteCount } "
+                        "runtime { seconds } primaryImage { url } plot { plotText { plainText } } "
+                        "titleGenres { genres { genre { text } } } "
+                        "principalCredits { category { id text } credits { name { nameText { text } } } } } }"
+                    ),
+                    "variables": {"id": safe_id},
+                },
+                allow_proxy_for_wan=True,
+            )
+            node = gql_payload.get("data", {}).get("title") if isinstance(gql_payload, Mapping) else None
+            if isinstance(node, Mapping) and node.get("id"):
+                detail = self._parse_graphql_node(node, default_is_tv=False)
+                if detail is not None:
+                    directors: list[str] = []
+                    cast: list[str] = []
+                    for group in node.get("principalCredits") or ():
+                        if not isinstance(group, Mapping):
+                            continue
+                        cat_id = str(((group.get("category") or {}).get("id") or "") if isinstance(group.get("category"), Mapping) else "").lower()
+                        names = [
+                            str(((c.get("name") or {}).get("nameText") or {}).get("text") or "").strip()
+                            for c in (group.get("credits") or ())
+                            if isinstance(c, Mapping) and isinstance(c.get("name"), Mapping)
+                        ]
+                        names = [n for n in names if n]
+                        if "director" in cat_id:
+                            directors.extend(names)
+                        elif "cast" in cat_id or "actor" in cat_id or "actress" in cat_id:
+                            cast.extend(names)
+                    if directors:
+                        detail["directors"] = directors[:10]
+                    if cast:
+                        detail["cast"] = cast[:15]
+                    return detail
+        except UpstreamClientError as exc:
+            gql_err = exc
+
         url = f"https://www.imdb.com/title/{safe_id}/"
-        _, _, body = await self._http.request_raw(
-            "GET",
-            url,
-            headers={**self._public_headers(), "Accept": "text/html,application/xhtml+xml"},
-            allow_proxy_for_wan=True,
-        )
+        try:
+            _, _, body = await self._http.request_raw(
+                "GET",
+                url,
+                headers={**self._public_headers(), "Accept": "text/html,application/xhtml+xml"},
+                allow_proxy_for_wan=True,
+            )
+        except UpstreamClientError:
+            if gql_err is not None:
+                raise gql_err from None
+            raise
         m_ld = _LD_JSON_RE.search(body)
         if not m_ld:
+            if gql_err is not None:
+                raise gql_err
             raise UpstreamClientError("not_found", f"未找到 IMDb 条目详情: {safe_id}")
         try:
             ld = json.loads(m_ld.group(1))
@@ -366,7 +535,7 @@ class ImdbTmdbClient:
             "year": year,
             "rating": rating,
             "media_type": "tv" if is_tv else "movie",
-            "poster": str(ld.get("image") or ""),
+            "poster": optimize_poster_url(str(ld.get("image") or "")),
             "overview": html_lib.unescape(str(ld.get("description") or "")),
             "genres": ld.get("genre") if isinstance(ld.get("genre"), list) else [],
         }

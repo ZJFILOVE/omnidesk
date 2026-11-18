@@ -185,3 +185,81 @@ async def test_download_speed_and_size_modes_and_status_ui(tmp_path: Path) -> No
         search_res = await plugin.handle_tab_action("fetch_items", {"category": "search", "query": "Inception"})
         assert search_res["ok"] is True
         assert search_res["result"]["count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_imdb_graphql_parsing_poster_optimization_and_cover_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin_mod = _load_plugin_module()
+    imdb_mod = sys.modules.get("imdb_client")
+    assert imdb_mod is not None
+
+    raw_url = "https://m.media-amazon.com/images/M/ABC123._V1_.jpg"
+    assert imdb_mod.optimize_poster_url(raw_url) == "https://m.media-amazon.com/images/M/ABC123._V1_QL75_UX320_.jpg"
+    assert imdb_mod.optimize_poster_url("https://image.tmdb.org/t/p/w500/x.jpg") == "https://image.tmdb.org/t/p/w500/x.jpg"
+
+    class _FakeHttp:
+        async def request_json(self, method: str, url: str, **kwargs: Any) -> tuple[int, Any]:
+            assert url == "https://api.graphql.imdb.com/"
+            query = str((kwargs.get("json_body") or {}).get("query") or "")
+            if "chartTitles" in query:
+                return 200, {
+                    "data": {
+                        "chartTitles": {
+                            "edges": [
+                                {
+                                    "currentRank": 1,
+                                    "node": {
+                                        "id": "tt0111161",
+                                        "titleText": {"text": "The Shawshank Redemption"},
+                                        "originalTitleText": {"text": "The Shawshank Redemption"},
+                                        "titleType": {"id": "movie"},
+                                        "releaseYear": {"year": 1994},
+                                        "ratingsSummary": {"aggregateRating": 9.3, "voteCount": 3000000},
+                                        "runtime": {"seconds": 8520},
+                                        "primaryImage": {"url": raw_url},
+                                        "plot": {"plotText": {"plainText": "Two imprisoned men bond."}},
+                                        "titleGenres": {"genres": [{"genre": {"text": "Drama"}}]},
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            return 200, {
+                "data": {
+                    "title": {
+                        "id": "tt0111161",
+                        "titleText": {"text": "The Shawshank Redemption"},
+                        "titleType": {"id": "movie"},
+                        "releaseYear": {"year": 1994},
+                        "ratingsSummary": {"aggregateRating": 9.3},
+                        "runtime": {"seconds": 8520},
+                        "primaryImage": {"url": raw_url},
+                        "plot": {"plotText": {"plainText": "Two imprisoned men bond."}},
+                        "titleGenres": {"genres": [{"genre": {"text": "Drama"}}]},
+                        "principalCredits": [
+                            {"category": {"id": "director"}, "credits": [{"name": {"nameText": {"text": "Frank Darabont"}}}]},
+                            {"category": {"id": "cast"}, "credits": [{"name": {"nameText": {"text": "Tim Robbins"}}}]},
+                        ],
+                    }
+                }
+            }
+
+        async def request_bytes(self, method: str, url: str, **kwargs: Any) -> tuple[int, dict[str, str], bytes]:
+            return 200, {"content-type": "image/jpeg"}, b"\xff\xd8\xff\xe0TESTIMG"
+
+    client = imdb_mod.ImdbTmdbClient(_FakeHttp(), public_fallback=True)
+    items = await client.fetch_items("top_rated")
+    assert len(items) == 1
+    assert items[0]["id"] == "tt0111161"
+    assert items[0]["poster"] == "https://m.media-amazon.com/images/M/ABC123._V1_QL75_UX320_.jpg"
+
+    detail = await client.fetch_detail("tt0111161")
+    assert detail["directors"] == ["Frank Darabont"]
+    assert detail["cast"] == ["Tim Robbins"]
+
+    plugin = plugin_mod.ArrImdbPlugin()
+    monkeypatch.setattr(plugin, "_http_client", lambda: _FakeHttp())
+    cover_res = await plugin.handle_capability({"action": "cover", "url": "https://m.media-amazon.com/images/M/ABC._V1_QL75_UX320_.jpg"})
+    assert cover_res.ok is True
+    assert cover_res.data["data_url"].startswith("data:image/jpeg;base64,")

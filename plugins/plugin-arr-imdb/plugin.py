@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -11,7 +12,7 @@ from omnidesk_sdk import BasePlugin, CapabilityResult, PluginContext, WorkspaceT
 
 try:
     from .arr_client import RADARR_SPEC, SONARR_SPEC, ArrClient, QbittorrentClient
-    from .http_client import SafeHttpClient, UpstreamClientError, scrub_secrets, validate_media_id
+    from .http_client import SafeHttpClient, UpstreamClientError, scrub_secrets, validate_http_url, validate_media_id
     from .imdb_client import ImdbTmdbClient
     from .sources import ArrImdbMediaSource
 except ImportError:
@@ -19,7 +20,7 @@ except ImportError:
     if _HERE not in sys.path:
         sys.path.insert(0, _HERE)
     from arr_client import RADARR_SPEC, SONARR_SPEC, ArrClient, QbittorrentClient
-    from http_client import SafeHttpClient, UpstreamClientError, scrub_secrets, validate_media_id
+    from http_client import SafeHttpClient, UpstreamClientError, scrub_secrets, validate_http_url, validate_media_id
     from imdb_client import ImdbTmdbClient
     from sources import ArrImdbMediaSource
 
@@ -27,6 +28,7 @@ _SUPPORTED_ACTIONS = (
     "categories",
     "fetch_items",
     "fetch_detail",
+    "cover",
     "local_status",
     "radarr_lookup",
     "radarr_add",
@@ -175,6 +177,8 @@ class ArrImdbPlugin(BasePlugin):
                 return await self._action_fetch_items(payload)
             if action == "fetch_detail":
                 return await self._action_fetch_detail(payload)
+            if action == "cover":
+                return await self._action_cover(payload)
             if action == "local_status":
                 return await self._action_local_status(payload)
             if action in {"radarr_lookup", "radarr_add", "radarr_queue"}:
@@ -246,6 +250,29 @@ class ArrImdbPlugin(BasePlugin):
             except UpstreamClientError:
                 continue
         return results
+
+    async def _action_cover(self, req: Mapping[str, Any]) -> CapabilityResult:
+        url = validate_http_url(req.get("url"), label="cover_url", empty_code="invalid_argument")
+        _, headers, raw = await self._http_client().request_bytes(
+            "GET",
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://www.imdb.com/",
+            },
+            timeout_sec=12.0,
+            allow_proxy_for_wan=True,
+        )
+        ctype = str(headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not ctype.startswith("image/"):
+            if raw.lstrip().startswith((b"<html", b"<!doctype", b"<HTML", b"<!DOCTYPE")):
+                raise UpstreamClientError("upstream_error", "封面返回了 HTML 而非图片")
+            ctype = "image/jpeg"
+        if not raw:
+            raise UpstreamClientError("upstream_error", "封面图片为空")
+        encoded = base64.b64encode(raw).decode("ascii")
+        return CapabilityResult.ok({"data_url": f"data:{ctype};base64,{encoded}"})
 
     async def _action_fetch_items(self, req: Mapping[str, Any]) -> CapabilityResult:
         category = str(req.get("category") or "")

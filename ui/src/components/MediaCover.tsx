@@ -34,13 +34,32 @@ export function MediaCover({ url, item }: { url?: string; item?: MediaItem }) {
     return () => { cancelled = true; };
   }, [songId, nasId, sourceKey]);
   useEffect(() => {
-    if (!normalized || !/^https:\/\/i[1-4]?\.ytimg\.com\//.test(normalized) || !isTauriAvailable()) return;
+    if (!normalized || !isTauriAvailable()) return;
+    const isYt = /^https:\/\/i[1-4]?\.ytimg\.com\//.test(normalized);
+    const isArrImdb =
+      item?.sourceId === 'plugin-arr-imdb' ||
+      /^https?:\/\/([^/]+\.)?(media-amazon\.com|image\.tmdb\.org|thetvdb\.com)\//i.test(normalized);
+    if (!isYt && !isArrImdb) return;
     let cancelled = false;
-    void callCapability<{ data_url?: string }>({ capability: 'media.youtube.v1', providerPluginId: 'plugin-youtube', payload: { action: 'cover', url: normalized }, timeoutMs: 15_000 }).then(res => {
-      if (!cancelled && res.ok && res.data.data_url && isSafeImageUrl(res.data.data_url)) setProxied({ url: normalized, data: res.data.data_url });
-    }).catch(() => {});
+    const cacheKey = `${isYt ? 'yt' : 'arr'}:${normalized}`;
+    if (!coverRequests.has(cacheKey)) {
+      const request = callCapability<{ data_url?: string }>({
+        capability: isYt ? 'media.youtube.v1' : 'media.source.v1',
+        providerPluginId: isYt ? 'plugin-youtube' : 'plugin-arr-imdb',
+        payload: { action: 'cover', url: normalized },
+        timeoutMs: 15_000,
+      })
+        .then(res => (res.ok && res.data.data_url && isSafeImageUrl(res.data.data_url) ? res.data.data_url : undefined))
+        .catch(() => undefined);
+      if (coverRequests.size >= 64) coverRequests.delete(coverRequests.keys().next().value!);
+      coverRequests.set(cacheKey, request);
+    }
+    void coverRequests.get(cacheKey)!.then(data => {
+      if (!cancelled && data) setProxied({ url: normalized, data });
+      if (!data) coverRequests.delete(cacheKey);
+    });
     return () => { cancelled = true; };
-  }, [normalized]);
+  }, [normalized, item?.sourceId]);
   const src = proxied && proxied.url === sourceKey ? proxied.data : normalized;
   if (!src || !isSafeImageUrl(src)) return <span className="absolute inset-0 flex items-center justify-center text-xs text-white/80">暂无封面</span>;
   if (src === failedUrl) return <span className="absolute inset-0 flex items-center justify-center text-xs text-white/90">封面暂不可用</span>;

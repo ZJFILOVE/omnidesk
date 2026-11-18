@@ -276,7 +276,7 @@ class SafeHttpClient:
     def __init__(self, *, timeout_sec: float = 10.0) -> None:
         self.timeout_sec = max(0.05, min(float(timeout_sec), 120.0))
 
-    async def request_raw(
+    async def request_bytes(
         self,
         method: str,
         url: str,
@@ -286,22 +286,25 @@ class SafeHttpClient:
         secrets: Iterable[str] = (),
         timeout_sec: float | None = None,
         allow_proxy_for_wan: bool = False,
-    ) -> tuple[int, dict[str, str], str]:
-        """Execute an HTTP request off-thread and return (status, headers, body_text)."""
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> tuple[int, dict[str, str], bytes]:
+        """Execute an HTTP request off-thread and return (status, headers, raw_bytes)."""
         validated_url = validate_http_url(url, label="request_url", empty_code="invalid_argument")
         effective_timeout = max(0.05, min(float(timeout_sec if timeout_sec is not None else self.timeout_sec), 120.0))
         secret_list = [s for s in secrets if isinstance(s, str) and s]
         req_headers = dict(headers) if headers else {}
         use_proxy = bool(allow_proxy_for_wan and not _is_private_or_loopback_host(validated_url))
 
-        def _do_sync() -> tuple[int, dict[str, str], str]:
+        def _do_sync() -> tuple[int, dict[str, str], bytes]:
             opener = _build_safe_opener(use_env_proxy=use_proxy)
             req = urllib.request.Request(validated_url, data=body, headers=req_headers, method=method.upper())
             try:
                 with opener.open(req, timeout=effective_timeout) as resp:
                     status = int(getattr(resp, "status", 200))
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-                    raw = resp.read().decode("utf-8", errors="replace")
+                    raw = resp.read(max_bytes + 1)
+                    if len(raw) > max_bytes:
+                        raise UpstreamClientError("upstream_error", f"上游响应体积超过上限 ({max_bytes} bytes)")
                     return status, resp_headers, raw
             except urllib.error.HTTPError as exc:
                 status = int(exc.code)
@@ -326,6 +329,29 @@ class SafeHttpClient:
             return await asyncio.wait_for(asyncio.to_thread(_do_sync), timeout=effective_timeout + 1.0)
         except TimeoutError:
             raise UpstreamClientError("timeout", "上游服务请求超时") from None
+
+    async def request_raw(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        body: bytes | None = None,
+        secrets: Iterable[str] = (),
+        timeout_sec: float | None = None,
+        allow_proxy_for_wan: bool = False,
+    ) -> tuple[int, dict[str, str], str]:
+        """Execute an HTTP request off-thread and return (status, headers, body_text)."""
+        status, resp_headers, raw = await self.request_bytes(
+            method,
+            url,
+            headers=headers,
+            body=body,
+            secrets=secrets,
+            timeout_sec=timeout_sec,
+            allow_proxy_for_wan=allow_proxy_for_wan,
+        )
+        return status, resp_headers, raw.decode("utf-8", errors="replace")
 
     async def request_json(
         self,
