@@ -114,3 +114,45 @@ it('renders subtitle translation, native extraction, and save-as-SRT controls fo
   expect(screen.getByRole('button', { name: '提取原生字幕' })).toBeTruthy();
   expect(screen.getByRole('button', { name: '保存为 SRT' })).toBeTruthy();
 });
+
+it('allows selecting preset translation models and shows a translation progress bar', async () => {
+  const onTranslated = vi.fn();
+  const segments = Array.from({ length: 20 }, (_, i) => ({ id: String(i), text: `Line ${i}` }));
+  vi.mocked(callCapability).mockImplementation(async args => {
+    const action = args.payload?.action;
+    if (action === 'list_models') {
+      return { available: true, ok: true, data: { models: [{ id: 'gpt-4o-mini', name: 'GPT-4o mini' }] } } as never;
+    }
+    if (action === 'translate') {
+      const chunk = (args.payload?.segments as Array<{ id: string; text: string }>) ?? [];
+      return {
+        available: true,
+        ok: true,
+        data: { results: chunk.map(s => ({ id: s.id, source: s.text, translation: `译:${s.text}` })) },
+      } as never;
+    }
+    return {
+      available: true,
+      ok: true,
+      data: {
+        translation_backend: 'magpie',
+        translation_models: '',
+        translation_concurrency: 2,
+        translation_batch_size: 4,
+      },
+    } as never;
+  });
+
+  render(<TranslationPanel open request={{ title: 'Long Subtitles', segments, onTranslated }} onClose={noop} />);
+  await waitFor(() => expect((screen.getByRole('button', { name: '开始翻译' }) as HTMLButtonElement).disabled).toBe(false));
+
+  fireEvent.change(screen.getByLabelText('选择翻译模型'), { target: { value: 'gpt-4o-mini' } });
+  expect((screen.getByLabelText('翻译模型 ID 列表') as HTMLInputElement).value).toBe('gpt-4o-mini');
+
+  fireEvent.click(screen.getByRole('button', { name: '开始翻译' }));
+  await waitFor(() => expect(onTranslated).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ id: '19' })])));
+  const bar = screen.getByRole('progressbar', { name: '翻译进度' });
+  expect(bar.getAttribute('aria-valuenow')).toBe('20');
+  expect(bar.getAttribute('aria-valuemax')).toBe('20');
+  expect(screen.getByText('20 / 20 段 (100%)')).toBeTruthy();
+});
