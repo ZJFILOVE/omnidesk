@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { getTauriGlobal, type MpvPlaybackState } from '../../api';
 import { TranslationButton } from '../../components/TranslationContext';
 import { MediaCover } from '../../components/MediaCover';
+import { ArrImdbPanel } from './ArrImdbPanel';
 import {
   Disc3,
   Film,
@@ -664,6 +665,10 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
       <p className="max-w-[68ch] px-1 text-[16.5px] leading-[1.75] text-[var(--text-secondary)]">
         {item.summary}
       </p>
+
+      {item.sourceId === 'plugin-arr-imdb' ? (
+        <ArrImdbPanel item={item} onStatusChange={onStatusChange} />
+      ) : null}
 
       {/* Synchronized lyrics and video subtitles share the same cue timeline. */}
       {item.kind === 'music' || item.kind === 'video' || item.kind === 'nas' ? (

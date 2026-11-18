@@ -76,7 +76,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   const skippedAds = useRef(new Set<string>());
   const liveMedia = useLiveMedia(activeCategory, backendQuery, activeSourceId);
   const browsingSource = activeSourceId || liveMedia.sourceId;
-  const libraryLayout = ['plugin-bilibili', 'plugin-youtube', 'plugin-music'].includes(browsingSource);
+  const libraryLayout = ['plugin-bilibili', 'plugin-youtube', 'plugin-music', 'plugin-arr-imdb'].includes(browsingSource);
   const categoryOptions = liveMedia.categories;
   const effectiveCategory =
     activeCategory && categoryOptions.includes(activeCategory)
@@ -419,6 +419,14 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     setOpenedItem(item);
     setShowPlayer(true);
     setSelectedId(item.id);
+    if (
+      item.sourceId === 'plugin-arr-imdb' &&
+      !item.streamResolver &&
+      (!item.playUrl || item.playUrl.includes('imdb.com/'))
+    ) {
+      setActionStatus(`已打开影视详情：${item.title}（可核验本地库或联动 Radarr / Sonarr 下载）`);
+      return;
+    }
     if (!mpv.enabled) {
       setPreviewSec(0);
       setPreviewPlaying(true);
@@ -554,7 +562,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
     <WorkbenchLayout
       domain="media"
       testId="workbench-media"
-      title={browsingSource === 'plugin-bilibili' ? 'Bilibili' : browsingSource === 'plugin-youtube' ? 'YouTube' : browsingSource === 'plugin-music' ? 'Apple Music' : '影视与音乐'}
+      title={browsingSource === 'plugin-bilibili' ? 'Bilibili' : browsingSource === 'plugin-youtube' ? 'YouTube' : browsingSource === 'plugin-music' ? 'Apple Music' : browsingSource === 'plugin-arr-imdb' ? 'IMDb • Radarr / Sonarr' : '影视与音乐'}
       subtitle={libraryLayout ? '发现、关注与收藏 · 你的媒体空间' : '视频、音乐与私人影库'}
       headerActions={
         <div className="flex flex-wrap items-center gap-2.5">
