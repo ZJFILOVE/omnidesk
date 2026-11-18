@@ -100,41 +100,82 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
       // Keep IDs and cue boundaries intact when translating from a reader.
       const segments = request?.segments ?? text.split(/\n\s*\n/).filter(value => value.trim()).map((value, index) => ({ id: String(index), text: value }));
       if (!segments.length) return;
-      const waveSize = Math.max(16, (Number(settings.translation_batch_size) || 4) * (Number(settings.translation_concurrency) || 4));
+      const batchSize = Math.max(1, Number(settings.translation_batch_size) || 4);
+      const concurrency = Math.max(1, Number(settings.translation_concurrency) || 4);
       const selectedModels = settings[modelKey].split(',').map(value => value.trim()).filter(Boolean);
-      const collected: TranslationResult[] = [];
-      let totalHits = 0;
-      setProgress({ done: 0, total: segments.length });
-      for (let start = 0; start < segments.length; start += waveSize) {
-        const chunk = segments.slice(start, start + waveSize);
-        const result = await callCapability<{ results: TranslationResult[]; cache_hits?: number }>({
-          capability: 'llm.translate.v1',
-          providerPluginId: 'plugin-magpie-agent',
-          timeoutMs: 300000,
-          payload: {
-            action: 'translate',
-            segments: chunk,
-            target_lang: language,
-            context: request?.title ?? '',
-            backend: settings.translation_backend,
-            models: selectedModels,
-            concurrency: settings.translation_concurrency,
-            batch_size: settings.translation_batch_size,
-            ...(force ? { force: true } : {}),
-          },
-        });
-        if (current !== version.current) return;
-        if (!result.ok) { setError(formatRpcError(result.error)); return; }
-        if (!Array.isArray(result.data.results) || result.data.results.length !== chunk.length) {
-          setError('译文段数与原文不一致，请重试。');
-          return;
+      const batches: Array<{ index: number; chunk: Array<{ id: string; text: string; context_before?: string; context_after?: string }> }> = [];
+      for (let start = 0; start < segments.length; start += batchSize) {
+        const slice: Array<{ id: string; text: string; context_before?: string; context_after?: string }> =
+          segments.slice(start, start + batchSize).map(seg => ({ ...seg }));
+        if (start > 0 && !slice[0].context_before) {
+          slice[0].context_before = segments[start - 1].text;
         }
-        collected.push(...result.data.results);
-        totalHits += result.data.cache_hits ?? 0;
-        setProgress({ done: collected.length, total: segments.length });
-        setResults([...collected]);
-        request?.onTranslated?.([...collected]);
+        const end = start + slice.length;
+        if (end < segments.length && !slice[slice.length - 1].context_after) {
+          slice[slice.length - 1].context_after = segments[end].text;
+        }
+        batches.push({ index: batches.length, chunk: slice });
       }
+
+      const batchOutputs: TranslationResult[][] = new Array(batches.length);
+      let nextBatch = 0;
+      let doneCount = 0;
+      let totalHits = 0;
+      let failedMessage = '';
+      setProgress({ done: 0, total: segments.length });
+
+      const runWorker = async () => {
+        while (!failedMessage && current === version.current) {
+          const pos = nextBatch;
+          nextBatch += 1;
+          if (pos >= batches.length) return;
+          const { index, chunk } = batches[pos];
+          const batchModels =
+            batches.length > 1 && selectedModels.length > 1
+              ? [selectedModels[index % selectedModels.length]]
+              : selectedModels;
+          const result = await callCapability<{ results: TranslationResult[]; cache_hits?: number }>({
+            capability: 'llm.translate.v1',
+            providerPluginId: 'plugin-magpie-agent',
+            timeoutMs: 300000,
+            payload: {
+              action: 'translate',
+              segments: chunk,
+              target_lang: language,
+              context: request?.title ?? '',
+              backend: settings.translation_backend,
+              models: batchModels,
+              concurrency: batches.length === 1 ? concurrency : 1,
+              batch_size: batchSize,
+              ...(force ? { force: true } : {}),
+            },
+          });
+          if (current !== version.current) return;
+          if (!result.ok) {
+            failedMessage = formatRpcError(result.error);
+            return;
+          }
+          if (!Array.isArray(result.data.results) || result.data.results.length !== chunk.length) {
+            failedMessage = '译文段数与原文不一致，请重试。';
+            return;
+          }
+          batchOutputs[index] = result.data.results;
+          totalHits += result.data.cache_hits ?? 0;
+          doneCount += chunk.length;
+          setProgress({ done: doneCount, total: segments.length });
+        }
+      };
+
+      const workerCount = Math.min(concurrency, batches.length);
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+      if (current !== version.current) return;
+      if (failedMessage) {
+        setError(failedMessage);
+        return;
+      }
+      const collected = batchOutputs.flat();
+      setResults(collected);
+      request?.onTranslated?.(collected);
       setNotice(`已翻译 ${segments.length} 段${totalHits > 0 ? `（命中缓存 ${totalHits} 段）` : ''}${request?.onTranslated ? '，译文已显示在原界面' : ''}。`);
     } catch (err) { if (current === version.current) setError(String(err)); }
     finally { if (current === version.current) setBusy(false); }
