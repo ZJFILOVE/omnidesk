@@ -417,7 +417,7 @@ export function useCompanionChat({
       }
       const payload: AiAgentRequestPayload = {
         agent_id: agentSelection.agent.id,
-        ...(agentSelection.agent.id !== 'builtin' && agentSelection.model ? { model: agentSelection.model } : {}),
+        ...(agentSelection.model ? { model: agentSelection.model } : {}),
         action: action ?? 'chat',
         domain: effectiveDomain,
         context: contextLabel,

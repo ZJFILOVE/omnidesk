@@ -342,7 +342,26 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
         assert tr_batch.data["usage"]["total_tokens"] == 15
         assert len(state.requests) - batch_calls_before == 1
 
-        # Agent actions: summarize / qa / etymology / parse_sentence
+        # Agent actions: summarize / qa / etymology / parse_sentence (routed via Codex/AGY runtime, no builtin)
+        agent_calls: list[tuple[dict[str, Any], str]] = []
+
+        async def _fake_runtime_chat(req: dict[str, Any], *, ctx: Any, stream: Any = None, agent_id: str = "codex") -> Any:
+            agent_calls.append((dict(req), agent_id))
+            reply = "Hello Magpie!" if stream is not None else f"REPLY:{req['messages'][-1]['content']}"
+            if stream is not None:
+                for part in ("Hel", "lo ", "Magpie!"):
+                    await stream.emit_delta(part)
+            return module.CapabilityResult.ok({
+                "reply": reply,
+                "served_model": f"{agent_id}/test",
+                "route_group": f"agent/{agent_id}",
+                "agent_id": agent_id,
+                "streaming": stream is not None,
+            })
+
+        module._runtime_mod.chat = _fake_runtime_chat
+        module._runtime_mod.codex_binary = lambda _="": "/fake/codex"
+
         for act in ("summarize", "qa", "etymology", "parse_sentence"):
             ag_res = await ctx.capabilities.call(
                 "ai.agent.v1",
@@ -358,21 +377,24 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
             assert ag_res.data["action"] == act
             assert ag_res.data["domain"] == "book"
             assert ag_res.data["citations_grounded"] is True
-            sys_sent = state.requests[-1]["messages"][0]["content"]
+            sys_sent = agent_calls[-1][0]["messages"][0]["content"]
             assert "NEVER fabricate citations" in sys_sent
             assert "<selection>" in sys_sent
+            assert agent_calls[-1][1] == "codex"
 
-        # Agent bad action & empty input
+        # Agent bad action, builtin rejected, & empty input
         assert (await ctx.capabilities.call("ai.agent.v1", {"action": "bad"})).data["error_code"] == "invalid_argument"
+        assert (await ctx.capabilities.call("ai.agent.v1", {"agent_id": "builtin", "action": "qa", "prompt": "hi"})).data["error_code"] == "invalid_argument"
         assert (await ctx.capabilities.call("ai.agent.v1", {"action": "qa"})).data["error_code"] == "invalid_argument"
 
-        # Verify ai.agent.v1 streaming via llm.chat.v1
+        # Verify ai.agent.v1 streaming via runtime adapter
         ag_chunks: list[dict[str, Any]] = []
         ag_stream = await ctx.capabilities.call_stream(
-            "ai.agent.v1", {"action": "qa", "domain": "text", "prompt": "stream qa", "stream": True}, on_chunk=ag_chunks.append
+            "ai.agent.v1", {"action": "qa", "domain": "text", "prompt": "stream qa", "stream": True, "agent_id": "agy"}, on_chunk=ag_chunks.append
         )
         assert ag_stream.ok is True
         assert ag_stream.data["reply"] == "Hello Magpie!"
+        assert agent_calls[-1][1] == "agy"
         assert [c["data"]["text"] for c in ag_chunks] == ["Hel", "lo ", "Magpie!"]
 
         # Verify translate propagates gateway 429 rate_limited
@@ -381,17 +403,6 @@ async def test_translate_and_agent_capabilities(tmp_path: Path) -> None:
         assert tr_429.ok is False and tr_429.data["error_code"] == "rate_limited"
         assert state.secret not in tr_429.error
         state.mode = "ok"
-
-        # Verify ai.agent.v1 routes through llm.chat.v1 capability registry
-        called_via_cap: list[dict[str, Any]] = []
-        ctx.capabilities.register(
-            "llm.chat.v1",
-            lambda r: (called_via_cap.append(dict(r)), {"reply": "via-cap", "served_model": "m", "route_group": "g"})[1],
-            plugin_id="plugin-magpie-agent",
-        )
-        ag_cap = await ctx.capabilities.call("ai.agent.v1", {"action": "qa", "prompt": "check"})
-        assert ag_cap.ok is True and ag_cap.data["reply"] == "via-cap"
-        assert len(called_via_cap) == 1
 
         await invoke_lifecycle_hook(plugin.on_unload)
         await ctx.acleanup()
@@ -420,6 +431,20 @@ async def test_agent_sessions_persist_continue_list_export_and_delete(tmp_path: 
         ctx.set_config("gateway_url", base_url)
         ctx.set_secret("gateway_key", state.secret)
         await invoke_lifecycle_hook(plugin.on_load, ctx)
+        session_calls: list[dict[str, Any]] = []
+
+        async def _fake_session_chat(req: dict[str, Any], *, ctx: Any, stream: Any = None, agent_id: str = "codex") -> Any:
+            session_calls.append(dict(req))
+            user_text = next((m["content"] for m in reversed(req["messages"]) if m.get("role") == "user"), "")
+            return module.CapabilityResult.ok({
+                "reply": f"REPLY:{user_text}",
+                "served_model": "Codex · test",
+                "route_group": "agent/codex",
+                "agent_id": agent_id,
+            })
+
+        module._runtime_mod.chat = _fake_session_chat
+        module._runtime_mod.codex_binary = lambda _="": "/fake/codex"
 
         first = await ctx.capabilities.call(
             "ai.agent.v1",
@@ -436,8 +461,8 @@ async def test_agent_sessions_persist_continue_list_export_and_delete(tmp_path: 
         assert session_id.startswith("agent-")
         assert first.data["session"]["message_count"] == 2
         assert first.data["session"]["title"] == "解释一致性边界"
-        assert first.data["session"]["served_model"] == "antigravity/gemini-4-carbon:high"
-        assert first.data["session"]["route_group"] == "group/omnidesk-active"
+        assert first.data["session"]["served_model"] == "Codex · test"
+        assert first.data["session"]["route_group"] == "agent/codex"
 
         session_file = data_dir / "agent-sessions" / f"{session_id}.json"
         assert session_file.is_file()
@@ -456,7 +481,7 @@ async def test_agent_sessions_persist_continue_list_export_and_delete(tmp_path: 
         assert second.ok is True
         assert second.data["session_id"] == session_id
         assert second.data["session"]["message_count"] == 4
-        prior_messages = state.requests[-1]["messages"]
+        prior_messages = session_calls[-1]["messages"]
         assert any(msg["content"] == "解释一致性边界" for msg in prior_messages)
         assert any(msg["content"].startswith("REPLY:") for msg in prior_messages)
 

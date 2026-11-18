@@ -418,25 +418,22 @@ class MagpieAgentPlugin(BasePlugin):
         })
 
     async def handle_agent_stream(self, req: Mapping[str, Any], stream: Any = None) -> CapabilityResult:
-        """Handle `ai.agent.v1` domain-contextual actions backed by `llm.chat.v1`."""
+        """Handle `ai.agent.v1` domain-contextual actions backed by Codex or AGY CLI with OmniDesk MCP."""
         secret = self._gateway_key()
         if self._unloaded:
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
         if req.get("action") == "list_agents":
-            return CapabilityResult.ok({"agents": _runtime_mod.agents(self.ctx) + [{
-                "id": "agy", "name": "AGY CLI · 上下文助手", "tools": False,
-                "available": bool(_cli_mod.binary("agy", self.ctx.get_config("agy_bin", ""))),
-                "reason": "需安装并登录 AGY CLI",
-            }]})
-        agent_id = str(req.get("agent_id") or "builtin")
-        if agent_id not in {"builtin", "codex", "agy"}:
-            return CapabilityResult.fail("未知 Agent", error_code="invalid_argument")
+            return CapabilityResult.ok({"agents": _runtime_mod.agents(self.ctx)})
+        agent_id = str(req.get("agent_id") or _runtime_mod.default_agent_id(self.ctx)).strip()
+        if agent_id not in {"codex", "agy"}:
+            return CapabilityResult.fail(
+                f"不支持的 Agent: {agent_id!r}，仅支持 codex 或 agy",
+                error_code="invalid_argument",
+            )
+
         async def call_selected(payload: dict[str, Any], sink: Any) -> CapabilityResult:
-            if agent_id == "agy":
-                return await _cli_mod.chat(payload, ctx=self.ctx, backend="agy", stream=sink)
-            if agent_id == "codex":
-                return await _runtime_mod.chat(payload, ctx=self.ctx, stream=sink)
-            return await self._call_chat_via_ctx(payload, sink)
+            return await _runtime_mod.chat(payload, ctx=self.ctx, stream=sink, agent_id=agent_id)
+
         return await _agent_mod.handle_agent(
             req,
             call_chat=call_selected,

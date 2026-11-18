@@ -3,17 +3,29 @@ import { callCapability, isTauriAvailable, listPlugins } from '../api';
 
 export interface AgentOption { id: string; name: string; available: boolean; tools?: boolean; reason?: string; provider?: string }
 export interface CliModelOption { id: string; name: string }
-const DEFAULT: AgentOption = { id: 'builtin', name: 'OmniDesk 内置助手', available: true, provider: 'plugin-magpie-agent' };
+const DEFAULT_AGENTS: AgentOption[] = [
+  { id: 'codex', name: 'Codex · MCP 工具', available: true, tools: true, provider: 'plugin-magpie-agent' },
+  { id: 'agy', name: 'AGY · MCP 工具', available: true, tools: true, provider: 'plugin-magpie-agent' },
+];
 
 function readSavedModel(agentId: string): string {
   try { return window.localStorage?.getItem(`omnidesk.agent_model.${agentId}`) || ''; } catch { return ''; }
 }
 
+function readSavedAgent(): string {
+  try {
+    const saved = window.localStorage?.getItem('omnidesk.agent');
+    return saved && saved !== 'builtin' ? saved : 'codex';
+  } catch {
+    return 'codex';
+  }
+}
+
 export function useAgentSelection() {
-  const [options, setOptions] = useState<AgentOption[]>([DEFAULT]);
+  const [options, setOptions] = useState<AgentOption[]>(DEFAULT_AGENTS);
   const [cliModels, setCliModels] = useState<{ codex: CliModelOption[]; agy: CliModelOption[] }>({ codex: [], agy: [] });
   const [configuredDefaults, setConfiguredDefaults] = useState<{ codex: string; agy: string }>({ codex: '', agy: '' });
-  const [selected, setSelected] = useState(() => { try { return window.localStorage?.getItem('omnidesk.agent') || 'builtin'; } catch { return 'builtin'; } });
+  const [selected, setSelected] = useState(readSavedAgent);
   const [modelsByAgent, setModelsByAgent] = useState<Record<string, string>>(() => ({
     codex: readSavedModel('codex'),
     agy: readSavedModel('agy'),
@@ -49,13 +61,19 @@ export function useAgentSelection() {
     ]).then(([result, plugins, cliRes, settingsRes]) => {
       if (cancelled) return;
       const choices = result.ok && Array.isArray(result.data.agents)
-        ? result.data.agents.map(agent => ({ ...agent, provider: 'plugin-magpie-agent' })) : [DEFAULT];
+        ? result.data.agents.map(agent => ({ ...agent, provider: 'plugin-magpie-agent' })) : DEFAULT_AGENTS;
       if (plugins.ok && Array.isArray(plugins.data?.plugins)) for (const plugin of plugins.data.plugins) {
         if (plugin.plugin_id !== 'plugin-magpie-agent' && plugin.state === 'loaded' && plugin.provides?.includes('ai.agent.v1')) {
           choices.push({ id: plugin.plugin_id, provider: plugin.plugin_id, name: plugin.name || plugin.plugin_id, available: true });
         }
       }
       setOptions(choices);
+      setSelected((prev) => {
+        const cur = choices.find((c) => c.id === prev);
+        if (cur && cur.available) return prev;
+        const firstAvailable = choices.find((c) => c.available);
+        return firstAvailable ? firstAvailable.id : prev;
+      });
       if (cliRes && cliRes.ok) {
         setCliModels({ codex: cliRes.data.codex ?? [], agy: cliRes.data.agy ?? [] });
       }

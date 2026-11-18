@@ -237,8 +237,9 @@ describe('PluginStore real Tauri RPC and bus health updates', () => {
 });
 
 describe('AiWorkbench & CompanionDock real capability RPC', () => {
-  it('routes chart-style prompts through ai.curation.v1 and renders verified cards', async () => {
+  it('routes AiWorkbench prompts through ai.agent.v1 (codex/agy) and surfaces real reply or real backend error', async () => {
     const invokedCapabilities: string[] = [];
+    const agentPayloads: Array<Record<string, unknown>> = [];
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
       if (cmd === 'call' && payload?.args?.op === 'capability.call') {
         cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
@@ -246,127 +247,6 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
       if (cmd === 'call_capability') {
         const cap = String(payload?.args?.capability ?? '');
         invokedCapabilities.push(cap);
-        const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
-        if (cap === 'llm.router.v1') {
-          return {
-            ok: true,
-            provider_plugin_id: 'plugin-magpie-agent',
-            data: { gateway_running: true, online: true, group_id: 'omnidesk-active', primary_member: 'gemini/carbon:high', routing: 'order' },
-            error: '',
-          };
-        }
-        if (cap === 'ai.curation.v1') {
-          expect(capPayload?.action).toBe('curate_interactive');
-          expect(capPayload?.prompt).toContain('最火');
-          return {
-            ok: true,
-            provider_plugin_id: 'plugin-magpie-agent',
-            data: {
-              mode: 'interactive_ephemeral',
-              session_id: 'ix-chat-test',
-              feed_written: true,
-              playlist_synced: true,
-              media_items: [
-                { id: 'am-cn-9001', title: 'Chart Track 9001', creator: 'Artist A', subtitle: 'Artist A · 国区实时榜 #1' },
-                { id: 'am-cn-9002', title: 'Chart Track 9002', creator: 'Artist B', subtitle: 'Artist B · 国区实时榜 #2' },
-                { id: 'am-cn-9003', title: 'Chart Track 9003', creator: 'Artist C', subtitle: 'Artist C · 国区实时榜 #3' },
-              ],
-            },
-            error: '',
-          };
-        }
-      }
-      return { ok: true, data: {}, error: '' };
-    });
-
-    window.__TAURI__ = {
-      core: {
-        invoke: invoke as unknown as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'],
-      },
-    };
-
-    render(<AiWorkbench />);
-    await waitFor(() => {
-      expect(screen.getByTestId('ai-gateway-badge').textContent).toContain('ONLINE');
-    });
-
-    const input = screen.getByLabelText('AI 策展对话输入框');
-    fireEvent.change(input, { target: { value: '写三首目前最火的歌到歌单' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送执行' }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/已反写 3 条推荐到卡片页/)).not.toBeNull();
-    });
-    expect(screen.getByText('Chart Track 9001')).not.toBeNull();
-    expect(screen.getByText('Chart Track 9002')).not.toBeNull();
-    expect(screen.getByText('Chart Track 9003')).not.toBeNull();
-    expect(invokedCapabilities).not.toContain('llm.chat.v1');
-  });
-
-  it('requests media and text domains for paper + YouTube prompts', async () => {
-    let capturedPayload: Record<string, unknown> | undefined;
-    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
-      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
-        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
-      }
-      if (cmd === 'call_capability') {
-        const cap = String(payload?.args?.capability ?? '');
-        if (cap === 'llm.router.v1') {
-          return {
-            ok: true,
-            provider_plugin_id: 'plugin-magpie-agent',
-            data: { gateway_running: true, online: true, group_id: 'omnidesk-active', primary_member: 'gemini/carbon:high', routing: 'order' },
-            error: '',
-          };
-        }
-        if (cap === 'ai.curation.v1') {
-          capturedPayload = payload?.args?.payload as Record<string, unknown>;
-          return {
-            ok: true,
-            provider_plugin_id: 'plugin-magpie-agent',
-            data: {
-              mode: 'interactive_ephemeral',
-              session_id: 'ix-mixed-test',
-              feed_written: true,
-              playlist_synced: false,
-              media_items: [{ id: 'yt-1', title: 'KV Cache video', creator: 'YouTube', kind: 'video' }],
-              text_items: [{ id: 'paper-1', title: 'KV Cache paper', author: 'Researcher' }],
-            },
-            error: '',
-          };
-        }
-      }
-      return { ok: true, data: {}, error: '' };
-    });
-
-    window.__TAURI__ = {
-      core: {
-        invoke: invoke as unknown as NonNullable<NonNullable<Window['__TAURI__']>['core']>['invoke'],
-      },
-    };
-
-    render(<AiWorkbench />);
-    await waitFor(() => {
-      expect(screen.getByTestId('ai-gateway-badge').textContent).toContain('ONLINE');
-    });
-
-    fireEvent.change(screen.getByLabelText('AI 策展对话输入框'), {
-      target: { value: '结合 KV Cache 淘汰边界论文，推荐 2 篇同主题实证工作和对应 YouTube 讲解。' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: '发送执行' }));
-
-    await waitFor(() => {
-      expect(capturedPayload?.domains).toEqual(['media', 'text']);
-    });
-  });
-
-  it('sends llm.chat.v1 in AiWorkbench and surfaces real reply or real backend error', async () => {
-    const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
-      if (cmd === 'call' && payload?.args?.op === 'capability.call') {
-        cmd = 'call_capability'; payload = { args: payload.args.params as Record<string, unknown> };
-      }
-      if (cmd === 'call_capability') {
-        const cap = payload?.args?.capability;
         const capPayload = payload?.args?.payload as Record<string, unknown> | undefined;
         if (cap === 'llm.router.v1') {
           if (capPayload?.action === 'current_route') {
@@ -379,10 +259,23 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
           }
           return { ok: true, provider_plugin_id: 'plugin-magpie-agent', data: { models: [], quotas: [] }, error: '' };
         }
-        if (cap === 'llm.chat.v1') {
-          const msgs = capPayload?.messages as Array<{ content: string }> | undefined;
-          const last = msgs?.[msgs.length - 1]?.content ?? '';
-          if (last.includes('fail')) {
+        if (cap === 'ai.agent.v1') {
+          if (capPayload?.action === 'list_agents') {
+            return {
+              ok: true,
+              provider_plugin_id: 'plugin-magpie-agent',
+              data: {
+                agents: [
+                  { id: 'codex', name: 'Codex · MCP 工具', available: true, tools: true },
+                  { id: 'agy', name: 'AGY · MCP 工具', available: true, tools: true },
+                ],
+              },
+              error: '',
+            };
+          }
+          agentPayloads.push(capPayload ?? {});
+          const prompt = String(capPayload?.prompt ?? '');
+          if (prompt.includes('fail')) {
             return {
               ok: false,
               error_code: 'quota_exceeded',
@@ -394,7 +287,7 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
           return {
             ok: true,
             provider_plugin_id: 'plugin-magpie-agent',
-            data: { reply: '真实后端回答：已核验归档。', served_model: 'codex/gpt-6-luna' },
+            data: { reply: '真实后端回答：已核验归档。', served_model: 'Codex · gpt-6-luna' },
             error: '',
           };
         }
@@ -420,6 +313,8 @@ describe('AiWorkbench & CompanionDock real capability RPC', () => {
     await waitFor(() => {
       expect(screen.getByText('真实后端回答：已核验归档。')).not.toBeNull();
     });
+    expect(agentPayloads[0]?.agent_id).toBe('codex');
+    expect(invokedCapabilities).not.toContain('llm.chat.v1');
 
     fireEvent.change(input, { target: { value: 'please fail' } });
     fireEvent.click(screen.getByRole('button', { name: '发送执行' }));

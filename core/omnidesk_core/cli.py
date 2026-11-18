@@ -1016,10 +1016,13 @@ async def serve_mcp_stdio(
     paths: OmnideskPaths,
     plugin_dirs: Sequence[Path],
     socket_path: str | None = None,
+    allowed_tools: Sequence[str] | None = None,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
 ) -> int:
     """Minimal stdio JSON-RPC 2.0 MCP server exposing list/call without arbitrary shell."""
+    allowed_tool_set = {t.strip() for t in (allowed_tools or ()) if t and t.strip()}
+    exposed_tools = [t for t in _MCP_TOOLS if not allowed_tool_set or t["name"] in allowed_tool_set]
     in_stream = stdin or sys.stdin
     out_stream = stdout or sys.stdout
     redirect_stdout = stdout is None
@@ -1283,7 +1286,7 @@ async def serve_mcp_stdio(
             elif method == "ping":
                 _result(req_id, {})
             elif method == "tools/list":
-                _result(req_id, {"tools": _MCP_TOOLS})
+                _result(req_id, {"tools": exposed_tools})
             elif method == "resources/list":
                 _result(
                     req_id,
@@ -1314,6 +1317,9 @@ async def serve_mcp_stdio(
                     tool_args = {}
                 if not isinstance(tool_args, Mapping):
                     _error(req_id, -32602, "Tool 'arguments' must be a JSON object")
+                    continue
+                if allowed_tool_set and tool_name not in allowed_tool_set:
+                    _error(req_id, -32602, f"Tool not enabled in this session: {tool_name}")
                     continue
 
                 if tool_name == "omnidesk_list_plugins":
@@ -1625,6 +1631,7 @@ def build_parser(*, json_requested: bool = False) -> argparse.ArgumentParser:
     p_mcp = sub.add_parser("mcp-serve", help="Run minimal stdio JSON-RPC 2.0 MCP server (no arbitrary shell)")
     p_mcp.add_argument("--plugins-dir", action="append", help="Plugin root directory for offline fallback")
     p_mcp.add_argument("--socket", "-s", help="Optional path to live control.sock")
+    p_mcp.add_argument("--tools", help="Optional comma-separated allowlist of exposed MCP tool names")
     p_mcp.add_argument("--json", action="store_true", help="Emit structured JSON errors if startup fails")
 
     p_reload = sub.add_parser("reload", help="Hot-reload a plugin via control.sock")
@@ -1731,6 +1738,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     paths=paths,
                     plugin_dirs=_resolve_plugin_dirs(args.plugins_dir, paths),
                     socket_path=args.socket,
+                    allowed_tools=_split_csv_flags([args.tools]) if getattr(args, "tools", None) else None,
                 )
             )
         if args.command == "reload":

@@ -7,6 +7,9 @@ import base64
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,31 +44,188 @@ _SEASON_DIR_RE = re.compile(r"^(?:season|s)\s*0*(\d{1,2})$", re.IGNORECASE)
 _MAX_SCAN_ITEMS = 20000
 
 
-def read_cover(snapshot: LibrarySnapshot, item_id: str) -> str:
-    """Read adjacent artwork only for an indexed item inside the configured mount."""
-    record = snapshot.records_by_id.get(item_id)
-    if not record or snapshot.mount_root is None:
-        return ''
-    media = Path(record['path'])
+_MAX_COVER_BYTES = 8 * 1024 * 1024
+
+
+def _detect_image_mime(raw: bytes) -> str:
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _encode_image_data_url(raw: bytes) -> str:
+    if not raw or len(raw) > _MAX_COVER_BYTES:
+        return ""
+    mime = _detect_image_mime(raw)
+    if not mime:
+        return ""
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _read_adjacent_cover(mount_root: Path, media: Path) -> str:
     roots = [media.parent]
     if _SEASON_DIR_RE.match(media.parent.name):
         roots.append(media.parent.parent)
-    candidates = [media.with_name(media.stem + suffix) for suffix in ('-poster.jpg', '.jpg', '.png')]
-    candidates += [root / (name + ext) for root in roots for name in ('poster', 'cover', 'folder') for ext in ('.jpg', '.png', '.webp')]
+    candidates = [
+        media.with_name(media.stem + suffix)
+        for suffix in (
+            "-poster.jpg", "-poster.jpeg", "-poster.png", "-poster.webp",
+            "-thumb.jpg", "-thumb.png", "-fanart.jpg",
+            ".jpg", ".jpeg", ".png", ".webp",
+        )
+    ]
+    candidates += [
+        root / (name + ext)
+        for root in roots
+        for name in ("poster", "cover", "folder", "thumb", "fanart", "backdrop")
+        for ext in (".jpg", ".jpeg", ".png", ".webp")
+    ]
     for path in candidates:
-        if not is_safe_scan_entry(snapshot.mount_root, path) or path.is_symlink() or not path.is_file():
+        if not is_safe_scan_entry(mount_root, path) or path.is_symlink() or not path.is_file():
             continue
         try:
-            with path.open('rb') as stream:
-                raw = stream.read(8 * 1024 * 1024 + 1)
-            if len(raw) > 8 * 1024 * 1024:
-                continue
-            mime = 'image/jpeg' if raw.startswith(b'\xff\xd8\xff') else 'image/png' if raw.startswith(b'\x89PNG\r\n\x1a\n') else 'image/webp' if raw.startswith(b'RIFF') and raw[8:12] == b'WEBP' else ''
-            if mime:
-                return f'data:{mime};base64,' + base64.b64encode(raw).decode('ascii')
+            with path.open("rb") as stream:
+                raw = stream.read(_MAX_COVER_BYTES + 1)
+            encoded = _encode_image_data_url(raw)
+            if encoded:
+                return encoded
         except OSError:
             continue
-    return ''
+    return ""
+
+
+def _probe_media_for_cover(media: Path, ffprobe_bin: str) -> tuple[int | None, float | None]:
+    """Return (attached_cover_stream_index, duration_sec) via ffprobe."""
+    try:
+        res = subprocess.run(
+            [
+                ffprobe_bin, "-v", "error",
+                "-show_entries", "stream=index,codec_type:stream_tags=mimetype:stream_disposition=attached_pic",
+                "-show_entries", "format=duration",
+                "-of", "json", str(media),
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if res.returncode != 0 or not res.stdout:
+        return None, None
+    try:
+        parsed = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None, None
+    cover_idx: int | None = None
+    for stream in parsed.get("streams") or []:
+        if not isinstance(stream, Mapping):
+            continue
+        disp = stream.get("disposition") or {}
+        tags = stream.get("tags") or {}
+        mimetype = str(tags.get("mimetype") or "").lower()
+        is_attached = bool(disp.get("attached_pic") == 1) or (
+            stream.get("codec_type") == "video" and mimetype.startswith("image/")
+        )
+        if is_attached and isinstance(stream.get("index"), int):
+            cover_idx = stream["index"]
+            break
+    duration_sec: float | None = None
+    raw_dur = (parsed.get("format") or {}).get("duration")
+    if raw_dur is not None:
+        try:
+            dur = float(raw_dur)
+            if dur > 0:
+                duration_sec = dur
+        except (TypeError, ValueError):
+            pass
+    return cover_idx, duration_sec
+
+
+def _run_ffmpeg_cover(ffmpeg_bin: str, args: list[str]) -> bytes:
+    try:
+        res = subprocess.run(
+            [ffmpeg_bin, "-v", "error", "-nostdin", *args],
+            capture_output=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    if res.returncode != 0 or not res.stdout.startswith(b"\xff\xd8\xff"):
+        return b""
+    return res.stdout
+
+
+def _extract_embedded_or_frame_cover(media: Path) -> bytes:
+    """Extract embedded artwork or a representative video frame as JPEG bytes."""
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        return b""
+    ext = media.suffix.lower()
+    out_args = [
+        "-frames:v", "1",
+        "-vf", "scale='min(600,iw)':-2,format=yuvj420p",
+        "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1",
+    ]
+    if ext in AUDIO_EXTENSIONS:
+        return _run_ffmpeg_cover(ffmpeg_bin, ["-i", str(media), "-map", "0:v:0", *out_args])
+    if ext in VIDEO_EXTENSIONS and ext != ".iso":
+        ffprobe_bin = shutil.which("ffprobe")
+        cover_idx, duration_sec = _probe_media_for_cover(media, ffprobe_bin) if ffprobe_bin else (None, None)
+        if cover_idx is not None:
+            raw = _run_ffmpeg_cover(ffmpeg_bin, ["-i", str(media), "-map", f"0:{cover_idx}", *out_args])
+            if raw:
+                return raw
+        if duration_sec is not None and duration_sec > 0:
+            seek_sec = min(max(duration_sec * 0.1, 5.0), 120.0) if duration_sec > 10.0 else duration_sec * 0.5
+        else:
+            seek_sec = 30.0
+        raw = _run_ffmpeg_cover(ffmpeg_bin, ["-ss", f"{seek_sec:.3f}", "-i", str(media), "-map", "0:v:0", *out_args])
+        if raw:
+            return raw
+        return _run_ffmpeg_cover(ffmpeg_bin, ["-i", str(media), "-map", "0:v:0", *out_args])
+    return b""
+
+
+def read_cover(snapshot: LibrarySnapshot, item_id: str, *, cache_dir: Path | None = None) -> str:
+    """Read adjacent artwork or extract embedded/frame cover for an indexed item inside the configured mount."""
+    record = snapshot.records_by_id.get(item_id)
+    if not record or snapshot.mount_root is None:
+        return ""
+    media = Path(record["path"])
+    adjacent = _read_adjacent_cover(snapshot.mount_root, media)
+    if adjacent:
+        return adjacent
+    if not is_safe_scan_entry(snapshot.mount_root, media) or media.is_symlink() or not media.is_file():
+        return ""
+    cache_file: Path | None = None
+    if cache_dir is not None:
+        cache_key = hashlib.sha1(
+            f"{record['path']}|{record.get('mtime', 0)}|{record.get('size_bytes', 0)}".encode("utf-8")
+        ).hexdigest()
+        cache_file = cache_dir / f"{cache_key}.jpg"
+        if cache_file.is_file() and not cache_file.is_symlink():
+            try:
+                with cache_file.open("rb") as stream:
+                    cached_url = _encode_image_data_url(stream.read(_MAX_COVER_BYTES + 1))
+                if cached_url:
+                    return cached_url
+            except OSError:
+                pass
+    raw = _extract_embedded_or_frame_cover(media)
+    encoded = _encode_image_data_url(raw)
+    if encoded and cache_file is not None:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{cache_file.stem}.", suffix=".tmp", dir=str(cache_file.parent))
+            try:
+                os.write(fd, raw)
+            finally:
+                os.close(fd)
+            os.replace(tmp_name, cache_file)
+        except OSError:
+            pass
+    return encoded
 
 
 @dataclass

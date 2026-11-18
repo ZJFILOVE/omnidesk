@@ -10,8 +10,8 @@ vi.mock('../../api', () => ({
   listPlugins: async () => ({ ok: true, available: true, data: { plugins: [] } }),
   callCapability: vi.fn(async (args: { payload?: { action?: string } }) => ({
     ok: true, available: true, data: args.payload?.action === 'list_agents' ? { agents: [
-      { id: 'builtin', name: '内置', available: true }, { id: 'codex', name: 'Codex', available: true },
-    ] } : { reply: 'Codex 回答', served_model: 'Codex', sessions: [] },
+      { id: 'codex', name: 'Codex · MCP 工具', available: true }, { id: 'agy', name: 'AGY · MCP 工具', available: true },
+    ] } : { reply: 'AGY 回答', served_model: 'AGY', sessions: [] },
   })),
 }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -21,11 +21,11 @@ it('routes the selected agent with page references and synchronizes the other se
   }));
   const other = renderHook(() => useAgentSelection());
   await waitFor(() => expect(result.current.agentSelection.options).toHaveLength(2));
-  act(() => result.current.agentSelection.select('codex'));
-  expect(other.result.current.agent.id).toBe('codex');
+  act(() => result.current.agentSelection.select('agy'));
+  expect(other.result.current.agent.id).toBe('agy');
   await act(async () => result.current.submitPrompt('分析当前页'));
   expect(callCapability).toHaveBeenCalledWith(expect.objectContaining({ capability: 'ai.agent.v1', providerPluginId: 'plugin-magpie-agent', payload: expect.objectContaining({
-    agent_id: 'codex', prompt: '分析当前页', context_refs: [expect.objectContaining({ provider_plugin_id: 'plugin-pdf-babeldoc', payload: expect.objectContaining({ page_number: 12 }) })],
+    agent_id: 'agy', prompt: '分析当前页', context_refs: [expect.objectContaining({ provider_plugin_id: 'plugin-pdf-babeldoc', payload: expect.objectContaining({ page_number: 12 }) })],
   }) }));
-  expect(result.current.messages.at(-1)?.content).toBe('Codex 回答');
+  expect(result.current.messages.at(-1)?.content).toBe('AGY 回答');
 });

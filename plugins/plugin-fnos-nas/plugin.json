@@ -23,6 +23,7 @@
   "permissions": [
     "fs:user_mount",
     "network:lan",
+    "process:ffmpeg",
     "config:read",
     "config:write",
     "secret:vault"

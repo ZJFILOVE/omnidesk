@@ -60,3 +60,25 @@ async def test_mcp_context_returns_image_content_and_accepts_cursor_only(tmp_pat
     result = json.loads(output.getvalue())['result']
     assert result['content'][1] == {'type': 'image', 'mimeType': 'image/png', 'data': 'aW1n'}
     assert 'base64' not in result['content'][0]['text']
+
+
+@pytest.mark.asyncio
+async def test_mcp_allowed_tools_filters_list_and_blocks_disallowed_calls(tmp_path):
+    requests = [
+        {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'},
+        {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'omnidesk_call_capability', 'arguments': {'capability_id': 'demo.echo.v1'}}},
+    ]
+    output = io.StringIO()
+    paths = OmnideskPaths.from_env({'XDG_DATA_HOME': str(tmp_path/'data'), 'XDG_CONFIG_HOME': str(tmp_path/'config'), 'XDG_RUNTIME_DIR': str(tmp_path/'runtime')})
+    await serve_mcp_stdio(
+        paths=paths,
+        plugin_dirs=[],
+        socket_path=str(tmp_path/'socket'),
+        allowed_tools=['omnidesk_list_plugins', 'omnidesk_collect_context'],
+        stdin=io.StringIO('\n'.join(json.dumps(req) for req in requests)),
+        stdout=output,
+    )
+    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [t['name'] for t in responses[0]['result']['tools']] == ['omnidesk_list_plugins', 'omnidesk_collect_context']
+    assert responses[1]['error']['code'] == -32602
+    assert 'not enabled' in responses[1]['error']['message']

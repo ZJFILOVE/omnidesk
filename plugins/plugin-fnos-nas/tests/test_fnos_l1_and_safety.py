@@ -50,6 +50,72 @@ def test_cover_is_read_from_indexed_media_directory_and_cannot_escape(tmp_path):
     assert module.library.read_cover(snapshot, '../../private.jpg') == ''
 
 
+def test_cover_extracts_video_frame_and_uses_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+
+    module = _load_plugin_module()
+    mount = tmp_path / "mount"
+    folder = mount / "Movies" / "Insomnia (2002)"
+    folder.mkdir(parents=True)
+    video = folder / "Insomnia.2002.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=teal:s=640x360:d=2", "-y", str(video)],
+        check=True,
+    )
+
+    snapshot = module.library.scan_library(str(mount), {})
+    ident = snapshot.items[0].id
+    cache_dir = tmp_path / "cache"
+
+    data_url = module.library.read_cover(snapshot, ident, cache_dir=cache_dir)
+    assert data_url.startswith("data:image/jpeg;base64,")
+    assert len(list(cache_dir.glob("*.jpg"))) == 1
+
+    # Second call must hit cache even if ffmpeg is unavailable
+    monkeypatch.setattr(module.library.shutil, "which", lambda _name: None)
+    cached_url = module.library.read_cover(snapshot, ident, cache_dir=cache_dir)
+    assert cached_url == data_url
+
+
+def test_cover_extracts_audio_embedded_artwork(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+
+    module = _load_plugin_module()
+    mount = tmp_path / "mount"
+    folder = mount / "Music" / "Album"
+    folder.mkdir(parents=True)
+    art = tmp_path / "art.jpg"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=orange:s=300x300:d=1", "-frames:v", "1", "-y", str(art)],
+        check=True,
+    )
+    track = folder / "01.track.mp3"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo:d=1",
+            "-i", str(art),
+            "-map", "0:a", "-map", "1:v",
+            "-c:a", "libmp3lame", "-c:v", "mjpeg", "-disposition:v:0", "attached_pic",
+            "-y", str(track),
+        ],
+        check=True,
+    )
+
+    snapshot = module.library.scan_library(str(mount), {})
+    ident = snapshot.items[0].id
+    data_url = module.library.read_cover(snapshot, ident)
+    assert data_url.startswith("data:image/jpeg;base64,")
+
+
 def test_manifest_v2_schema_and_zero_hardcoded_secrets(tmp_path: Path) -> None:
     manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     schema = json.loads((REPO_ROOT / "docs" / "schemas" / "plugin-manifest.schema.json").read_text(encoding="utf-8"))
