@@ -33,9 +33,29 @@ async def auth_action(plugin, action):
         if not ctx.capabilities.has('web.embed.v1'):
             return CapabilityResult.fail('请启用 Chrome 插件', error_code='not_configured')
         return await ctx.capabilities.call('web.embed.v1', {'action': 'open', 'url': 'https://www.youtube.com/'})
+    if action == 'open_api_console':
+        if not ctx.capabilities.has('web.embed.v1'):
+            return CapabilityResult.fail('请启用 Chrome 插件', error_code='not_configured')
+        return await ctx.capabilities.call(
+            'web.embed.v1',
+            {'action': 'open', 'url': 'https://console.cloud.google.com/apis/credentials'},
+        )
     cookie, source = await resolve_cookie(ctx)
     has_session = session_cookie_present(cookie)
-    return CapabilityResult.ok({'cookie_configured': bool(cookie), 'cookie_source': source,
-        'session_cookie_present': has_session, 'oauth_configured': bool(plugin.oauth_token()),
+    if hasattr(plugin, '_cookie_logged_in'):
+        plugin._cookie_logged_in = has_session
+    if hasattr(plugin, '_cookie_source'):
+        plugin._cookie_source = source
+    return CapabilityResult.ok({
+        'cookie_configured': bool(cookie),
+        'cookie_source': source,
+        'session_cookie_present': has_session,
+        'oauth_configured': bool(plugin.oauth_token()),
         'status': 'cookie_available' if has_session else 'guest',
-        'message': '已读取浏览器登录 Cookie；实际可用性以播放解析结果为准' if has_session else '请在 Chrome 登录 YouTube，再返回刷新登录状态'})
+        'message': (
+            f'已通过 {source} 读取 YouTube 登录 Cookie（可用于播放、订阅、稍后再看与推荐）。'
+            'Chrome Cookie 中不包含 Data API Key / OAuth Token，这两项为可选 Google Cloud 开发者凭证。'
+            if has_session
+            else '未检测到 YouTube 登录 Cookie，请在 Chrome 登录 YouTube 后再点击刷新登录状态'
+        ),
+    })

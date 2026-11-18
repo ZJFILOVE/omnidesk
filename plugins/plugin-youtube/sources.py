@@ -9,6 +9,7 @@ from omnidesk_sdk import ChapterSegment, LyricLine, MediaItem, MediaSource, Plug
 
 if __package__:
     from .yt_api import YouTubeApiClient, parse_description_chapters
+    from .yt_auth import resolve_cookie, session_cookie_present
     from .yt_dlp import fetch_video_info, run_ytdlp_json
     from .yt_library import load_items
     from .yt_mappers import (
@@ -21,6 +22,7 @@ if __package__:
     from .yt_security import extract_video_id, validate_channel_id, validate_playlist_id
 else:
     from yt_api import YouTubeApiClient, parse_description_chapters
+    from yt_auth import resolve_cookie, session_cookie_present
     from yt_dlp import fetch_video_info, run_ytdlp_json
     from yt_library import load_items
     from yt_mappers import (
@@ -163,6 +165,12 @@ class YouTubeMediaSource(MediaSource):
             return await self._fetch_via_ytdlp_list(url, category=category, start=(page - 1) * per_page + 1, end=page * per_page)
         return []
 
+    async def _has_session_cookie(self) -> bool:
+        if self._plugin.ctx is None:
+            return False
+        cookie, _ = await resolve_cookie(self._plugin.ctx)
+        return session_cookie_present(cookie)
+
     async def _fetch_via_ytdlp_list(self, target: str, *, category: str, start: int, end: int) -> list[MediaItem]:
         if self._plugin.ctx is None:
             return []
@@ -221,6 +229,16 @@ class YouTubeMediaSource(MediaSource):
             oauth = self._plugin.oauth_token()
             channel_ids, playlist_ids = list(self._plugin.configured_channel_ids()), list(self._plugin.configured_playlist_ids())
             if not oauth and not channel_ids and not playlist_ids:
+                if await self._has_session_cookie():
+                    items = await self._fetch_via_ytdlp_list(
+                        "https://www.youtube.com/feed/subscriptions",
+                        category=cat,
+                        start=(page - 1) * per_page + 1,
+                        end=page * per_page,
+                    )
+                    if items:
+                        self.remember_items(items)
+                    return items
                 return []
             if oauth:
                 subs, err = await self._plugin.api_client.fetch_subscriptions(oauth_token=oauth, api_key=self._plugin.api_key(), timeout_sec=self._plugin.timeout_sec())
@@ -254,7 +272,7 @@ class YouTubeMediaSource(MediaSource):
                 ]
             items.extend(local_items[(page - 1) * per_page : page * per_page])
             targets = [query.strip()] if query.strip() else self._plugin.configured_playlist_ids()
-            if not targets and self._plugin.oauth_token():
+            if not targets and (self._plugin.oauth_token() or await self._has_session_cookie()):
                 targets = ["WL"]
             for pid in targets:
                 items.extend(
@@ -288,17 +306,25 @@ class YouTubeMediaSource(MediaSource):
                     self._page_tokens[(cat, "", page + 1)] = next_tok
                 items = self._map_api_items(raw_items, category=cat)
             else:
-                fallback = (
-                    _PODCAST_QUERIES[(page - 1) % len(_PODCAST_QUERIES)]
-                    if cat == "podcast"
-                    else f"science technology documentary {self._plugin.region()}"
-                )
-                items = await self._fetch_via_ytdlp_list(
-                    f"ytsearch{page * per_page}:{fallback}",
-                    category=cat,
-                    start=(page - 1) * per_page + 1,
-                    end=page * per_page,
-                )
+                if cat == "trending" and await self._has_session_cookie():
+                    items = await self._fetch_via_ytdlp_list(
+                        "https://www.youtube.com/",
+                        category=cat,
+                        start=(page - 1) * per_page + 1,
+                        end=page * per_page,
+                    )
+                if not items:
+                    fallback = (
+                        _PODCAST_QUERIES[(page - 1) % len(_PODCAST_QUERIES)]
+                        if cat == "podcast"
+                        else f"science technology documentary {self._plugin.region()}"
+                    )
+                    items = await self._fetch_via_ytdlp_list(
+                        f"ytsearch{page * per_page}:{fallback}",
+                        category=cat,
+                        start=(page - 1) * per_page + 1,
+                        end=page * per_page,
+                    )
 
         if items:
             self.remember_items(items)

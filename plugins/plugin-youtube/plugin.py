@@ -67,6 +67,8 @@ class YouTubePlugin(BasePlugin):
         self.media_source = YouTubeMediaSource(self)
         self._last_action_status = "ready"
         self._tab_status = ""
+        self._cookie_logged_in = False
+        self._cookie_source = "none"
 
     async def on_load(self, ctx: PluginContext) -> None:
         """Register MediaSource, capability handler, and declarative workspace tab (< 50ms)."""
@@ -91,6 +93,19 @@ class YouTubePlugin(BasePlugin):
         except YouTubePathSafetyError:
             cache_ok = False
         plugin_id = self.ctx.plugin_id if self.ctx is not None else "plugin-youtube"
+        cookie_configured = False
+        has_session = False
+        cookie_source = "none"
+        if self.ctx is not None:
+            if __package__:
+                from .yt_auth import resolve_cookie, session_cookie_present
+            else:
+                from yt_auth import resolve_cookie, session_cookie_present
+            cookie, cookie_source = await resolve_cookie(self.ctx)
+            cookie_configured = bool(cookie)
+            has_session = session_cookie_present(cookie)
+            self._cookie_logged_in = has_session
+            self._cookie_source = cookie_source
         return {
             "ok": True,
             "plugin_id": plugin_id,
@@ -99,6 +114,9 @@ class YouTubePlugin(BasePlugin):
             "ytdlp_found": bool(resolved),
             "api_key_configured": bool(self.api_key()),
             "oauth_configured": bool(self.oauth_token()),
+            "cookie_configured": cookie_configured,
+            "session_cookie_present": has_session,
+            "cookie_source": cookie_source,
             "cache_dir_safe": cache_ok,
         }
 
@@ -174,7 +192,7 @@ class YouTubePlugin(BasePlugin):
         """Dispatch `media.youtube.v1` RPC actions with fail-closed error handling."""
         payload = dict(req) if req is not None else {}
         action = str(payload.get("action") or "status").strip()
-        if action in {'open_login', 'auth_status'}:
+        if action in {"open_login", "open_api_console", "auth_status"}:
             if __package__:
                 from .yt_auth import auth_action
             else:
@@ -361,29 +379,44 @@ class YouTubePlugin(BasePlugin):
         if self.ctx is None:
             return self._fail("插件尚未加载", error_code="not_configured")
         list_res = await self.list_subscriptions(req)
+        using_cookie_feed = False
         if not list_res.ok:
-            return list_res
+            if list_res.data.get("error_code") == "not_configured" and await self.media_source._has_session_cookie():
+                using_cookie_feed = True
+            else:
+                return list_res
         try:
             cache_root = resolve_safe_cache_dir(self.cache_dir_config(), default_cache_root(self.ctx))
             snapshot_path = safe_cache_file(cache_root, "subscriptions.json")
         except YouTubePathSafetyError as exc:
             return self._fail(str(exc), error_code="path_safety")
 
-        channels, playlists = list(list_res.data.get("channel_ids") or []), list(list_res.data.get("playlist_ids") or [])
-        items = []
-        for cid in channels:
-            items.extend(await self.media_source.fetch_from_target("channel", cid, category="subscriptions", per_page=10))
-        for pid in playlists:
-            items.extend(await self.media_source.fetch_from_target("playlist", pid, category="subscriptions", per_page=10))
+        if using_cookie_feed:
+            channels, playlists = [], []
+            subscriptions_meta: list[dict[str, Any]] = []
+            items = await self.media_source._fetch_via_ytdlp_list(
+                "https://www.youtube.com/feed/subscriptions",
+                category="subscriptions",
+                start=1,
+                end=20,
+            )
+        else:
+            channels, playlists = list(list_res.data.get("channel_ids") or []), list(list_res.data.get("playlist_ids") or [])
+            subscriptions_meta = list(list_res.data.get("subscriptions") or [])
+            items = []
+            for cid in channels:
+                items.extend(await self.media_source.fetch_from_target("channel", cid, category="subscriptions", per_page=10))
+            for pid in playlists:
+                items.extend(await self.media_source.fetch_from_target("playlist", pid, category="subscriptions", per_page=10))
         if not items and self.media_source.last_error:
             return self._fail_from_dict(self.media_source.last_error, "同步 YouTube 订阅失败")
 
         self.media_source.remember_items(items)
         serialized = [m.model_dump() for m in items]
-        atomic_write_json(snapshot_path, {"subscriptions": list_res.data.get("subscriptions", []), "playlist_ids": playlists, "items": serialized})
+        atomic_write_json(snapshot_path, {"subscriptions": subscriptions_meta, "playlist_ids": playlists, "items": serialized})
         await self.ctx.emit("youtube.subscriptions.synced", {"count": len(serialized), "channel_count": len(channels)})
         return CapabilityResult.ok(
-            {"subscriptions": list_res.data.get("subscriptions", []), "playlist_ids": playlists, "items": serialized, "count": len(serialized), "snapshot_path": str(snapshot_path)}
+            {"subscriptions": subscriptions_meta, "playlist_ids": playlists, "items": serialized, "count": len(serialized), "snapshot_path": str(snapshot_path)}
         )
 
     async def fetch_chapters(self, req: Mapping[str, Any]) -> CapabilityResult:

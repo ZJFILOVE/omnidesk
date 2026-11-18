@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { getTauriGlobal } from '../../api';
+import { getTauriGlobal, type MpvPlaybackState } from '../../api';
 import { TranslationButton } from '../../components/TranslationContext';
 import { MediaCover } from '../../components/MediaCover';
 import {
@@ -40,6 +40,12 @@ function formatSpeed(speed: number): string {
   return `${Number(speed.toFixed(2))}×`;
 }
 
+function formatBitrate(bps: number): string {
+  if (!Number.isFinite(bps) || bps <= 0) return '—';
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(2)} Mbps`;
+  return `${Math.round(bps / 1000)} kbps`;
+}
+
 export interface MediaInspectorProps {
   item: MediaItem;
   playing: boolean;
@@ -48,6 +54,7 @@ export interface MediaInspectorProps {
   volume?: number;
   speed?: number;
   playbackBackend?: 'mpv' | 'libmpv' | 'preview';
+  playbackStats?: MpvPlaybackState | null;
   videoSurface?: React.ReactNode;
   activeLyricIndex: number;
   lyricsLoading?: boolean;
@@ -74,6 +81,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   volume = 85,
   speed = 1,
   playbackBackend = 'preview',
+  playbackStats = null,
   videoSurface,
   activeLyricIndex,
   lyricsLoading = false,
@@ -104,6 +112,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   }, [item.id, item.lyrics, activeLyricIndex, lyricsLoading]);
   const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
   const [videoFullscreen, setVideoFullscreen] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const toggleVideoFullscreen = () => {
     setVideoFullscreen((prev) => {
       const next = !prev;
@@ -127,6 +136,18 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         setVideoFullscreen(false);
         const invoke = getTauriGlobal()?.core?.invoke;
         if (invoke) void invoke('player_fullscreen').catch(() => {});
+        return;
+      }
+      if (
+        e.key === 'F3' &&
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.repeat
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowStats((prev) => !prev);
         return;
       }
       if (
@@ -285,6 +306,18 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   </span>
                   <button
                     type="button"
+                    onClick={() => setShowStats((prev) => !prev)}
+                    aria-label={showStats ? '隐藏播放统计' : '显示播放统计'}
+                    aria-pressed={showStats}
+                    title="码率与播放统计 (Ctrl+F3)"
+                    className={`inline-flex cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 font-mono text-[12px] text-white transition-colors ${
+                      showStats ? 'bg-[var(--domain-media)]' : 'bg-black/55 hover:bg-black/80'
+                    }`}
+                  >
+                    <span>统计 (Ctrl+F3)</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={toggleVideoFullscreen}
                     aria-label={videoFullscreen ? '退出全屏' : '全屏播放'}
                     title={videoFullscreen ? '退出全屏 (f / Esc)' : '全屏播放 (f)'}
@@ -296,6 +329,50 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 </div>
               </div>
             </div>
+
+            {showStats ? (
+              <div
+                data-testid="mpv-stats-overlay"
+                className="pointer-events-none my-auto max-w-md self-start rounded-xl border border-white/15 bg-black/78 px-4 py-3 font-mono text-[12px] leading-relaxed text-white/95 shadow-xl backdrop-blur-sm"
+              >
+                <div className="mb-1.5 flex items-center justify-between gap-4 border-b border-white/15 pb-1 text-[11px] tracking-wider text-white/70 uppercase">
+                  <span>Playback Stats ({playbackBackend === 'libmpv' ? 'libmpv' : playbackBackend === 'mpv' ? 'mpv' : 'preview'})</span>
+                  <span>Ctrl+F3</span>
+                </div>
+                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5">
+                  <span className="text-white/60">Video</span>
+                  <span>
+                    {playbackStats?.videoCodec || '—'}
+                    {playbackStats && playbackStats.videoWidth > 0 && playbackStats.videoHeight > 0
+                      ? ` · ${playbackStats.videoWidth}×${playbackStats.videoHeight}`
+                      : ''}
+                    {playbackStats && playbackStats.fps > 0 ? ` @ ${playbackStats.fps.toFixed(2)} fps` : ''}
+                  </span>
+                  <span className="text-white/60">Bitrate</span>
+                  <span>{formatBitrate(playbackStats?.videoBitrate ?? 0)}</span>
+                  <span className="text-white/60">Hwdec</span>
+                  <span>
+                    {playbackStats?.hwdecActive && playbackStats.hwdecCurrent
+                      ? playbackStats.hwdecCurrent
+                      : 'software / no'}
+                  </span>
+                  <span className="text-white/60">Audio</span>
+                  <span>
+                    {playbackStats?.audioCodec || '—'}
+                    {playbackStats?.audioSamplerate ? ` · ${playbackStats.audioSamplerate} Hz` : ''}
+                    {playbackStats?.audioChannels ? ` · ${playbackStats.audioChannels} ch` : ''}
+                  </span>
+                  <span className="text-white/60">Dropped</span>
+                  <span>
+                    dec {playbackStats?.decoderDropFrames ?? 0} / out {playbackStats?.outputDropFrames ?? 0}
+                  </span>
+                  <span className="text-white/60">Cache</span>
+                  <span>
+                    {(playbackStats?.cacheDurationSec ?? 0).toFixed(1)}s · {formatSpeed(playbackStats?.speed ?? speed)}
+                  </span>
+                </div>
+              </div>
+            ) : null}
 
             {videoFullscreen ? (
               <div className="flex items-center gap-3 rounded-xl bg-black/65 px-4 py-2.5 backdrop-blur-xs">

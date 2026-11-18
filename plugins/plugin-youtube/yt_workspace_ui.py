@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+if __package__:
+    from .yt_auth import session_cookie_present
+else:
+    from yt_auth import session_cookie_present
+
 if TYPE_CHECKING:
     from plugin import YouTubePlugin
 
@@ -21,6 +26,7 @@ _CATEGORY_LABELS = {
 _QUALITY_OPTIONS = ["best", "2160p", "1440p", "1080p", "720p", "480p", "360p", "audio"]
 SUPPORTED_ACTIONS = (
     "open_login",
+    "open_api_console",
     "auth_status",
     "status",
     "categories",
@@ -47,23 +53,34 @@ def build_ui_schema(plugin: YouTubePlugin) -> dict[str, Any]:
     categories = plugin.media_source.categories()
     history = plugin.library_items("history")[:8]
     watch_later = plugin.library_items("watch_later")[:8]
+    vault_cookie = str(plugin.ctx.get_secret("cookie_header") or "")
+    vault_logged_in = session_cookie_present(vault_cookie)
+    cookie_logged_in = bool(getattr(plugin, "_cookie_logged_in", False)) or vault_logged_in
+    cookie_source = str(getattr(plugin, "_cookie_source", "none") or "none")
+    if cookie_logged_in:
+        cookie_label = f"已登录 ({cookie_source if cookie_source != 'none' else 'vault'})"
+    else:
+        cookie_label = "未登录（请先在 Chrome 登录并刷新）"
     children: list[dict[str, Any]] = [
         {"type": "ActionRow", "actions": [
-            {"id": "open_login", "label": "在 Chrome 登录 YouTube"},
-            {"id": "auth_status", "label": "已登录，刷新登录状态"},
+            {"id": "open_login", "label": "在 Chrome 登录 YouTube", "variant": "primary"},
+            {"id": "auth_status", "label": "已登录，刷新登录状态", "variant": "secondary"},
+            {"id": "open_api_console", "label": "获取 API Key / OAuth 凭证", "variant": "secondary"},
         ]},
         {
             "type": "Markdown",
             "id": "youtube-intro",
             "content": (
-                "YouTube 使用 **yt-dlp** 解析真实音视频流，Data API/OAuth 用于订阅、"
-                "热门与搜索。历史与稍后再看保存在插件数据目录，播放仍在桌面 libmpv。"
+                "YouTube 使用 **yt-dlp** 配合 Chrome 登录 Cookie 解析音视频流、个人订阅、稍后再看与推荐；"
+                "`Data API Key` / `OAuth Token` 仅用于官方 Google Data API v3 配额（Chrome Cookie 中不包含这两项，"
+                "如需使用可点击上方「获取 API Key / OAuth 凭证」前往 Google Cloud 控制台创建）。"
             ),
         },
         {
             "type": "KeyValue",
             "id": "youtube-status",
             "items": [
+                {"key": "cookie_login", "label": "Chrome / Cookie 登录", "value": cookie_label},
                 {"key": "api_key", "label": "Data API Key", "value": "已配置" if plugin.api_key() else "未配置"},
                 {"key": "oauth", "label": "OAuth Token", "value": "已配置" if plugin.oauth_token() else "未配置"},
                 {"key": "ytdlp", "label": "yt-dlp", "value": plugin.ytdlp_bin() or "未配置"},
@@ -197,8 +214,15 @@ async def handle_tab_action(
     payload = {**(dict(state) if state is not None else {}), "action": action_id}
     res = await plugin.handle_action(payload)
     if action_id not in {"status", "history_clear", "watch_later_clear"}:
-        plugin._last_action_status = res.error if not res.ok else "操作完成"
-    plugin._tab_status = res.error if not res.ok else str(res.data.get("status") or "")
+        if action_id == "auth_status" and res.ok:
+            plugin._last_action_status = (
+                f"已登录 ({res.data.get('cookie_source') or 'cookie'})"
+                if res.data.get("session_cookie_present")
+                else "guest"
+            )
+        else:
+            plugin._last_action_status = res.error if not res.ok else "操作完成"
+    plugin._tab_status = res.error if not res.ok else str(res.data.get("message") or res.data.get("status") or "")
     return {
         "ok": res.ok,
         "data": res.data,

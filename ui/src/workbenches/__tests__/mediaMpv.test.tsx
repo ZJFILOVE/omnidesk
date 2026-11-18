@@ -360,5 +360,13 @@ describe('MediaWorkbench real mpv integration', () => {
       expect(screen.getByText('LIBMPV')).not.toBeNull();
     });
     expect(handlers.has(MPV_FRAME_CHANNEL)).toBe(true);
+
+    expect(screen.queryByTestId('mpv-stats-overlay')).toBeNull();
+    fireEvent.keyDown(window, { key: 'F3', ctrlKey: true });
+    const overlay = await screen.findByTestId('mpv-stats-overlay');
+    expect(overlay.textContent).toContain('Playback Stats (libmpv)');
+    expect(overlay.textContent).toContain('vaapi');
+    fireEvent.keyDown(window, { key: 'F3', ctrlKey: true });
+    expect(screen.queryByTestId('mpv-stats-overlay')).toBeNull();
   });
 });

@@ -637,6 +637,7 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
                 volume={volume}
                 speed={speed}
                 playbackBackend={mpv.embedded ? 'libmpv' : mpv.enabled ? 'mpv' : 'preview'}
+                playbackStats={mpv.state}
                 videoSurface={
                   selectedItem.kind === 'video' && mpv.embedded ? (
                     <MpvCanvas active={mpv.embedded && isActive} fps={mpv.state?.fps} />

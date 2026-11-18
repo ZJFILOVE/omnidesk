@@ -267,3 +267,52 @@ async def test_browser_login_overrides_stale_vault_but_guest_cookie_does_not():
     result = await auth_action(SimpleNamespace(ctx=ctx, oauth_token=lambda: ''), 'auth_status')
     assert result.ok and result.data['session_cookie_present']
     assert 'SID=old' not in str(result.data)
+
+
+@pytest.mark.asyncio
+async def test_cookie_login_powers_feeds_and_api_console_shortcut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+    from omnidesk_sdk import CapabilityResult
+
+    module = _load_plugin_module()
+    manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    plugin = module.YouTubePlugin()
+    ctx = PluginContext(manifest["id"], plugin_dir=PLUGIN_DIR, data_dir=tmp_path / "data", config_dir=tmp_path / "cfg", config_schema=manifest["config_schema"])
+    await invoke_lifecycle_hook(plugin.on_load, ctx)
+
+    embed_calls: list[dict[str, object]] = []
+
+    async def _fake_embed(req):
+        embed_calls.append(dict(req))
+        return CapabilityResult.ok({"opened": True})
+
+    async def _fake_cookies(_req):
+        return CapabilityResult.ok({"cookie_header": "SID=fresh-cookie"})
+
+    ctx.capabilities.register("web.embed.v1", _fake_embed, plugin_id="plugin-chrome-web")
+    ctx.capabilities.register("web.cookies.v1", _fake_cookies, plugin_id="plugin-chrome-web")
+
+    console_res = await ctx.capabilities.call("media.youtube.v1", {"action": "open_api_console"})
+    assert console_res.ok and embed_calls[-1]["url"] == "https://console.cloud.google.com/apis/credentials"
+
+    tab_res = await plugin.handle_tab_action("auth_status")
+    assert tab_res["ok"] is True
+    kv = next(c for c in tab_res["ui_schema"]["children"] if c.get("id") == "youtube-status")
+    cookie_row = next(item for item in kv["items"] if item["key"] == "cookie_login")
+    assert "已登录" in cookie_row["value"]
+
+    seen_targets: list[str] = []
+
+    async def _fake_ytdlp_list(target: str, *, category: str, start: int, end: int):
+        seen_targets.append(target)
+        from omnidesk_sdk import MediaItem
+        return [MediaItem(id="dQw4w9WgXcQ", source_id="plugin-youtube", title=f"{category}-item", play_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")]
+
+    monkeypatch.setattr(plugin.media_source, "_fetch_via_ytdlp_list", _fake_ytdlp_list)
+    subs = await plugin.media_source.fetch_items("subscriptions", "")
+    wl = await plugin.media_source.fetch_items("watch_later", "")
+    assert len(subs) == 1 and "https://www.youtube.com/feed/subscriptions" in seen_targets
+    assert len(wl) == 1 and "https://www.youtube.com/playlist?list=WL" in seen_targets
+
+    sync_res = await ctx.capabilities.call("media.youtube.v1", {"action": "sync_subscriptions"})
+    assert sync_res.ok and sync_res.data["count"] == 1
