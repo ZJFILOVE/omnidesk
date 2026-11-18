@@ -105,14 +105,33 @@ async def resolve_via_playurl(
     curl_bin: str = "curl",
     plugin: BilibiliPlugin | None = None,
 ) -> dict[str, Any]:
-    """Resolve video/audio streams via Bilibili `/x/player/wbi/playurl` or live playInfo API."""
+    """Resolve video/audio streams via Android/TV PlayViewUnite first (when authorized), falling back to Web playurl."""
     if target.get("room_id") and not target.get("bvid") and not target.get("aid"):
         return await _resolve_live_playurl(client, int(target["room_id"]), cookie=cookie, req_label=req_label, req_qn=req_qn)
     cid, title = await resolve_target_cid(client, target, cookie)
+    tried_android = False
+    if plugin is not None and unlock_hd and android_token and cid > 0:
+        tried_android = True
+        android = await _try_android_stream(
+            plugin,
+            target=target,
+            aid=target.get("aid"),
+            cid=cid,
+            req_qn=req_qn,
+            current_best=0,
+            android_token=android_token,
+            unlock_hd=unlock_hd,
+            preferred_codec=preferred_codec,
+            proxy=proxy,
+            grpc_endpoint=grpc_endpoint,
+            curl_bin=curl_bin,
+        )
+        if android is not None:
+            return {**android, "cid": cid, "title": title}
     try:
         data = await client.fetch_playurl(bvid=target.get("bvid", ""), aid=target.get("aid"), cid=cid, qn=req_qn or 127, cookie=cookie)
     except BilibiliApiError as exc:
-        if exc.error_code in {"drm_protected", "not_found", "cancelled"}:
+        if exc.error_code in {"drm_protected", "not_found", "cancelled"} or tried_android:
             raise
         android = await _try_android_stream(
             plugin, target=target, aid=target.get("aid"), cid=cid,
@@ -174,29 +193,30 @@ async def resolve_via_playurl(
         has_exact = (req_qn in video_qns) or (bool(progressive) and actual_qn == req_qn)
         accepted = (not accept_qns) or (req_qn in accept_qns)
         if not has_exact or not accepted:
-            android = await _try_android_stream(
-                plugin,
-                target=target,
-                aid=target.get("aid"),
-                cid=cid,
-                req_qn=req_qn,
-                current_best=current_best,
-                android_token=android_token,
-                unlock_hd=unlock_hd,
-                preferred_codec=preferred_codec,
-                proxy=proxy,
-                grpc_endpoint=grpc_endpoint,
-                curl_bin=curl_bin,
-            )
-            if android is not None:
-                return {**android, "cid": cid, "title": title}
+            if not tried_android:
+                android = await _try_android_stream(
+                    plugin,
+                    target=target,
+                    aid=target.get("aid"),
+                    cid=cid,
+                    req_qn=req_qn,
+                    current_best=current_best,
+                    android_token=android_token,
+                    unlock_hd=unlock_hd,
+                    preferred_codec=preferred_codec,
+                    proxy=proxy,
+                    grpc_endpoint=grpc_endpoint,
+                    curl_bin=curl_bin,
+                )
+                if android is not None:
+                    return {**android, "cid": cid, "title": title}
             avail = [QN_TO_QUALITY.get(q, str(q)) for q in sorted(accept_qns or video_qns, reverse=True)]
             hint = "" if android_token else "；4K/HDR 可能需要在插件页签授权 Android/TV 会话"
             raise BilibiliApiError(
                 f"请求的清晰度 {req_label} (qn={req_qn}) 不可用，可用清晰度: {', '.join(avail) or 'none'}{hint}",
                 error_code="quality_unavailable",
             )
-    elif unlock_hd and android_token and cid:
+    elif not tried_android and unlock_hd and android_token and cid:
         android = await _try_android_stream(
             plugin,
             target=target,

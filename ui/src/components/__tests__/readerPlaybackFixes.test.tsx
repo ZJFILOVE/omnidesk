@@ -75,3 +75,45 @@ it('recovers failed Shuiyuan images using the authenticated plugin', async () =>
   await waitFor(() => expect(screen.getByRole('img').getAttribute('src')).toBe('data:image/png;base64,aGVsbG8='));
   expect(callCapability).toHaveBeenCalledWith(expect.objectContaining({ providerPluginId: 'plugin-shuiyuan', payload: { action: 'image', url } }));
 });
+
+it('toggles video fullscreen with f and exits with f or Escape', () => {
+  const noop = vi.fn();
+  const bubbleListener = vi.fn();
+  window.addEventListener('keydown', bubbleListener);
+  try {
+    const item = { ...MEDIA_ITEMS[0], kind: 'video' as const };
+    render(
+      <MediaInspector
+        item={item}
+        playing={false}
+        currentSec={0}
+        activeLyricIndex={-1}
+        nextSponsorSegment={null}
+        inEphemeralQueue={false}
+        activeFocusId="media:player:play"
+        onFocus={noop}
+        onTogglePlay={noop}
+        onSeek={noop}
+        onSkipSponsor={noop}
+        onQueueEphemeral={noop}
+        onStatusChange={noop}
+      />,
+    );
+    expect(screen.getByRole('button', { name: '全屏播放' })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: 'f' });
+    expect(screen.getByRole('button', { name: '退出全屏' })).toBeTruthy();
+    expect(bubbleListener).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: 'f' });
+    expect(screen.getByRole('button', { name: '全屏播放' })).toBeTruthy();
+    expect(bubbleListener).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: 'f' });
+    expect(screen.getByRole('button', { name: '退出全屏' })).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('button', { name: '全屏播放' })).toBeTruthy();
+  } finally {
+    window.removeEventListener('keydown', bubbleListener);
+  }
+});

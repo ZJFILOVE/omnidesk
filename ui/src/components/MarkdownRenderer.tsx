@@ -6,7 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import { ExternalLink } from './ExternalLink';
-import { ArticleImage } from './ArticleImage';
+import { ArticleImage, InlineEmoji } from './ArticleImage';
 import {
   highlightCode,
   isExternalUrl,
@@ -192,6 +192,12 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
               [已拦截不安全图片{alt ? `: ${alt}` : ''}]
             </span>
           );
+        }
+        const isEmoji =
+          title === 'emoji' ||
+          Boolean(alt && /^:[a-z0-9_+-]+:$/i.test(alt.trim()) && safeSrc.includes('/emoji/'));
+        if (isEmoji) {
+          return <InlineEmoji url={safeSrc} alt={alt ?? ''} />;
         }
         return <ArticleImage url={safeSrc} alt={alt} caption={title} inline />;
       },

@@ -64,3 +64,30 @@ async def test_auto_mode_does_not_bypass_native_android_when_ytdlp_exists(monkey
     native.assert_awaited_once()
     extractor.assert_not_awaited()
     assert 'Referer' not in result.data['headers']
+
+
+@pytest.mark.asyncio
+async def test_android_path_is_used_by_default_before_web_playurl(monkeypatch):
+    client = SimpleNamespace(
+        allowed_loopback_origins=frozenset(),
+        fetch_pagelist=AsyncMock(return_value=[{'cid': 99}]),
+        fetch_view=AsyncMock(return_value={'aid': 42}),
+        fetch_playurl=AsyncMock(),
+    )
+    plugin = SimpleNamespace(_build_client=lambda: client, resolve_cookie=AsyncMock(return_value=('session', 'vault')))
+    android = AsyncMock(return_value={'qn': 80, 'quality': '1080p', 'source': 'android_playview', 'video_url': 'https://upos.bilivideo.com/1080.m4s'})
+    monkeypatch.setattr('bilibili_impl.streams.fetch_play_view_unite', android)
+    result = await resolve_via_playurl(
+        client,
+        {'bvid': 'BV1xK4y1Z7aa'},
+        cookie='session',
+        req_label='1080p',
+        req_qn=80,
+        android_token='token',
+        unlock_hd=True,
+        plugin=plugin,
+    )
+    assert result['source'] == 'android_playview'
+    assert result['qn'] == 80
+    android.assert_awaited_once()
+    client.fetch_playurl.assert_not_awaited()

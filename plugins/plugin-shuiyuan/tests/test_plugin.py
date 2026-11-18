@@ -40,6 +40,21 @@ def test_lazy_and_upload_images_are_resolved():
     assert '/uploads/short-url/abcd.png' in paragraphs[0].original
 
 
+def test_discourse_emojis_preserve_image_urls_in_comments_and_paragraphs():
+    from shuiyuan_html import parse_cooked_to_comment_text, strip_html_and_decode
+
+    cooked = (
+        '<p>可惜 <img src="/images/emoji/twemoji/smiling_face_with_tear.png?v=12" '
+        'title=":smiling_face_with_tear:" class="emoji" alt=":smiling_face_with_tear:">'
+        ' <img src="/uploads/default/original/1X/kasumi.png" title=":kasumi_shocked:" '
+        'class="emoji only-emoji" alt=":kasumi_shocked:"></p>'
+    )
+    rendered = parse_cooked_to_comment_text(cooked, 'https://shuiyuan.sjtu.edu.cn')
+    assert '![:smiling_face_with_tear:](https://shuiyuan.sjtu.edu.cn/images/emoji/twemoji/smiling_face_with_tear.png?v=12 "emoji")' in rendered
+    assert '![:kasumi_shocked:](https://shuiyuan.sjtu.edu.cn/uploads/default/original/1X/kasumi.png "emoji")' in rendered
+    assert strip_html_and_decode(cooked) == '可惜 :smiling_face_with_tear: :kasumi_shocked:'
+
+
 class _FakeHttp:
     def __init__(self, payloads: dict[str, dict[str, object]]) -> None:
         self.payloads = payloads

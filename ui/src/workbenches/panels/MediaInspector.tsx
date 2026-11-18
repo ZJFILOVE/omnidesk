@@ -113,19 +113,41 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
     });
   };
   useEffect(() => {
-    if (!videoFullscreen) return;
+    if (isMusic) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.isComposing || e.keyCode === 229) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase() ?? '';
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) {
+        return;
+      }
+      if (videoFullscreen && e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
         setVideoFullscreen(false);
         const invoke = getTauriGlobal()?.core?.invoke;
         if (invoke) void invoke('player_fullscreen').catch(() => {});
+        return;
+      }
+      if (
+        e.key.toLowerCase() === 'f' &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        !e.repeat
+      ) {
+        if (!videoFullscreen && document.querySelector('[role="dialog"], [aria-modal="true"]')) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        toggleVideoFullscreen();
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [videoFullscreen]);
+  }, [isMusic, videoFullscreen]);
   const totalSec =
     durationSec && Number.isFinite(durationSec) && durationSec > 0
       ? durationSec
@@ -265,10 +287,11 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                     type="button"
                     onClick={toggleVideoFullscreen}
                     aria-label={videoFullscreen ? '退出全屏' : '全屏播放'}
+                    title={videoFullscreen ? '退出全屏 (f / Esc)' : '全屏播放 (f)'}
                     className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-black/55 px-2.5 py-1 text-[12.5px] text-white hover:bg-black/80"
                   >
                     {videoFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-                    <span>{videoFullscreen ? '退出全屏' : '全屏'}</span>
+                    <span>{videoFullscreen ? '退出全屏 (f)' : '全屏 (f)'}</span>
                   </button>
                 </div>
               </div>

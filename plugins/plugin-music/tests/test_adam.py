@@ -78,3 +78,16 @@ async def test_transient_playback_failure_retries_once_but_auth_failure_does_not
     service.request = AsyncMock(side_effect=AdamError('login', 'unauthorized', 401))
     result = await service.handle({'action': 'resolve_stream', 'item_id': '123'})
     assert not result.ok and service.request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_playback_401_retries_with_vault_tokens_when_available():
+    from adam import AdamError
+    client = SimpleNamespace(_creds=SimpleNamespace(developer_token='dev-tok', user_token='user-tok'))
+    service = AdamService(SimpleNamespace(), lambda: client)
+    service.request = AsyncMock(side_effect=[AdamError('login', 'unauthorized', 401), {'sessionId': 'sess-ok'}])
+    result = await service.handle({'action': 'resolve_stream', 'item_id': '123'})
+    assert result.ok and service.request.await_count == 2
+    retry_body = service.request.call_args_list[1].args[2]
+    assert retry_body['token'] == 'dev-tok'
+    assert retry_body['mediaUserToken'] == 'user-tok'

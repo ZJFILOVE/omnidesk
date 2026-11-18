@@ -265,12 +265,25 @@ class AdamService:
                 try:
                     data = await self.request('/api/v1/playback', 'POST', body)
                 except AdamError as exc:
-                    # The engine returns these statuses before exposing a session.
-                    # Never retry authentication failures or ambiguous timeouts.
-                    if exc.status not in (500, 502, 503):
+                    if exc.status == 401 and self.catalog_client is not None:
+                        creds = getattr(self.catalog_client(), '_creds', None)
+                        dev = str(getattr(creds, 'developer_token', '') or '').strip()
+                        mut = str(getattr(creds, 'user_token', '') or '').strip()
+                        if dev and mut:
+                            data = await self.request(
+                                '/api/v1/playback',
+                                'POST',
+                                {**body, 'token': dev, 'mediaUserToken': mut},
+                            )
+                        else:
+                            raise
+                    elif exc.status in (500, 502, 503):
+                        # The engine returns these statuses before exposing a session.
+                        await asyncio.sleep(.5)
+                        data = await self.request('/api/v1/playback', 'POST', body)
+                    else:
+                        # Never retry authentication failures or ambiguous timeouts.
                         raise
-                    await asyncio.sleep(.5)
-                    data = await self.request('/api/v1/playback', 'POST', body)
                 session = str(data.get('sessionId') or '')
                 if not ID.fullmatch(session): raise AdamError('Adam 没有返回播放会话', 'invalid_response')
                 self.sessions.append(session)

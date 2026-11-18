@@ -126,4 +126,15 @@ describe('MarkdownRenderer', () => {
     expect(container.querySelectorAll('[data-blocked-image="true"]')).toHaveLength(1);
     expect(container.querySelector('img')).toBeNull();
   });
+
+  it('renders Discourse/Shuiyuan emoji markdown inline without figure card chrome', () => {
+    const md = '可惜 ![:smiling_face_with_tear:](https://shuiyuan.sjtu.edu.cn/images/emoji/twemoji/smiling_face_with_tear.png?v=12 "emoji") ![:kasumi_shocked:](https://shuiyuan.sjtu.edu.cn/uploads/default/original/1X/kasumi.png "emoji")';
+    const { container } = render(<MarkdownRenderer content={md} compact />);
+    const imgs = Array.from(container.querySelectorAll('img'));
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0].getAttribute('alt')).toBe(':smiling_face_with_tear:');
+    expect(imgs[0].className).toContain('inline-block');
+    expect(imgs[1].getAttribute('alt')).toBe(':kasumi_shocked:');
+    expect(container.querySelector('figure')).toBeNull();
+  });
 });

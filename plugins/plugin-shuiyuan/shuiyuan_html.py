@@ -157,8 +157,21 @@ def _collect_inline_text(node: _DomNode | str, base_url: str, out: list[str]) ->
         return
     if tag == "img":
         if "emoji" in node.classes:
-            alt = node.attrs.get("alt") or node.attrs.get("title") or ""
-            out.append(alt)
+            alt = (node.attrs.get("alt") or node.attrs.get("title") or "").strip()
+            raw_src = (
+                node.attrs.get("data-src")
+                or node.attrs.get("data-original")
+                or node.attrs.get("src")
+                or ""
+            ).strip()
+            if raw_src.startswith("upload://"):
+                raw_src = "/uploads/short-url/" + raw_src[len("upload://") :]
+            src = resolve_url(base_url, raw_src) if base_url and raw_src else ""
+            if src:
+                safe_alt = alt.replace("[", "").replace("]", "") or "emoji"
+                out.append(f'![{safe_alt}]({src} "emoji")')
+            elif alt:
+                out.append(alt)
             return
         if "avatar" in node.classes:
             return
