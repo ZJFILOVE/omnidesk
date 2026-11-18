@@ -25,6 +25,7 @@ if __package__:
     from .cookies_store import handle_cookies_action
     from .fetch_bridge import build_fetch_js, parse_fetch_outcome, validate_fetch_params
     from .html_extract import build_bilingual_segments, extract_from_html
+    from .translate_bridge import LoopbackTranslateBridge, bootstrap_extensions_over_cdp, resolve_extension_dirs
     from .security import (
         ValidationProblem,
         origin_string,
@@ -52,6 +53,7 @@ else:  # pragma: no cover - direct module import fallback
     from cookies_store import handle_cookies_action
     from fetch_bridge import build_fetch_js, parse_fetch_outcome, validate_fetch_params
     from html_extract import build_bilingual_segments, extract_from_html
+    from translate_bridge import LoopbackTranslateBridge, bootstrap_extensions_over_cdp, resolve_extension_dirs
     from security import (
         ValidationProblem,
         origin_string,
@@ -76,6 +78,7 @@ class ChromeWebPlugin(BasePlugin):
         self._browser_lock = asyncio.Lock()
         self._cdp_transport: CdpTransport = cdp_transport or LoopbackWebSocketCdpTransport()
         self._cookie_decryptor = cookie_decryptor
+        self._translate_bridge: LoopbackTranslateBridge | None = None
 
     def set_cdp_transport(self, transport: CdpTransport) -> None:
         """Override CDP transport (primarily for offline test harnesses)."""
@@ -97,6 +100,9 @@ class ChromeWebPlugin(BasePlugin):
         """Cleanly terminate all managed Chrome `--app` subprocesses on unload."""
         async with self._browser_lock:
             await self._sessions.shutdown_all()
+        if self._translate_bridge is not None:
+            await self._translate_bridge.stop()
+            self._translate_bridge = None
         self.ctx = None
 
     async def on_health_check(self) -> dict[str, Any]:
@@ -172,14 +178,19 @@ class ChromeWebPlugin(BasePlugin):
             return CapabilityResult.fail(str(exc), error_code=exc.error_code)
 
         if action == "open":
-            return await self._sessions.open_app(
-                self.ctx,
-                raw_url=payload.get("url"),
-                chrome_bin=chrome_bin,
-                profile_dir=profile_dir,
-                extension_enabled=ext_enabled,
-                cdp_port=cdp_port,
+            res = await self._sessions.open_app(
+                self.ctx, raw_url=payload.get("url"), chrome_bin=chrome_bin,
+                profile_dir=profile_dir, extension_enabled=ext_enabled, cdp_port=cdp_port,
             )
+            if res.ok and ext_enabled and cdp_port > 0:
+                if self._translate_bridge is None:
+                    self._translate_bridge = LoopbackTranslateBridge(self.ctx)
+                endpoint, token = await self._translate_bridge.ensure_started()
+                self.ctx.spawn_task(
+                    bootstrap_extensions_over_cdp(cdp_port, resolve_extension_dirs(self.ctx.plugin_dir), endpoint, token),
+                    name=f"{self.ctx.plugin_id}:ext-bootstrap",
+                )
+            return res
         if action == "close":
             raw_pid = payload.get("pid")
             pid_val: int | None = None

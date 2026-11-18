@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { callCapability } from '../../api';
-import { TranslationContext, type TranslationRequest } from '../TranslationContext';
+import { TranslationContext, triggerActiveTranslation, type TranslationRequest } from '../TranslationContext';
 import { TranslationPanel } from '../TranslationPanel';
 import TextArticleReader from '../../workbenches/panels/TextArticleReader';
 import { MediaInspector } from '../../workbenches/panels/MediaInspector';
@@ -40,6 +40,9 @@ it.each(['music', 'video'] as const)('%s exposes cue translation and preserves s
   act(() => request?.onTranslated?.([{ id: '0', translation: '逐行译文' }]));
   fireEvent.click(screen.getByText('逐行译文'));
   expect(seek).toHaveBeenCalledWith(12.5);
+  request = undefined;
+  expect(triggerActiveTranslation()).toBe(true);
+  expect((request as TranslationRequest | undefined)?.autoStart).toBe(true);
 });
 
 it('YouTube loads original cues without spending translation tokens automatically', async () => {

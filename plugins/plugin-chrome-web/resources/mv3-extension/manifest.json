@@ -22,13 +22,5 @@
       ],
       "run_at": "document_idle"
     }
-  ],
-  "commands": {
-    "toggle-bilingual": {
-      "suggested_key": {
-        "default": "Alt+Shift+T"
-      },
-      "description": "Toggle OmniDesk bilingual web reading mode"
-    }
-  }
+  ]
 }

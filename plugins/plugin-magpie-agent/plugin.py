@@ -259,6 +259,12 @@ class MagpieAgentPlugin(BasePlugin):
             return _common.fail_result("plugin-magpie-agent 已卸载", error_code="unloaded", secret=secret)
         if not isinstance(req, Mapping):
             return _common.fail_result("翻译请求必须为对象", error_code="invalid_argument", secret=secret)
+        if req.get("action") == "cli_models":
+            if self.ctx is None:
+                return _common.fail_result("翻译服务未加载", error_code="service_offline", secret=secret)
+            codex_models = await _cli_mod.list_cli_models("codex", ctx=self.ctx, configured=self.ctx.get_config("codex_bin", ""))
+            agy_models = await _cli_mod.list_cli_models("agy", ctx=self.ctx, configured=self.ctx.get_config("agy_bin", ""))
+            return CapabilityResult.ok({"codex": codex_models, "agy": agy_models})
         if req.get("action") in {"settings", "configure"}:
             if self.ctx is None:
                 return _common.fail_result("翻译服务未加载", error_code="service_offline", secret=secret)

@@ -32,6 +32,7 @@ export interface UseGlobalKeysOptions {
   onCycleZone?: () => void;
   onAltShortcut?: (letter: string) => boolean | void;
   onTriggerSearch: () => void;
+  onTranslate?: () => void;
 }
 
 export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boolean } {
@@ -98,6 +99,20 @@ export function useGlobalKeys(options: UseGlobalKeysOptions): { isComposing: boo
           if (opts.hintActive) opts.onCancelHints();
           if (opts.helpOpen) opts.onCloseHelp?.();
           opts.onToggleDock();
+        }
+        return;
+      }
+
+      if (
+        event.altKey &&
+        event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        (event.code === 'KeyT' || lowerKey === 't')
+      ) {
+        event.preventDefault();
+        if (!event.repeat) {
+          opts.onTranslate?.();
         }
         return;
       }

@@ -128,9 +128,10 @@ def build_chrome_args(
     args.extend(["--headless=new", url] if headless else [f"--app={url}", "--class=omnidesk-reader"])
     if extension_dir is not None:
         args.append(f"--load-extension={extension_dir}")
+        if cdp_port > 0 and not headless:
+            args.append("--enable-unsafe-extension-debugging")
     if cdp_port > 0:
-        args.append(f"--remote-debugging-port={cdp_port}")
-        args.append("--remote-debugging-address=127.0.0.1")
+        args.extend([f"--remote-debugging-port={cdp_port}", "--remote-debugging-address=127.0.0.1"])
     return args
 
 

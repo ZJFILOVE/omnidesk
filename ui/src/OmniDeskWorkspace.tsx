@@ -2,7 +2,7 @@ import { playerShortcut, PLAYER_SHORTCUT_EVENT } from './utils/playerShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { AppShell } from './components/AppShell';
 import { CommunityLinkContext } from './components/CommunityLinkContext';
-import { TranslationContext, type TranslationRequest } from './components/TranslationContext';
+import { TranslationContext, triggerActiveTranslation, type TranslationRequest } from './components/TranslationContext';
 import { TranslationPanel } from './components/TranslationPanel';
 import { COMMUNITY_SITES, resolveCommunityLink, type CommunityNavigation } from './utils/communityLinks';
 import { AuthCenterPanel } from './components/AuthCenterPanel';
@@ -495,6 +495,11 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
     onCycleZone: handleCycleZone,
     onAltShortcut: handleAltShortcut,
     onTriggerSearch: handleTriggerSearch,
+    onTranslate: () => {
+      if (triggerActiveTranslation()) return;
+      setTranslationRequest(null);
+      setTranslationOpen(true);
+    },
   });
 
   const handleWorkbenchFocus = useCallback(

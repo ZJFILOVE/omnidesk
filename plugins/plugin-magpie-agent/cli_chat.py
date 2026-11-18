@@ -4,10 +4,16 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
+import time
 
 from omnidesk_sdk import CapabilityResult
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+_AGY_MODEL_LINE_RE = re.compile(r'^([a-zA-Z0-9._:-]+)\s{2,}(.+)$')
+_AGY_MODELS_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
 
 def binary(backend, configured=""):
@@ -109,3 +115,73 @@ async def chat(req, *, ctx, backend, stream=None, translation=False):
             'served_model': f'{backend}/{model or "CLI 默认模型"}', 'route_group': f'cli/{backend}', 'streaming': stream is not None})
     except (OSError, ValueError, TypeError):
         return CapabilityResult.fail(f'{backend.upper()} CLI 启动或响应失败', error_code='agent_unavailable')
+
+
+def _codex_cached_models() -> list[dict[str, str]]:
+    cache_path = Path.home() / '.codex' / 'models_cache.json'
+    if not cache_path.is_file():
+        return []
+    try:
+        raw = json.loads(cache_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return []
+    entries = raw.get('models') if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return []
+    visible = [e for e in entries if isinstance(e, dict) and e.get('visibility') == 'list']
+    source = visible or [e for e in entries if isinstance(e, dict)]
+    models: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in source:
+        mid = str(item.get('slug') or item.get('id') or '').strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        name = str(item.get('display_name') or item.get('name') or mid).strip()
+        models.append({'id': mid, 'name': name})
+    return models
+
+
+def _parse_agy_models_output(output: str) -> list[dict[str, str]]:
+    cleaned = _ANSI_RE.sub('', output).replace('\r', '\n')
+    models: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if not line or 'Fetching available models' in line:
+            continue
+        match = _AGY_MODEL_LINE_RE.match(line)
+        if not match:
+            continue
+        mid, name = match.group(1).strip(), match.group(2).strip()
+        if mid and mid not in seen:
+            seen.add(mid)
+            models.append({'id': mid, 'name': name or mid})
+    return models
+
+
+async def list_cli_models(backend: str, *, ctx=None, configured: str = '') -> list[dict[str, str]]:
+    """Discover available models for `codex` (local cache) or `agy` (`agy models` with TTL cache)."""
+    if backend == 'codex':
+        return _codex_cached_models()
+    if backend != 'agy':
+        return []
+    executable = binary('agy', configured)
+    if not executable:
+        return []
+    cached = _AGY_MODELS_CACHE.get(executable)
+    now = time.monotonic()
+    if cached and now - cached[0] < 300:
+        return list(cached[1])
+    if ctx is None:
+        return []
+    try:
+        result = await ctx.exec_subprocess([executable, 'models'], timeout_sec=8)
+        if result.timed_out or result.cancelled or result.returncode:
+            return []
+        models = _parse_agy_models_output(result.stdout)
+        if models:
+            _AGY_MODELS_CACHE[executable] = (now, models)
+        return models
+    except (OSError, ValueError, TypeError):
+        return []
