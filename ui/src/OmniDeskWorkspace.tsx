@@ -127,7 +127,7 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
     loading: extensionsLoading,
     loaded: extensionsLoaded,
     refresh: refreshExtensions,
-  } = useWorkspaceExtensions(lastBusEvent?.event_id ?? null);
+  } = useWorkspaceExtensions(coreOnline ? `online:${lastBusEvent?.event_id ?? ''}` : null);
 
   const [hintTargets, setHintTargets] = useState<HintOverlayTarget[]>([]);
   const [sharedVocab, setSharedVocab] = useState<VocabAddPayload[]>([]);
