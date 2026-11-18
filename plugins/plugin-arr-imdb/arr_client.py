@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -346,3 +347,209 @@ class ArrClient:
             out["season_number"] = as_int(episode.get("seasonNumber"))
             out["episode_number"] = as_int(episode.get("episodeNumber"))
         return out
+
+    async def library_list(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        payload = await self._get(self._spec.library_path)
+        if not isinstance(payload, list):
+            return []
+        return [self._normalize_media(item) for item in payload[:limit] if isinstance(item, Mapping)]
+
+    async def _find_in_library(self, ext_id: int, imdb_id: str) -> dict[str, Any] | None:
+        try:
+            library = await self._get(self._spec.library_path)
+        except UpstreamClientError as exc:
+            if exc.code == "not_found":
+                return None
+            raise
+        if not isinstance(library, list):
+            return None
+        for item in library:
+            if not isinstance(item, Mapping):
+                continue
+            if as_int(item.get(self._spec.id_field)) == ext_id:
+                return dict(item)
+            if imdb_id and str(item.get("imdbId") or "").strip() == imdb_id:
+                return dict(item)
+        return None
+
+    async def download_with_mode(
+        self,
+        req: Mapping[str, Any],
+        *,
+        download_mode: str = "speed",
+        default_quality_profile: str = "",
+        seeders_quality_profile: str = "",
+        default_root_folder: str = "",
+        reject_cam_ts: bool = True,
+    ) -> dict[str, Any]:
+        """Add (if needed) and grab the best release according to v1 speed (seeders) or size (quality) mode."""
+        mode = "size" if str(download_mode or "").strip().lower() == "size" else "speed"
+        confirm = req.get("confirm") is True
+        should_submit = confirm and (req.get("dry_run") is not True)
+
+        raw_root = str(req.get("root_folder_path") or default_root_folder or "").strip()
+        validated_root = validate_remote_path(raw_root, field="root_folder_path") if raw_root else ""
+        for id_key in ("imdb_id", "imdbId", "title_slug", "titleSlug"):
+            if req.get(id_key) not in (None, ""):
+                validate_media_id(req[id_key], field=id_key)
+
+        candidate = await self._resolve_add_candidate(req)
+        ext_id = as_int(candidate.get(self._spec.id_field))
+        if not ext_id or ext_id <= 0:
+            raise UpstreamClientError("invalid_argument", f"缺少有效的 {self._spec.id_field}")
+
+        existing = await self._find_in_library(ext_id, str(candidate.get("imdbId") or ""))
+        in_library = existing is not None
+        has_file = bool(existing.get("hasFile")) if existing else False
+        if should_submit and in_library and has_file:
+            raise UpstreamClientError("conflict", f"{candidate.get('title') or ext_id} 已存在于 {self._spec.label} 且已有本地文件", duplicate=True)
+
+        preferred_profile = seeders_quality_profile if (mode == "speed" and seeders_quality_profile) else default_quality_profile
+        profile_id = await self._resolve_quality_profile_id(
+            req.get("quality_profile_id"),
+            str(req.get("quality_profile") or preferred_profile or "").strip(),
+            strict=should_submit,
+        )
+        root_folder = validated_root or await self._fetch_default_root_folder(strict=should_submit)
+        body = self._build_add_payload(candidate, ext_id, profile_id, root_folder, {**req, "search_for_movie": False, "search_for_missing_episodes": False})
+        if not should_submit:
+            return {
+                "service": self._spec.kind,
+                "download_mode": mode,
+                "dry_run": True,
+                "submitted": False,
+                "confirm_required": True,
+                "already_in_library": in_library,
+                "has_file": has_file,
+                "title": str(candidate.get("title") or ""),
+                "payload_preview": body,
+            }
+
+        if existing is None:
+            created = await self._post(self._spec.library_path, body)
+            if not isinstance(created, Mapping):
+                raise UpstreamClientError("upstream_error", f"{self._spec.label} 添加返回格式无效")
+            item_record = dict(created)
+        else:
+            item_record = existing
+
+        media_id = as_int(item_record.get("id"))
+        grabbed_release: dict[str, Any] | None = None
+        search_triggered = False
+
+        if media_id:
+            rel_param = {"movieId": media_id} if self._spec.kind == "radarr" else {"seriesId": media_id}
+            try:
+                releases = await self._get("/api/v3/release", rel_param)
+            except UpstreamClientError:
+                releases = []
+            if isinstance(releases, list):
+                eligible = [
+                    r for r in releases
+                    if isinstance(r, Mapping)
+                    and not r.get("rejected")
+                    and r.get("guid")
+                    and r.get("indexerId") is not None
+                    and not (reject_cam_ts and _CAM_TS_RE.search(str(r.get("title") or "")))
+                ]
+                if eligible:
+                    if mode == "speed":
+                        eligible.sort(
+                            key=lambda r: (as_int(r.get("seeders"), 0) or 0, -(as_int(r.get("size"), 0) or 0)),
+                            reverse=True,
+                        )
+                    else:
+                        eligible.sort(
+                            key=lambda r: (
+                                as_int(((r.get("quality") or {}).get("quality") or {}).get("id"), 0) or 0,
+                                as_int(r.get("size"), 0) or 0,
+                                as_int(r.get("seeders"), 0) or 0,
+                            ),
+                            reverse=True,
+                        )
+                    chosen = eligible[0]
+                    await self._post("/api/v3/release", {"guid": chosen["guid"], "indexerId": chosen["indexerId"]})
+                    grabbed_release = {
+                        "title": str(chosen.get("title") or ""),
+                        "seeders": as_int(chosen.get("seeders"), 0) or 0,
+                        "size": as_int(chosen.get("size"), 0) or 0,
+                        "indexer": str(chosen.get("indexer") or ""),
+                    }
+            if grabbed_release is None:
+                cmd_name = "MoviesSearch" if self._spec.kind == "radarr" else "SeriesSearch"
+                cmd_body = {"name": cmd_name, **({"movieIds": [media_id]} if self._spec.kind == "radarr" else {"seriesId": media_id})}
+                try:
+                    await self._post("/api/v3/command", cmd_body)
+                    search_triggered = True
+                except UpstreamClientError:
+                    pass
+
+        return {
+            "service": self._spec.kind,
+            "download_mode": mode,
+            "dry_run": False,
+            "submitted": True,
+            "started": bool(grabbed_release or search_triggered),
+            "grabbed_release": grabbed_release,
+            "search_triggered": search_triggered,
+            "item": self._normalize_media(item_record),
+        }
+
+
+_CAM_TS_RE = re.compile(r"(?i)\b(CAM|HDCAM|TS|HDTS|TELESYNC|TC|TELECINE|SCR|SCREENER)\b")
+
+
+class QbittorrentClient:
+    """Minimal qBittorrent WebUI v2 API client (trust_env=False) for real-time download progress."""
+
+    def __init__(self, http: SafeHttpClient, base_url: str, username: str = "", password: str = "") -> None:
+        self._http = http
+        self._base = validate_http_url(base_url, label="qbittorrent_url", empty_code="not_configured")
+        self._username = username.strip()
+        self._password = password
+
+    async def fetch_torrents(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        headers: dict[str, str] = {}
+        secrets = [self._password] if self._password else []
+        if self._username or self._password:
+            form = urllib.parse.urlencode({"username": self._username, "password": self._password}).encode("utf-8")
+            _, resp_headers, _ = await self._http.request_raw(
+                "POST",
+                join_url(self._base, "/api/v2/auth/login"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=form,
+                secrets=secrets,
+            )
+            cookie = resp_headers.get("set-cookie", "")
+            m_sid = re.search(r"SID=([^;]+)", cookie)
+            if m_sid:
+                headers["Cookie"] = f"SID={m_sid.group(1)}"
+
+        _, payload = await self._http.request_json(
+            "GET",
+            join_url(self._base, "/api/v2/torrents/info", {"sort": "added_on", "reverse": "true", "limit": limit}),
+            headers=headers,
+            secrets=secrets,
+        )
+        if not isinstance(payload, list):
+            return []
+        torrents: list[dict[str, Any]] = []
+        for t in payload:
+            if not isinstance(t, Mapping):
+                continue
+            progress = round((as_float(t.get("progress"), 0.0) or 0.0) * 100.0, 1)
+            torrents.append(
+                {
+                    "hash": str(t.get("hash") or ""),
+                    "name": str(t.get("name") or ""),
+                    "state": str(t.get("state") or ""),
+                    "progress_pct": progress,
+                    "dlspeed": as_int(t.get("dlspeed"), 0) or 0,
+                    "upspeed": as_int(t.get("upspeed"), 0) or 0,
+                    "size": as_int(t.get("size"), 0) or 0,
+                    "amount_left": as_int(t.get("amount_left"), 0) or 0,
+                    "eta": as_int(t.get("eta"), -1) or -1,
+                    "num_seeds": as_int(t.get("num_seeds"), 0) or 0,
+                }
+            )
+        return torrents

@@ -48,6 +48,16 @@ it('centers each current lyric in its pane without stealing playback control foc
   expect(document.activeElement).toBe(slider);
   expect(noop).not.toHaveBeenCalled();
   expect(screen.getByText('Second cue').closest('button')?.getAttribute('aria-pressed')).toBe('true');
+
+  fireEvent.click(screen.getByRole('button', { name: '跟随进度：开' }));
+  expect(screen.getByRole('button', { name: '跟随进度：关' }).getAttribute('aria-pressed')).toBe('false');
+  scrollTo.mockClear();
+  rerender(<MediaInspector {...props} currentSec={2} activeLyricIndex={0} />);
+  expect(scrollTo).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole('button', { name: '定位当前' }));
+  expect(scrollTo).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('button', { name: '跟随进度：开' }).getAttribute('aria-pressed')).toBe('true');
 });
 
 it('resizes the comments pane with keyboard and restores its saved width', () => {

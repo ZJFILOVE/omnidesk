@@ -114,6 +114,45 @@
       "description": "Never submit downloads unless explicitly confirmed with confirm=true"
     },
     {
+      "key": "download_mode",
+      "label": "默认下载方式（v1 双模式）",
+      "type": "select",
+      "default": "speed",
+      "options": [
+        "speed",
+        "size"
+      ],
+      "description": "speed=速度优先（做种最多）；size=大小/画质优先（体积最大）"
+    },
+    {
+      "key": "reject_cam_ts",
+      "label": "过滤枪版 / CAM / TS 片源",
+      "type": "bool",
+      "default": true,
+      "description": "Skip CAM/TS/SCR releases when selecting a torrent to grab"
+    },
+    {
+      "key": "qbittorrent_url",
+      "label": "qBittorrent WebUI URL（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional qBittorrent WebUI LAN URL for real-time speed & progress"
+    },
+    {
+      "key": "qbittorrent_username",
+      "label": "qBittorrent 用户名（可选）",
+      "type": "string",
+      "default": "",
+      "description": "Optional qBittorrent WebUI username"
+    },
+    {
+      "key": "qbittorrent_password",
+      "label": "qBittorrent 密码（可选）",
+      "type": "secret",
+      "default": "",
+      "description": "Stored exclusively in 0600 SecretVault"
+    },
+    {
       "key": "request_timeout_sec",
       "label": "请求超时（秒）",
       "type": "int",

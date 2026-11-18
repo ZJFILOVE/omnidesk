@@ -102,16 +102,24 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
 }) => {
   const isMusic = item.kind === 'music';
   const lyricsViewport = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  const [followLyrics, setFollowLyrics] = useState(true);
+  const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
+  const scrollLyricIntoCenter = (index: number) => {
     const viewport = lyricsViewport.current;
-    const line = viewport?.children[activeLyricIndex] as HTMLElement | undefined;
-    if (!viewport || !line || lyricsLoading) return;
+    const line = viewport?.children[index] as HTMLElement | undefined;
+    if (!viewport || !line) return;
     // Scroll only the lyric pane; keep playback controls and keyboard focus stable.
     const top = viewport.scrollTop + line.getBoundingClientRect().top - viewport.getBoundingClientRect().top
       - (viewport.clientHeight - line.offsetHeight) / 2;
-    viewport.scrollTo?.({ top: Math.max(0, top), behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-  }, [item.id, item.lyrics, activeLyricIndex, lyricsLoading]);
-  const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
+    viewport.scrollTo?.({
+      top: Math.max(0, top),
+      behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    });
+  };
+  useEffect(() => {
+    if (!followLyrics || lyricsLoading) return;
+    scrollLyricIntoCenter(activeLyricIndex);
+  }, [item.id, item.lyrics, activeLyricIndex, lyricsLoading, followLyrics, translations]);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showVideoSubtitle, setShowVideoSubtitle] = useState(true);
@@ -723,7 +731,41 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
             </p>
           ) : item.lyrics?.length ? (
             <div className="flex flex-col gap-2.5">
-              <PanelSectionHeading title={isMusic ? '双语歌词与乐段同步' : '双语字幕'} meta="点击跳转时间轴" />
+              <PanelSectionHeading
+                title={isMusic ? '双语歌词与乐段同步' : '双语字幕'}
+                meta="点击跳转时间轴"
+                action={
+                  <div className="flex items-center gap-2">
+                    {activeLyricIndex >= 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (followLyrics) {
+                            scrollLyricIntoCenter(activeLyricIndex);
+                          } else {
+                            setFollowLyrics(true);
+                          }
+                        }}
+                        className="min-h-8 cursor-pointer rounded-md border border-[var(--border-line)] px-2.5 text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--hover-fill)]"
+                      >
+                        定位当前
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      aria-pressed={followLyrics}
+                      onClick={() => setFollowLyrics((prev) => !prev)}
+                      className={`min-h-8 cursor-pointer rounded-md border px-2.5 text-[12.5px] transition-colors ${
+                        followLyrics
+                          ? 'border-[var(--domain-media)]/45 bg-[var(--domain-media)]/12 text-[var(--domain-media)]'
+                          : 'border-[var(--border-line)] text-[var(--text-muted)] hover:bg-[var(--hover-fill)]'
+                      }`}
+                    >
+                      {followLyrics ? '跟随进度：开' : '跟随进度：关'}
+                    </button>
+                  </div>
+                }
+              />
               <div ref={lyricsViewport} role="region" aria-label={isMusic ? '同步歌词' : '同步字幕'} tabIndex={0} className="flex max-h-[55vh] min-h-0 flex-col gap-1.5 overflow-y-auto overscroll-contain">
                 {item.lyrics.map((line, index) => {
                   const lyricId = `media:lyric:${item.id}:${index}`;

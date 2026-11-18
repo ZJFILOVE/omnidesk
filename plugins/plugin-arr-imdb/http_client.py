@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
@@ -238,11 +239,23 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _build_safe_opener() -> urllib.request.OpenerDirector:
-    """Construct a urllib opener with trust_env=False (no proxies) and follow_redirects=False."""
+def _is_private_or_loopback_host(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").strip().lower()
+    if not host or host == "localhost" or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+    except ValueError:
+        return False
+
+
+def _build_safe_opener(*, use_env_proxy: bool = False) -> urllib.request.OpenerDirector:
+    """Construct a urllib opener with trust_env=False by default and follow_redirects=False."""
     opener = urllib.request.OpenerDirector()
+    proxy_handler = urllib.request.ProxyHandler() if use_env_proxy else urllib.request.ProxyHandler({})
     for handler in (
-        urllib.request.ProxyHandler({}),
+        proxy_handler,
         urllib.request.UnknownHandler(),
         urllib.request.HTTPHandler(),
         urllib.request.HTTPSHandler(),
@@ -263,33 +276,33 @@ class SafeHttpClient:
     def __init__(self, *, timeout_sec: float = 10.0) -> None:
         self.timeout_sec = max(0.05, min(float(timeout_sec), 120.0))
 
-    async def request_json(
+    async def request_raw(
         self,
         method: str,
         url: str,
         *,
         headers: Mapping[str, str] | None = None,
-        json_body: Mapping[str, Any] | None = None,
+        body: bytes | None = None,
         secrets: Iterable[str] = (),
         timeout_sec: float | None = None,
-    ) -> tuple[int, Any]:
-        """Execute an HTTP request off-thread and parse JSON fail-closed."""
+        allow_proxy_for_wan: bool = False,
+    ) -> tuple[int, dict[str, str], str]:
+        """Execute an HTTP request off-thread and return (status, headers, body_text)."""
         validated_url = validate_http_url(url, label="request_url", empty_code="invalid_argument")
         effective_timeout = max(0.05, min(float(timeout_sec if timeout_sec is not None else self.timeout_sec), 120.0))
         secret_list = [s for s in secrets if isinstance(s, str) and s]
-        req_headers = {"Accept": "application/json", **(dict(headers) if headers else {})}
-        data: bytes | None = None
-        if json_body is not None:
-            data = json.dumps(dict(json_body), ensure_ascii=False).encode("utf-8")
-            req_headers.setdefault("Content-Type", "application/json")
+        req_headers = dict(headers) if headers else {}
+        use_proxy = bool(allow_proxy_for_wan and not _is_private_or_loopback_host(validated_url))
 
-        def _do_sync() -> tuple[int, Any]:
-            opener = _build_safe_opener()
-            req = urllib.request.Request(validated_url, data=data, headers=req_headers, method=method.upper())
+        def _do_sync() -> tuple[int, dict[str, str], str]:
+            opener = _build_safe_opener(use_env_proxy=use_proxy)
+            req = urllib.request.Request(validated_url, data=body, headers=req_headers, method=method.upper())
             try:
                 with opener.open(req, timeout=effective_timeout) as resp:
                     status = int(getattr(resp, "status", 200))
+                    resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                     raw = resp.read().decode("utf-8", errors="replace")
+                    return status, resp_headers, raw
             except urllib.error.HTTPError as exc:
                 status = int(exc.code)
                 try:
@@ -309,17 +322,43 @@ class SafeHttpClient:
             except OSError as exc:
                 raise UpstreamClientError("service_offline", f"上游网络异常: {scrub_secrets(str(exc), secret_list)}") from None
 
-            if not raw.strip():
-                return status, {}
-            try:
-                return status, json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise UpstreamClientError("upstream_error", f"上游返回非 JSON 响应: {exc.msg}") from None
-
         try:
             return await asyncio.wait_for(asyncio.to_thread(_do_sync), timeout=effective_timeout + 1.0)
         except TimeoutError:
             raise UpstreamClientError("timeout", "上游服务请求超时") from None
+
+    async def request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        json_body: Mapping[str, Any] | None = None,
+        secrets: Iterable[str] = (),
+        timeout_sec: float | None = None,
+        allow_proxy_for_wan: bool = False,
+    ) -> tuple[int, Any]:
+        """Execute an HTTP request off-thread and parse JSON fail-closed."""
+        req_headers = {"Accept": "application/json", **(dict(headers) if headers else {})}
+        data: bytes | None = None
+        if json_body is not None:
+            data = json.dumps(dict(json_body), ensure_ascii=False).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+        status, _, raw = await self.request_raw(
+            method,
+            url,
+            headers=req_headers,
+            body=data,
+            secrets=secrets,
+            timeout_sec=timeout_sec,
+            allow_proxy_for_wan=allow_proxy_for_wan,
+        )
+        if not raw.strip():
+            return status, {}
+        try:
+            return status, json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise UpstreamClientError("upstream_error", f"上游返回非 JSON 响应: {exc.msg}") from None
 
     @staticmethod
     def _map_http_error(status: int, raw_body: str, secrets: Iterable[str]) -> UpstreamClientError:
