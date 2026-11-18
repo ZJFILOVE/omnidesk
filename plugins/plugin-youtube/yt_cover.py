@@ -1,6 +1,7 @@
 """Small, credential-free thumbnail fetch through the selected YouTube proxy."""
 import asyncio
 import base64
+import ssl
 import urllib.request
 from urllib.parse import urlsplit
 from omnidesk_sdk import CapabilityResult
@@ -25,9 +26,17 @@ async def fetch_cover(plugin, req):
     if key in _cache:
         return CapabilityResult.ok({'data_url': _cache[key]})
     def fetch():
-        handler = urllib.request.ProxyHandler({'https': proxy}) if proxy else urllib.request.ProxyHandler()
-        opener = urllib.request.build_opener(handler, NoRedirect())
-        with opener.open(urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=10) as response:
+        ssl_ctx = ssl.create_default_context()
+        ignore_eof = getattr(ssl, 'OP_IGNORE_UNEXPECTED_EOF', 0)
+        if ignore_eof:
+            ssl_ctx.options |= ignore_eof
+        handlers = [
+            urllib.request.ProxyHandler({'https': proxy}) if proxy else urllib.request.ProxyHandler(),
+            NoRedirect(),
+            urllib.request.HTTPSHandler(context=ssl_ctx),
+        ]
+        opener = urllib.request.build_opener(*handlers)
+        with opener.open(urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=6) as response:
             data = response.read(2 * 1024 * 1024 + 1)
             kind = response.headers.get_content_type()
             if len(data) > 2 * 1024 * 1024 or kind not in {'image/jpeg', 'image/png', 'image/webp'}:
@@ -35,7 +44,7 @@ async def fetch_cover(plugin, req):
             return f'data:{kind};base64,' + base64.b64encode(data).decode()
     try:
         if not hasattr(plugin, '_cover_semaphore'):
-            plugin._cover_semaphore = asyncio.Semaphore(6)
+            plugin._cover_semaphore = asyncio.Semaphore(12)
         async with plugin._cover_semaphore:
             value = await asyncio.to_thread(fetch)
     except (OSError, ValueError):
