@@ -274,7 +274,7 @@ class MagpieAgentPlugin(BasePlugin):
                     if req["translation_backend"] not in ("magpie", "codex", "agy"):
                         return CapabilityResult.fail("未知翻译后端", error_code="invalid_argument")
                     patch["translation_backend"] = req["translation_backend"]
-                for key in ("translation_codex_models", "translation_agy_models", "codex_bin", "agy_bin", "agy_model"):
+                for key in ("translation_codex_models", "translation_agy_models", "codex_bin", "agy_bin", "codex_model", "agy_model"):
                     if key in req:
                         value = req[key]
                         if not isinstance(value, str) or len(value) > 3200 or any(c in value for c in "\x00\n\r"):
@@ -303,7 +303,7 @@ class MagpieAgentPlugin(BasePlugin):
             gw_url, _ = self._configured_gateway_url()
             return CapabilityResult.ok({
                 **{key: self.ctx.get_config(key, "magpie" if key == "translation_backend" else "") for key in (
-                    "translation_backend", "translation_codex_models", "translation_agy_models", "codex_bin", "agy_bin", "agy_model")},
+                    "translation_backend", "translation_codex_models", "translation_agy_models", "codex_bin", "agy_bin", "codex_model", "agy_model")},
                 "cli_available": {name: bool(_cli_mod.binary(name, self.ctx.get_config(f"{name}_bin", ""))) for name in ("codex", "agy")},
                 "translation_gateway_url": self.ctx.get_config("translation_gateway_url", ""),
                 "effective_gateway_url": self.ctx.get_config("translation_gateway_url", "") or gw_url,

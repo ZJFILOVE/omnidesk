@@ -11,10 +11,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::sync::Notify;
 
-use crate::control_client::{map_connect_io_error, next_request_id, NdjsonFrameReader};
+use crate::control_client::{connect_unix_with_retry, next_request_id, NdjsonFrameReader};
 use crate::paths::{verify_peer_uid, OmnideskPaths};
 use crate::protocol::{
     parse_control_response, tauri_event_name_for_topic, validate_topic, MAX_PAYLOAD_BYTES,
@@ -197,10 +196,9 @@ impl EventBridge {
             }
         };
 
-        let mut stream = match tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(&sock_path)).await {
+        let mut stream = match tokio::time::timeout(Duration::from_secs(3), connect_unix_with_retry(&sock_path)).await {
             Ok(Ok(s)) => s,
-            Ok(Err(err)) => {
-                let mapped = map_connect_io_error(&sock_path, err);
+            Ok(Err(mapped)) => {
                 let st = if mapped.code == "service_offline" { "offline" } else { "degraded" };
                 self.update_status(st, false, &mapped.message, None, sink);
                 return Duration::from_secs(5);

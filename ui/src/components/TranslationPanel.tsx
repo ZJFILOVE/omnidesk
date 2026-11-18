@@ -8,6 +8,7 @@ interface Settings {
   translation_agy_models: string;
   codex_bin: string;
   agy_bin: string;
+  codex_model: string;
   agy_model: string;
   cli_available?: Record<string, boolean>;
   translation_gateway_url: string;
@@ -17,7 +18,7 @@ interface Settings {
   translation_batch_size: number;
 }
 interface TranslationResult { id: string; source: string; translation: string; served_model?: string }
-const defaults: Settings = { translation_backend: 'magpie', translation_codex_models: '', translation_agy_models: '', codex_bin: '', agy_bin: '', agy_model: '', translation_gateway_url: '', translation_models: '', translation_concurrency: 4, translation_batch_size: 4 };
+const defaults: Settings = { translation_backend: 'magpie', translation_codex_models: '', translation_agy_models: '', codex_bin: '', agy_bin: '', codex_model: '', agy_model: '', translation_gateway_url: '', translation_models: '', translation_concurrency: 4, translation_batch_size: 4 };
 const inputClass = 'min-h-11 w-full rounded-lg border border-[var(--border-line)] bg-[var(--bg-canvas)] px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]';
 
 export function TranslationPanel({ open, request, onClose }: { open: boolean; request: TranslationRequest | null; onClose: () => void }) {
@@ -41,6 +42,14 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
     setText(request?.segments.map(segment => segment.text).join('\n\n') ?? '');
     setResults([]); setError(''); setNotice(''); setBusy(false);
   }, [request]);
+  const refreshCliModels = (isCancelled = () => false) => {
+    void callCapability<{ codex?: Array<{ id: string; name: string }>; agy?: Array<{ id: string; name: string }> }>({
+      capability: 'llm.translate.v1', providerPluginId: 'plugin-magpie-agent', payload: { action: 'cli_models' },
+    }).then(res => {
+      if (isCancelled() || !res.ok) return;
+      setCliModels({ codex: res.data.codex ?? [], agy: res.data.agy ?? [] });
+    }).catch(() => {});
+  };
   useEffect(() => {
     if (!open || !isTauriAvailable()) return;
     let cancelled = false;
@@ -54,12 +63,7 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
       else setError(formatRpcError(config.error));
       if (available.ok) setModels(available.data.models ?? []);
     }).catch(err => { if (!cancelled) setError(String(err)); }).finally(() => { if (!cancelled) setLoading(false); });
-    void callCapability<{ codex?: Array<{ id: string; name: string }>; agy?: Array<{ id: string; name: string }> }>({
-      capability: 'llm.translate.v1', providerPluginId: 'plugin-magpie-agent', payload: { action: 'cli_models' },
-    }).then(res => {
-      if (cancelled || !res.ok) return;
-      setCliModels({ codex: res.data.codex ?? [], agy: res.data.agy ?? [] });
-    }).catch(() => {});
+    refreshCliModels(() => cancelled);
     return () => { cancelled = true; };
   }, [open]);
   useEffect(() => {
@@ -86,7 +90,11 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
       if (current !== version.current) return;
       if (!config.ok) { setError(formatRpcError(config.error)); return; }
       setSettings({ ...defaults, ...config.data });
-      if (saveOnly) { setNotice('翻译配置已保存，歌词、字幕和文章共用此配置。'); return; }
+      if (saveOnly) {
+        refreshCliModels();
+        setNotice('翻译配置已保存，歌词、字幕和文章共用此配置。');
+        return;
+      }
       // Keep IDs and cue boundaries intact when translating from a reader.
       const segments = request?.segments ?? text.split(/\n\s*\n/).filter(value => value.trim()).map((value, index) => ({ id: String(index), text: value }));
       const result = await callCapability<{ results: TranslationResult[] }>({ capability: 'llm.translate.v1', providerPluginId: 'plugin-magpie-agent',
@@ -149,17 +157,26 @@ export function TranslationPanel({ open, request, onClose }: { open: boolean; re
           <label className="space-y-1 text-sm">每批段数（1–32）<input type="number" min={1} max={32} className={inputClass} value={settings.translation_batch_size}
             onChange={event => setSettings({ ...settings, translation_batch_size: Number(event.target.value) })} /></label>
         </fieldset>
-        {settings.translation_backend === 'agy' && <label className="block space-y-1 text-sm">AGY Agent 模型（与翻译独立）
-          <div className="flex gap-2">
-            <select aria-label="选择 AGY Agent 模型" className={`${inputClass} w-56 shrink-0`} disabled={busy || loading}
-              value={cliModels.agy.some(m => m.id === settings.agy_model) ? settings.agy_model : ''}
-              onChange={event => setSettings({ ...settings, agy_model: event.target.value })}>
-              <option value="">留空使用 AGY 默认模型</option>
-              {cliModels.agy.map(model => <option key={model.id} value={model.id}>{model.name} ({model.id})</option>)}
-            </select>
-            <input className={inputClass} disabled={busy || loading} list="agy-agent-models" value={settings.agy_model} placeholder="留空使用 AGY 默认模型" onChange={event => setSettings({ ...settings, agy_model: event.target.value })} />
-          </div>
-          <datalist id="agy-agent-models">{cliModels.agy.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist></label>}
+        {settings.translation_backend !== 'magpie' && (() => {
+          const isCodex = settings.translation_backend === 'codex';
+          const agentKey = isCodex ? 'codex_model' : 'agy_model';
+          const agentLabel = isCodex ? 'Codex Agent 模型（与翻译独立）' : 'AGY Agent 模型（与翻译独立）';
+          const placeholder = isCodex ? '留空使用 Codex 默认模型' : '留空使用 AGY 默认模型';
+          const agentModels = isCodex ? cliModels.codex : cliModels.agy;
+          const listId = isCodex ? 'codex-agent-models' : 'agy-agent-models';
+          return <label className="block space-y-1 text-sm">{agentLabel}
+            <div className="flex gap-2">
+              <select aria-label={isCodex ? '选择 Codex Agent 模型' : '选择 AGY Agent 模型'} className={`${inputClass} w-56 shrink-0`} disabled={busy || loading}
+                value={agentModels.some(m => m.id === settings[agentKey]) ? settings[agentKey] : ''}
+                onChange={event => setSettings({ ...settings, [agentKey]: event.target.value })}>
+                <option value="">{placeholder}</option>
+                {agentModels.map(model => <option key={model.id} value={model.id}>{model.name} ({model.id})</option>)}
+              </select>
+              <input className={inputClass} disabled={busy || loading} list={listId} value={settings[agentKey]} placeholder={placeholder}
+                onChange={event => setSettings({ ...settings, [agentKey]: event.target.value })} />
+            </div>
+            <datalist id={listId}>{agentModels.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist></label>;
+        })()}
         <p className="text-sm text-[var(--text-muted)]">{settings.translation_backend === 'magpie' ? `实际接口：${settings.effective_gateway_url || '当前网关'}` : `${settings.translation_backend.toUpperCase()} CLI 直连，使用本机登录；每个并发任务独立会话${settings.cli_available?.[settings.translation_backend] === false ? '（尚未检测到 CLI，请设置路径）' : ''}`}。多模型按批次轮流分配，结果保持原文顺序。</p>
         <label className="block space-y-2 text-sm">原文{request ? `（${request.segments.length} 段，保持原行对应）` : '（空行分段）'}
           <textarea aria-label="待翻译原文" readOnly={Boolean(request)} disabled={busy} value={text} onChange={event => setText(event.target.value)} className={`${inputClass} min-h-36`} /></label>

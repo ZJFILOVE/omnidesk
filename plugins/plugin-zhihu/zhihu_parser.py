@@ -1037,7 +1037,7 @@ def parse_question_with_answers_api_json(
 
     first_author = ""
     if isinstance(answers_json, Mapping) and isinstance(answers_json.get("data"), list):
-        for idx, ans in enumerate(answers_json["data"][:5], start=1):
+        for idx, ans in enumerate(answers_json["data"], start=1):
             if not isinstance(ans, Mapping):
                 continue
             author = _read_author_name(ans) or "知乎用户"

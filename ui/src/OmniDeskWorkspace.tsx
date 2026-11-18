@@ -561,7 +561,10 @@ export function OmniDeskWorkspace(props: WorkspaceControllerProps) {
         miniPlayerSlot={
           <MiniPlayerBar
             controller={mpv}
-            onOpenMedia={() => selectWorkbenchClean('media')}
+            onOpenMedia={(item) => {
+              selectWorkbenchClean('media');
+              window.dispatchEvent(new CustomEvent('omnidesk:open-media-item', { detail: item }));
+            }}
           />
         }
       >

@@ -132,6 +132,26 @@ export const MediaWorkbench: React.FC<WorkbenchViewProps> = ({
   }, [searchTrigger]);
 
   useEffect(() => {
+    const handler = (event: Event) => {
+      const target = (event as CustomEvent<MediaItem>).detail;
+      if (!target?.id) return;
+      const matchedSource = liveMedia.sources.find(
+        (s) => s.sourceId === target.sourceId || s.pluginId === target.sourceId,
+      );
+      if (matchedSource) {
+        setActiveSourceId(matchedSource.sourceId);
+        setActiveCategory('');
+      }
+      setSelectedId(target.id);
+      setOpenedItem(target);
+      setShowPlayer(target.kind === 'video');
+      emitFocus(`media:card:${target.id}`);
+    };
+    window.addEventListener('omnidesk:open-media-item', handler);
+    return () => window.removeEventListener('omnidesk:open-media-item', handler);
+  }, [emitFocus, liveMedia.sources]);
+
+  useEffect(() => {
     if (liveMedia.sources.length === 0) return;
     const chosenSourceId = activeSourceId || liveMedia.sourceId;
     const source = liveMedia.sources.find((entry) => entry.sourceId === chosenSourceId);

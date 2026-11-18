@@ -178,9 +178,7 @@ impl ControlClient {
         let max_bytes = self.max_payload_bytes;
 
         let io_future = async move {
-            let mut stream = UnixStream::connect(&sock_path)
-                .await
-                .map_err(|err| map_connect_io_error(&sock_path, err))?;
+            let mut stream = connect_unix_with_retry(&sock_path).await?;
             verify_peer_uid(&stream, &sock_path)?;
             stream.write_all(&encoded).await.map_err(map_stream_io_error)?;
             stream.flush().await.map_err(map_stream_io_error)?;
@@ -429,6 +427,26 @@ fn validate_raw_op_params(op: &str, body: &mut Map<String, Value>) -> Result<Opt
         validate_plugin_id(pid)?;
     }
     Ok(None)
+}
+
+pub(crate) async fn connect_unix_with_retry(sock_path: &std::path::Path) -> Result<UnixStream, RpcError> {
+    const MAX_ATTEMPTS: usize = 16;
+    for attempt in 0..MAX_ATTEMPTS {
+        match UnixStream::connect(sock_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if (err.kind() == ErrorKind::WouldBlock || err.raw_os_error() == Some(libc::EAGAIN))
+                    && attempt + 1 < MAX_ATTEMPTS =>
+            {
+                tokio::time::sleep(Duration::from_millis(10 + (attempt as u64) * 5)).await;
+            }
+            Err(err) => return Err(map_connect_io_error(sock_path, err)),
+        }
+    }
+    Err(RpcError::service_offline(format!(
+        "Cannot connect to control.sock at {}: EAGAIN",
+        sock_path.display()
+    )))
 }
 
 pub(crate) fn map_connect_io_error(sock_path: &std::path::Path, err: std::io::Error) -> RpcError {

@@ -722,7 +722,7 @@ class ZhihuTextSource(TextSource):
             a_resp = await self._http.fetch_with_fallback(
                 self._web_url(
                     f"/api/v4/questions/{target.question_id}/answers"
-                    "?include=content,voteup_count,comment_count,author,created_time&limit=5&sort_by=default"
+                    "?include=content,voteup_count,comment_count,author,created_time&limit=20&sort_by=default"
                 ),
                 self._auth,
                 expect_json=True,
@@ -733,6 +733,26 @@ class ZhihuTextSource(TextSource):
                     aj = json.loads(a_resp.body)
                 except json.JSONDecodeError:
                     aj = {}
+                if (
+                    isinstance(aj, dict)
+                    and isinstance(aj.get("data"), list)
+                    and isinstance(aj.get("paging"), dict)
+                    and not aj["paging"].get("is_end", True)
+                ):
+                    next_url = str(aj["paging"].get("next") or "").strip()
+                    if next_url:
+                        more_resp = await self._http.fetch_with_fallback(
+                            next_url if next_url.startswith("http") else self._web_url(next_url),
+                            self._auth,
+                            expect_json=True,
+                        )
+                        if more_resp.ok:
+                            try:
+                                more_j = json.loads(more_resp.body)
+                                if isinstance(more_j, dict) and isinstance(more_j.get("data"), list):
+                                    aj["data"] = list(aj["data"]) + list(more_j["data"])
+                            except json.JSONDecodeError:
+                                pass
             art = parse_question_with_answers_api_json(qj, aj)
             return art, None, art is None
 
@@ -859,4 +879,49 @@ class ZhihuTextSource(TextSource):
                     except ZhihuError:
                         pass
             page.comments = new_comments
+        if target.kind == "question" and offset == 0 and not page.comments:
+            ans_resp = await self._http.fetch_with_fallback(
+                self._web_url(
+                    f"/api/v4/questions/{rid}/answers?include=comment_count,author&limit=5&sort_by=default"
+                ),
+                self._auth,
+                expect_json=True,
+            )
+            if ans_resp.ok:
+                try:
+                    ans_j = json.loads(ans_resp.body)
+                except json.JSONDecodeError:
+                    ans_j = {}
+                ans_list = ans_j.get("data") if isinstance(ans_j, dict) else None
+                if isinstance(ans_list, list):
+                    collected: list[CommentNode] = []
+                    fetched_ans = 0
+                    for ans in ans_list:
+                        if fetched_ans >= 3:
+                            break
+                        if not isinstance(ans, dict):
+                            continue
+                        aid = str(ans.get("id") or "").strip()
+                        if not aid or (isinstance(ans.get("comment_count"), int) and ans["comment_count"] <= 0):
+                            continue
+                        ans_author = str((ans.get("author") or {}).get("name") or "知乎用户") if isinstance(ans.get("author"), dict) else "知乎用户"
+                        try:
+                            a_cpage = await self.fetch_comments(
+                                f"answer:{aid}",
+                                offset=0,
+                                limit=min(10, eff_limit),
+                                order_by=order_by,
+                                author_hint=ans_author,
+                            )
+                            if a_cpage.comments:
+                                fetched_ans += 1
+                                for c in a_cpage.comments:
+                                    badge = c.role_badge or f"回答·{ans_author}"
+                                    collected.append(c.model_copy(update={"role_badge": badge}))
+                        except ZhihuError:
+                            continue
+                    if collected:
+                        page.comments = collected
+                        page.total_count = max(page.total_count, len(collected))
+                        page.is_end = True
         return page

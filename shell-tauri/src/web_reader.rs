@@ -26,20 +26,70 @@ fn allowed_navigation(site: ReaderSite, url: &tauri::Url) -> bool {
         || (url.scheme() == "https" && url.host_str() == Some("challenges.cloudflare.com"))
 }
 
+#[derive(serde::Deserialize)]
+pub struct WebTranslationEntry {
+    id: String,
+    translation: String,
+}
+
+const EXTRACT_SEGMENTS_JS: &str = r#"(() => {
+  const skip = new Set(['SCRIPT','STYLE','NOSCRIPT','SVG','CODE','PRE','NAV','HEADER','FOOTER']);
+  const els = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,[slot="text-body"]'));
+  const picked = [];
+  const seen = new Set();
+  for (const el of els) {
+    if (el.closest('[data-omnidesk-tr-injected]') || skip.has(el.tagName)) continue;
+    if (els.some(other => other !== el && other.contains(el) && other.matches('p,li,blockquote'))) continue;
+    const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 2 || seen.has(text)) continue;
+    seen.add(text);
+    const id = 'w' + picked.length;
+    el.setAttribute('data-omnidesk-tr-id', id);
+    picked.push({ id, text });
+    if (picked.length >= 120) break;
+  }
+  return JSON.stringify({ title: document.title || '', segments: picked });
+})()"#;
+
+fn apply_translations_js(entries: &[WebTranslationEntry]) -> String {
+    let json = serde_json::to_string(
+        &entries.iter().map(|e| (&e.id, &e.translation)).collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string());
+    format!(
+        r#"(() => {{
+  const items = {json};
+  for (const [id, tr] of items) {{
+    const el = document.querySelector('[data-omnidesk-tr-id="' + CSS.escape(id) + '"]');
+    if (!el || !tr) continue;
+    let node = el.querySelector(':scope > [data-omnidesk-tr-injected]');
+    if (!node) {{
+      node = document.createElement('div');
+      node.setAttribute('data-omnidesk-tr-injected', '1');
+      node.style.cssText = 'margin-top:4px;padding:4px 8px;border-left:2px solid #8b949e;opacity:0.9;font-size:0.95em;line-height:1.5;';
+      el.appendChild(node);
+    }}
+    node.textContent = tr;
+  }}
+}})()"#
+    )
+}
+
 #[cfg(target_os = "linux")]
-async fn linux_reader(main: &Webview, profile: std::path::PathBuf, site: ReaderSite, action: String, target: Option<tauri::Url>, bounds: [f64; 4]) -> Result<(), String> {
+async fn linux_reader(main: &Webview, profile: std::path::PathBuf, site: ReaderSite, action: String, target: Option<tauri::Url>, bounds: [f64; 4], translations: Option<Vec<WebTranslationEntry>>) -> Result<serde_json::Value, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let host = main.clone();
     main.with_webview(move |native| {
         use gtk::prelude::*;
+        use javascriptcore::ValueExt;
         use webkit2gtk::{CookieManagerExt, NavigationPolicyDecisionExt, PolicyDecisionExt, URIRequestExt, WebContextExt, WebViewExt};
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<Option<webkit2gtk::WebView>, String> {
             let main_widget = native.inner();
             let parent = main_widget.parent().ok_or("Main view has no GTK parent")?;
             let overlay = if let Ok(overlay) = parent.clone().downcast::<gtk::Overlay>() {
                 overlay
             } else {
-                if action != "show" { return Ok(()); }
+                if action != "show" { return Ok(None); }
                 // GtkBox packs child webviews vertically. An overlay keeps the
                 // main application full size and places the reader in its slot.
                 let container = parent.downcast::<gtk::Box>().map_err(|_| "Unexpected main view parent")?;
@@ -60,10 +110,17 @@ async fn linux_reader(main: &Webview, profile: std::path::PathBuf, site: ReaderS
                         "hide" => { if reader.is_visible() { reader.hide(); main_widget.grab_focus(); } },
                         "reload" => reader.reload(),
                         "back" => reader.go_back(),
+                        "extract_segments" => return Ok(Some(reader)),
+                        "apply_translations" => {
+                            if let Some(entries) = translations.as_deref() {
+                                let script = apply_translations_js(entries);
+                                reader.evaluate_javascript(&script, None, None, None::<&webkit2gtk::gio::Cancellable>, |_| {});
+                            }
+                        },
                         _ => return Err("Unknown reader action".into()),
                     }
                 }
-                return Ok(());
+                return Ok(None);
             }
             let reader = if let Some(reader) = existing { reader } else {
                 std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
@@ -100,11 +157,17 @@ async fn linux_reader(main: &Webview, profile: std::path::PathBuf, site: ReaderS
                     let shift = flags.contains(gtk::gdk::ModifierType::SHIFT_MASK);
                     let key = event.keyval().to_unicode().map(|c| c.to_string())
                         .unwrap_or_else(|| event.keyval().name().map(|s| s.to_string()).unwrap_or_default());
-                    let host_shortcut = (!shift && !alt && ctrl && matches!(key.as_str(), "1"|"2"|"3"|"4"|"5"|"k"))
+                    let is_translate_shortcut = shift && alt && !ctrl && matches!(key.as_str(), "t" | "T");
+                    let host_shortcut = is_translate_shortcut
+                        || (!shift && !alt && ctrl && matches!(key.as_str(), "1"|"2"|"3"|"4"|"5"|"k"))
                         || (!shift && !ctrl && alt && key.len() == 1 && key.chars().all(|c| c.is_ascii_alphanumeric()))
                         || (!shift && !alt && !ctrl && key == "F8");
                     if !host_shortcut { return gtk::glib::Propagation::Proceed; }
-                    let options = serde_json::json!({"key":key,"ctrlKey":ctrl,"altKey":alt,"shiftKey":shift,"bubbles":true});
+                    let options = if is_translate_shortcut {
+                        serde_json::json!({"key":key,"code":"KeyT","ctrlKey":ctrl,"altKey":alt,"shiftKey":shift,"bubbles":true})
+                    } else {
+                        serde_json::json!({"key":key,"ctrlKey":ctrl,"altKey":alt,"shiftKey":shift,"bubbles":true})
+                    };
                     let _ = host.set_focus();
                     let _ = host.eval(format!("window.dispatchEvent(new KeyboardEvent('keydown', {options}))"));
                     gtk::glib::Propagation::Stop
@@ -124,17 +187,46 @@ async fn linux_reader(main: &Webview, profile: std::path::PathBuf, site: ReaderS
             reader.set_size_request(width.round() as i32, height.round() as i32);
             overlay.set_overlay_pass_through(&reader, false);
             reader.show();
-            Ok(())
+            Ok(None)
         })();
-        let _ = tx.send(result);
+        match result {
+            Ok(Some(reader)) => {
+                let mut tx = Some(tx);
+                reader.evaluate_javascript(EXTRACT_SEGMENTS_JS, None, None, None::<&webkit2gtk::gio::Cancellable>, move |eval_res| {
+                    let payload = match eval_res {
+                        Ok(val) => serde_json::from_str::<serde_json::Value>(&val.to_str())
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    if let Some(sender) = tx.take() {
+                        let _ = sender.send(payload);
+                    }
+                });
+            }
+            Ok(None) => { let _ = tx.send(Ok(serde_json::Value::Null)); }
+            Err(e) => { let _ = tx.send(Err(e)); }
+        }
     }).map_err(|e| e.to_string())?;
     rx.await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn web_reader(app: AppHandle, webview: Webview, action: String, site: Option<String>, url: Option<String>, x: Option<f64>, y: Option<f64>, width: Option<f64>, height: Option<f64>) -> Result<(), String> {
+pub async fn web_reader(
+    app: AppHandle,
+    webview: Webview,
+    action: String,
+    site: Option<String>,
+    url: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    translations: Option<Vec<WebTranslationEntry>>,
+) -> Result<serde_json::Value, String> {
     if webview.label() != "main" { return Err("Only the main app can control the reader".into()); }
-    if !matches!(action.as_str(), "show" | "hide" | "back" | "reload") { return Err("Unknown reader action".into()); }
+    if !matches!(action.as_str(), "show" | "hide" | "back" | "reload" | "extract_segments" | "apply_translations") {
+        return Err("Unknown reader action".into());
+    }
     let site = ReaderSite::parse(site.as_deref().unwrap_or("linuxdo"))?;
     let target = url.map(|value| tauri::Url::parse(&value).map_err(|e| e.to_string())).transpose()?;
     if target.as_ref().is_some_and(|url| !site.allows(url)) { return Err("URL is outside the selected community".into()); }
@@ -144,26 +236,36 @@ pub async fn web_reader(app: AppHandle, webview: Webview, action: String, site: 
     }
     let profile = app.path().app_data_dir().map_err(|e| e.to_string())?.join(site.label());
     #[cfg(target_os = "linux")]
-    return linux_reader(&webview, profile, site, action, target, bounds).await;
+    return linux_reader(&webview, profile, site, action, target, bounds, translations).await;
     #[cfg(not(target_os = "linux"))]
     {
         if let Some(reader) = app.get_webview(site.label()) {
-            return match action.as_str() {
-                "hide" => reader.hide(), "reload" => reader.reload(), "back" => reader.eval("history.back()"),
+            match action.as_str() {
+                "hide" => reader.hide(),
+                "reload" => reader.reload(),
+                "back" => reader.eval("history.back()"),
+                "extract_segments" => return Ok(serde_json::json!({ "title": "", "segments": [] })),
+                "apply_translations" => {
+                    if let Some(entries) = translations.as_deref() {
+                        reader.eval(&apply_translations_js(entries)).map_err(|e| e.to_string())?;
+                    }
+                    return Ok(serde_json::Value::Null);
+                }
                 _ => {
                     if let Some(url) = target { reader.navigate(url).map_err(|e| e.to_string())?; }
                     reader.set_position(LogicalPosition::new(bounds[0], bounds[1])).map_err(|e| e.to_string())?;
                     reader.set_size(LogicalSize::new(bounds[2], bounds[3])).map_err(|e| e.to_string())?;
                     reader.show()
                 }
-            }.map_err(|e| e.to_string());
+            }.map_err(|e| e.to_string())?;
+            return Ok(serde_json::Value::Null);
         }
-        if action != "show" { return Ok(()); }
+        if action != "show" { return Ok(serde_json::Value::Null); }
         let window = app.get_window("main").ok_or("Main window unavailable")?;
         let builder = WebviewBuilder::new(site.label(), WebviewUrl::External(target.unwrap_or_else(|| site.home().parse().unwrap())))
             .data_directory(profile).on_navigation(move |url| allowed_navigation(site, url));
         window.add_child(builder, LogicalPosition::new(bounds[0], bounds[1]), LogicalSize::new(bounds[2], bounds[3])).map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(serde_json::Value::Null)
     }
 }
 

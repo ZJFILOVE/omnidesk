@@ -12,15 +12,23 @@ import time
 from omnidesk_sdk import CapabilityResult
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
-_AGY_MODEL_LINE_RE = re.compile(r'^([a-zA-Z0-9._:-]+)\s{2,}(.+)$')
+_AGY_MODEL_LINE_RE = re.compile(r'^([a-zA-Z0-9._:/-]+)(?:\t+|\s{2,})(.+)$')
 _AGY_MODELS_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
 
 def binary(backend, configured=""):
     if configured:
-        return shutil.which(configured)
-    return shutil.which(backend) or next((str(path) for path in (
-        Path.home() / '.local/bin' / backend, Path.home() / '.local/npm/bin' / backend,
+        found = shutil.which(configured)
+        if found or '/' in configured or '\\' in configured:
+            return found
+        target = configured
+    else:
+        found = shutil.which(backend)
+        if found:
+            return found
+        target = backend
+    return next((str(path) for path in (
+        Path.home() / '.local/bin' / target, Path.home() / '.local/npm/bin' / target,
     ) if path.is_file() and os.access(path, os.X_OK)), None)
 
 

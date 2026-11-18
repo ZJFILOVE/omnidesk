@@ -19,6 +19,17 @@ export function triggerActiveTranslation(): boolean {
   return false;
 }
 
+export function useTranslationTrigger(trigger: () => boolean, active = true): void {
+  const ref = useRef(trigger);
+  ref.current = trigger;
+  useEffect(() => {
+    if (!active) return;
+    const fn = () => ref.current();
+    activeTriggers.add(fn);
+    return () => { activeTriggers.delete(fn); };
+  }, [active]);
+}
+
 export function TranslationButton({ request, label = '翻译', disabled = false }: { request: TranslationRequest; label?: string; disabled?: boolean }) {
   const open = useContext(TranslationContext);
   const canTranslate = !disabled && Boolean(open) && request.segments.some(segment => segment.text.trim());

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { getTauriGlobal } from '../api';
 import { ExternalLink } from './ExternalLink';
+import { TranslationContext, useTranslationTrigger } from './TranslationContext';
 import { COMMUNITY_SITES, type CommunityNavigation, type CommunitySite } from '../utils/communityLinks';
 
 export function EmbeddedWebReader({ active, site = 'linuxdo', navigation }: { active: boolean; site?: CommunitySite; navigation?: CommunityNavigation }) {
@@ -11,6 +12,29 @@ export function EmbeddedWebReader({ active, site = 'linuxdo', navigation }: { ac
   const [opening, setOpening] = useState(false);
   const community = COMMUNITY_SITES[site];
   const invoke = getTauriGlobal()?.core?.invoke;
+  const openTranslation = useContext(TranslationContext);
+  const translatePage = useCallback(async () => {
+    if (!invoke || !openTranslation) return;
+    try {
+      const extracted = await invoke('web_reader', { action: 'extract_segments', site }) as { title?: string; segments?: Array<{ id: string; text: string }> } | null;
+      const segments = Array.isArray(extracted?.segments) ? extracted.segments : [];
+      openTranslation({
+        title: extracted?.title?.trim() || `${community.title} · 内嵌网页`,
+        segments,
+        autoStart: segments.length > 0,
+        onTranslated: (results) => {
+          void invoke('web_reader', { action: 'apply_translations', site, translations: results }).catch((err) => setError(String(err)));
+        },
+      });
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [community.title, invoke, openTranslation, site]);
+  useTranslationTrigger(() => {
+    if (!invoke || !openTranslation || !active) return false;
+    void translatePage();
+    return true;
+  }, active && Boolean(invoke) && Boolean(openTranslation));
   useEffect(() => {
     const node = viewport.current;
     if (!node || !invoke) return;
@@ -48,6 +72,7 @@ export function EmbeddedWebReader({ active, site = 'linuxdo', navigation }: { ac
     <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border-subtle)] px-6 py-2 text-[14px] text-[var(--text-muted)]">
       <button type="button" disabled={!invoke || !active} className="min-h-11 rounded px-3 hover:bg-[var(--hover-fill)]" onClick={() => void invoke?.('web_reader', { action: 'back', site }).catch((err) => setError(String(err)))}>网页后退</button>
       <button type="button" disabled={!invoke || !active} className="min-h-11 rounded px-3 hover:bg-[var(--hover-fill)]" onClick={() => void invoke?.('web_reader', { action: 'reload', site }).catch((err) => setError(String(err)))}>刷新网页</button>
+      {openTranslation ? <button type="button" disabled={!invoke || !active} className="min-h-11 rounded px-3 hover:bg-[var(--hover-fill)]" onClick={() => void translatePage()}>翻译网页</button> : null}
       <span>{community.title} · 内嵌网页</span>
       <span role="status" className="inline-block h-5 w-20 shrink-0 whitespace-nowrap">{opening ? '正在打开…' : ''}</span>
       <ExternalLink href={navigation?.url ?? community.home} externalOnly className="underline">在 Chrome 打开原链接</ExternalLink>

@@ -1,9 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { getTauriGlobal } from '../../api';
 import { TranslationButton } from '../../components/TranslationContext';
 import { MediaCover } from '../../components/MediaCover';
 import {
   Disc3,
   Film,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   Radio,
@@ -100,6 +103,29 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
     viewport.scrollTo?.({ top: Math.max(0, top), behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }, [item.id, item.lyrics, activeLyricIndex, lyricsLoading]);
   const [translations, setTranslations] = useState<Record<string, Record<string, string>>>({});
+  const [videoFullscreen, setVideoFullscreen] = useState(false);
+  const toggleVideoFullscreen = () => {
+    setVideoFullscreen((prev) => {
+      const next = !prev;
+      const invoke = getTauriGlobal()?.core?.invoke;
+      if (invoke) void invoke('player_fullscreen').catch(() => {});
+      return next;
+    });
+  };
+  useEffect(() => {
+    if (!videoFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setVideoFullscreen(false);
+        const invoke = getTauriGlobal()?.core?.invoke;
+        if (invoke) void invoke('player_fullscreen').catch(() => {});
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [videoFullscreen]);
   const totalSec =
     durationSec && Number.isFinite(durationSec) && durationSec > 0
       ? durationSec
@@ -182,12 +208,21 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
         </div>
       ) : (
         <div
-          className="relative overflow-hidden rounded-[20px] text-white"
-          style={{
-            aspectRatio: '16 / 9',
-            background: videoSurface ? '#08090b' : item.thumbGradient,
-            boxShadow: 'var(--shadow-soft)',
-          }}
+          onDoubleClick={toggleVideoFullscreen}
+          className={
+            videoFullscreen
+              ? 'fixed inset-0 z-[70] flex flex-col overflow-hidden bg-black text-white'
+              : 'relative overflow-hidden rounded-[20px] text-white'
+          }
+          style={
+            videoFullscreen
+              ? undefined
+              : {
+                  aspectRatio: '16 / 9',
+                  background: videoSurface ? '#08090b' : item.thumbGradient,
+                  boxShadow: 'var(--shadow-soft)',
+                }
+          }
         >
           {videoSurface ? (
             <div className="absolute inset-0 overflow-hidden bg-black">{videoSurface}</div>
@@ -226,19 +261,65 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   <span className="rounded-full bg-white/92 px-3 py-0.5 font-mono text-[13.5px] font-semibold text-black">
                     {playing ? 'PLAYING' : 'PAUSED'}
                   </span>
+                  <button
+                    type="button"
+                    onClick={toggleVideoFullscreen}
+                    aria-label={videoFullscreen ? '退出全屏' : '全屏播放'}
+                    className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-black/55 px-2.5 py-1 text-[12.5px] text-white hover:bg-black/80"
+                  >
+                    {videoFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                    <span>{videoFullscreen ? '退出全屏' : '全屏'}</span>
+                  </button>
                 </div>
               </div>
             </div>
 
-            <div className="max-w-2xl">
-              <div className="text-[14.5px] font-medium text-white/85">
-                {item.creator} · {item.verificationLabel ?? item.sourceId}
+            {videoFullscreen ? (
+              <div className="flex items-center gap-3 rounded-xl bg-black/65 px-4 py-2.5 backdrop-blur-xs">
+                <button
+                  type="button"
+                  onClick={onTogglePlay}
+                  aria-label={playing ? '暂停播放' : '开始播放'}
+                  className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[var(--domain-media)] px-3 py-1.5 text-sm font-semibold text-white"
+                >
+                  {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                  <span>{playing ? '暂停' : '播放'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSeek(Math.max(0, currentSec - 15))}
+                  className="cursor-pointer rounded-lg bg-white/15 px-2.5 py-1.5 font-mono text-xs hover:bg-white/25"
+                >
+                  -15s
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={totalSec}
+                  value={currentSec}
+                  onChange={(e) => onSeek(Number(e.target.value))}
+                  aria-label="全屏播放时间轴"
+                  className="flex-1 cursor-pointer accent-[var(--domain-media)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => onSeek(Math.min(totalSec, currentSec + 15))}
+                  className="cursor-pointer rounded-lg bg-white/15 px-2.5 py-1.5 font-mono text-xs hover:bg-white/25"
+                >
+                  +15s
+                </button>
               </div>
-              <h2 className="mt-1 line-clamp-2 text-[23px] leading-snug font-bold tracking-tight">
-                {item.title}
-              </h2>
-              <p className="mt-1 line-clamp-1 text-[15.5px] text-white/85">{item.subtitle}</p>
-            </div>
+            ) : (
+              <div className="max-w-2xl">
+                <div className="text-[14.5px] font-medium text-white/85">
+                  {item.creator} · {item.verificationLabel ?? item.sourceId}
+                </div>
+                <h2 className="mt-1 line-clamp-2 text-[23px] leading-snug font-bold tracking-tight">
+                  {item.title}
+                </h2>
+                <p className="mt-1 line-clamp-1 text-[15.5px] text-white/85">{item.subtitle}</p>
+              </div>
+            )}
           </div>
 
           <div className="absolute right-0 bottom-0 left-0 h-1 bg-black/30">

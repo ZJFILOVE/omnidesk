@@ -482,7 +482,7 @@ class ControlServer:
             return self._socket_path
         self._stop_event.clear()
         self._prepare_socket_path()
-        self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._socket_path))
+        self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._socket_path), backlog=256)
         os.chmod(self._socket_path, 0o600)
         return self._socket_path
 
