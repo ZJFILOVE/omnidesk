@@ -304,36 +304,15 @@ describe('MediaWorkbench real mpv integration', () => {
     });
   });
 
-  it('switches to the embedded libmpv canvas when the render API is available', async () => {
+  it('prefers native hardware-decoded mpv playback instead of software JPEG canvas by default', async () => {
     const handlers = new Map<string, (event: TauriEvent<unknown>) => void>();
     const invoke = vi.fn(async (cmd: string, payload?: { args?: Record<string, unknown> }) => {
       if (cmd === 'call') return mediaSourceResponse(payload?.args);
       if (cmd === 'mpv_status') {
         return { ok: true, provider_plugin_id: 'mpv', data: stoppedState, error: '' };
       }
-      if (cmd === 'mpv_embed_probe') {
-        return {
-          ok: true,
-          provider_plugin_id: 'libmpv',
-          data: {
-            available: true,
-            backend: 'libmpv-sw',
-            apiVersion: '2.5',
-            detail: 'libmpv 2.5 software-render API ready',
-          },
-          error: '',
-        };
-      }
-      if (cmd === 'mpv_embed_enable') {
-        return { ok: true, provider_plugin_id: 'libmpv', data: playingState, error: '' };
-      }
-      if (cmd === 'mpv_embed_set_viewport') {
-        return {
-          ok: true,
-          provider_plugin_id: 'libmpv',
-          data: { width: 960, height: 540, fps: 24 },
-          error: '',
-        };
+      if (cmd === 'mpv_open') {
+        return { ok: true, provider_plugin_id: 'mpv', data: playingState, error: '' };
       }
       return { ok: true, data: {}, error: '' };
     });
@@ -356,16 +335,22 @@ describe('MediaWorkbench real mpv integration', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '播放 Attention Is All You Need' }));
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('mpv_embed_enable');
-      expect(screen.getByTestId('mpv-canvas')).not.toBeNull();
-      expect(screen.getByText('LIBMPV')).not.toBeNull();
+      expect(invoke).toHaveBeenCalledWith(
+        'mpv_open',
+        expect.objectContaining({
+          args: expect.objectContaining({ hwdec: true }),
+        }),
+      );
+      expect(screen.getByText('MPV')).not.toBeNull();
     });
-    expect(handlers.has(MPV_FRAME_CHANNEL)).toBe(true);
+    expect(invoke).not.toHaveBeenCalledWith('mpv_embed_enable');
+    expect(screen.queryByTestId('mpv-canvas')).toBeNull();
+    expect(handlers.has(MPV_FRAME_CHANNEL)).toBe(false);
 
     expect(screen.queryByTestId('mpv-stats-overlay')).toBeNull();
     fireEvent.keyDown(window, { key: 'F3', ctrlKey: true });
     const overlay = await screen.findByTestId('mpv-stats-overlay');
-    expect(overlay.textContent).toContain('Playback Stats (libmpv)');
+    expect(overlay.textContent).toContain('Playback Stats (mpv)');
     expect(overlay.textContent).toContain('vaapi');
     fireEvent.keyDown(window, { key: 'F3', ctrlKey: true });
     expect(screen.queryByTestId('mpv-stats-overlay')).toBeNull();

@@ -291,12 +291,6 @@ export function useMpvPlayback(options: { enabled?: boolean } = {}): MpvPlayback
     return embedAttemptRef.current;
   }, [applyState, enabled]);
 
-  useEffect(() => {
-    if (enabled) {
-      void ensureEmbedded();
-    }
-  }, [enabled, ensureEmbedded]);
-
   const run = useCallback(
     async (
       operation: () => Promise<RpcResult<MpvPlaybackState>>,
@@ -337,7 +331,6 @@ export function useMpvPlayback(options: { enabled?: boolean } = {}): MpvPlayback
       if (!enabled) {
         return { ok: false, message: '离线预览：当前没有连接 Tauri/mpv' };
       }
-      await ensureEmbedded();
       const hasQualityOverride =
         options !== undefined && Object.prototype.hasOwnProperty.call(options, 'quality');
       const remembered = qualityRef.current;
@@ -382,7 +375,7 @@ export function useMpvPlayback(options: { enabled?: boolean } = {}): MpvPlayback
           }`,
       );
     },
-    [enabled, ensureEmbedded, run],
+    [enabled, run],
   );
 
   const toggle = useCallback(
@@ -432,7 +425,7 @@ export function useMpvPlayback(options: { enabled?: boolean } = {}): MpvPlayback
         (next) => `mpv 音量 ${next.volume}%`,
       );
     },
-    [enabled, ensureEmbedded, run],
+    [enabled, run],
   );
 
   const setSpeed = useCallback(
@@ -447,7 +440,7 @@ export function useMpvPlayback(options: { enabled?: boolean } = {}): MpvPlayback
         (next) => `mpv 播放速度 ${formatSpeed(next.speed)}`,
       );
     },
-    [enabled, ensureEmbedded, run],
+    [enabled, run],
   );
 
   const setQueue = useCallback((items: MediaItem[]) => {
